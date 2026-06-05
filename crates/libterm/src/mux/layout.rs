@@ -43,6 +43,44 @@ impl PaneLayout {
         }
     }
 
+    /// Pixel x-positions of all vertical (HSplit) handles inside the given rect.
+    pub fn split_handle_xs(&self, x: f32, _y: f32, w: f32, _h: f32) -> Vec<f32> {
+        match self {
+            Self::Leaf { .. } => vec![],
+            Self::HSplit { left, right, ratio, .. } => {
+                let split_x = x + w * ratio;
+                let mut xs = vec![split_x];
+                xs.extend(left.split_handle_xs(x, _y, w * ratio, _h));
+                xs.extend(right.split_handle_xs(split_x, _y, w * (1.0 - ratio), _h));
+                xs
+            }
+            Self::VSplit { top, bottom, ratio, .. } => {
+                let mut xs = top.split_handle_xs(x, _y, w, _h * ratio);
+                xs.extend(bottom.split_handle_xs(x, _y + _h * ratio, w, _h * (1.0 - ratio)));
+                xs
+            }
+        }
+    }
+
+    /// Update the ratio of the HSplit whose handle is nearest to `handle_x`.
+    /// `new_ratio` = (new_split_x - x) / w, caller must clamp.
+    pub fn set_nearest_hsplit_ratio(&mut self, handle_x: f32, x: f32, w: f32, new_ratio: f32) {
+        match self {
+            Self::HSplit { left: _, right: _, ratio, .. } => {
+                let split_x = x + w * *ratio;
+                if (split_x - handle_x).abs() < 4.0 {
+                    *ratio = new_ratio.clamp(0.1, 0.9);
+                }
+            }
+            Self::VSplit { top, bottom, ratio, .. } => {
+                let th = w * *ratio; // repurpose field — actually VSplit uses h
+                top.set_nearest_hsplit_ratio(handle_x, x, th, new_ratio);
+                bottom.set_nearest_hsplit_ratio(handle_x, x, w - th, new_ratio);
+            }
+            Self::Leaf { .. } => {}
+        }
+    }
+
     /// Compute pixel-space rects for every leaf given a root rect.
     pub fn rects(&self, x: f32, y: f32, w: f32, h: f32) -> Vec<(Uuid, f32, f32, f32, f32)> {
         match self {

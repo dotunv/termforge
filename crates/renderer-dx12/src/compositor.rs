@@ -14,6 +14,7 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
 use crate::context::Dx12Context;
 use crate::glyph_atlas::GlyphAtlas;
 use crate::pipeline::{CellVertex, RenderPipeline};
+use crate::ui_renderer::{self, UiCommand};
 
 /// Max cells per pane (generous upper bound — reallocated if exceeded).
 const MAX_CELLS_PER_PANE: usize = 300 * 100;
@@ -27,9 +28,10 @@ struct PaneBuffer {
 
 pub struct Compositor {
     ctx: Dx12Context,
-    atlas: GlyphAtlas,
+    pub atlas: GlyphAtlas,
     pipeline: RenderPipeline,
     pane_buffers: Vec<PaneBuffer>,
+    chrome_buffer: Option<PaneBuffer>,
     /// RGBA (0..1) background fill colour.
     clear_color: [f32; 4],
 }
@@ -88,18 +90,39 @@ impl Compositor {
             atlas,
             pipeline,
             pane_buffers: Vec::new(),
+            chrome_buffer: None,
             clear_color,
         })
     }
 
-    /// Render all visible sessions according to `layout`.
-    /// `window_w` and `window_h` are the current client-area dimensions.
+    /// Cell dimensions from the glyph atlas (pixel size of one character).
+    pub fn cell_size(&self) -> (u32, u32) {
+        (self.atlas.cell_w, self.atlas.cell_h)
+    }
+
+    /// Render chrome UI commands + all visible sessions.
+    /// `chrome_cmds` are drawn first (tab bar, sidebar, status bar).
+    /// `pane_rect` is the pixel rect inside which terminal panes are drawn.
     pub fn render_frame(
         &mut self,
         sessions: &[Session],
         layout: &PaneLayout,
         window_w: u32,
         window_h: u32,
+    ) -> Result<()> {
+        self.render_frame_with_chrome(sessions, layout, &[], window_w, window_h, None)
+    }
+
+    /// `content_rect` = pixel area (x,y,w,h) reserved for terminal panes.
+    /// If `None`, the full window is used.
+    pub fn render_frame_with_chrome(
+        &mut self,
+        sessions: &[Session],
+        layout: &PaneLayout,
+        chrome_cmds: &[UiCommand],
+        window_w: u32,
+        window_h: u32,
+        content_rect: Option<(f32, f32, f32, f32)>,
     ) -> Result<()> {
         unsafe {
             let rtv = self.ctx.begin_frame()?;
@@ -132,8 +155,38 @@ impl Compositor {
             let vp = [window_w as f32, window_h as f32];
             cl.SetGraphicsRoot32BitConstants(0, 2, vp.as_ptr() as *const _, 0);
 
+            // ── Chrome draw call (tab bar, sidebar, status bar) ───────────────
+            if !chrome_cmds.is_empty() {
+                let chrome_verts = ui_renderer::build_quads(chrome_cmds, &self.atlas);
+                if !chrome_verts.is_empty() {
+                    let needed = chrome_verts.len();
+                    if self.chrome_buffer.as_ref().map_or(true, |b| b.capacity < needed) {
+                        self.chrome_buffer = Some(
+                            allocate_vertex_buffer(&self.ctx.device, needed * 2)?
+                        );
+                    }
+                    let buf = self.chrome_buffer.as_mut().unwrap();
+                    let byte_size = chrome_verts.len() * std::mem::size_of::<CellVertex>();
+                    let mut ptr = std::ptr::null_mut();
+                    buf.vb.Map(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }), Some(&mut ptr))
+                        .context("Map chrome buffer")?;
+                    std::ptr::copy_nonoverlapping(chrome_verts.as_ptr(), ptr as *mut CellVertex, chrome_verts.len());
+                    buf.vb.Unmap(0, None);
+
+                    let vbv = D3D12_VERTEX_BUFFER_VIEW {
+                        BufferLocation: buf.vb.GetGPUVirtualAddress(),
+                        SizeInBytes: byte_size as u32,
+                        StrideInBytes: std::mem::size_of::<CellVertex>() as u32,
+                    };
+                    cl.IASetVertexBuffers(0, Some(&[vbv]));
+                    cl.DrawInstanced(chrome_verts.len() as u32, 1, 0, 0);
+                }
+            }
+
             // Walk the pane layout tree and draw each pane.
-            let pane_rects = layout.rects(0.0, 0.0, window_w as f32, window_h as f32);
+            let (cx, cy, cw, ch) = content_rect
+                .unwrap_or((0.0, 0.0, window_w as f32, window_h as f32));
+            let pane_rects = layout.rects(cx, cy, cw, ch);
             self.pane_buffers.resize_with(pane_rects.len(), || {
                 allocate_vertex_buffer(&self.ctx.device, MAX_CELLS_PER_PANE * VERTS_PER_CELL)
                     .expect("allocate vertex buffer")

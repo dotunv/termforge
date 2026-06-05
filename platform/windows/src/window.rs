@@ -13,6 +13,10 @@ pub enum WindowEvent {
     Char(u16),
     KeyDown { vk: u32, ctrl: bool },
     Resize { width: u32, height: u32 },
+    /// Raw mouse position in client coordinates.
+    MouseMove { x: i32, y: i32 },
+    LButtonDown { x: i32, y: i32 },
+    LButtonUp,
     Close,
 }
 
@@ -21,7 +25,6 @@ pub struct Window {
     pub hwnd: HWND,
 }
 
-/// Shared state stored in GWLP_USERDATA so the WndProc can access it.
 struct WindowState {
     tx: mpsc::SyncSender<WindowEvent>,
 }
@@ -52,9 +55,7 @@ impl Window {
 
             RegisterClassExW(&wc);
 
-            // Box the state so the raw pointer stays valid.
             let state = Box::new(WindowState { tx: event_tx });
-
             let title_wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
 
             let hwnd = CreateWindowExW(
@@ -73,17 +74,11 @@ impl Window {
             ).context("CreateWindowExW")?;
 
             let _ = ShowWindow(hwnd, SW_SHOW);
-            // UpdateWindow is not needed — ShowWindow triggers WM_PAINT.
-
             Ok(Self { hwnd })
         }
     }
 }
 
-/// Win32 window procedure — runs on the main thread.
-///
-/// SAFETY: `GWLP_USERDATA` holds a raw pointer to `WindowState` which lives
-/// for the duration of the window. We never alias it mutably.
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -92,14 +87,12 @@ unsafe extern "system" fn wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_NCCREATE => {
-            // Store the WindowState pointer passed via CreateWindowExW lpParam.
             let create_struct = &*(lparam.0 as *const CREATESTRUCTW);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, create_struct.lpCreateParams as isize);
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
 
         WM_DESTROY => {
-            // Reclaim and drop the WindowState.
             let ptr = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             if ptr != 0 {
                 drop(Box::from_raw(ptr as *mut WindowState));
@@ -115,7 +108,7 @@ unsafe extern "system" fn wnd_proc(
         }
 
         WM_SIZE => {
-            let width = (lparam.0 & 0xFFFF) as u32;
+            let width  = (lparam.0 & 0xFFFF) as u32;
             let height = ((lparam.0 >> 16) & 0xFFFF) as u32;
             if width > 0 && height > 0 {
                 send_event(hwnd, WindowEvent::Resize { width, height });
@@ -129,9 +122,31 @@ unsafe extern "system" fn wnd_proc(
         }
 
         WM_KEYDOWN => {
-            let vk = wparam.0 as u32;
-            let ctrl = GetKeyState(0x11 /* VK_CONTROL */) as i16 & (0x8000u16 as i16) != 0;
+            let vk   = wparam.0 as u32;
+            let ctrl = GetKeyState(0x11) as i16 & (0x8000u16 as i16) != 0;
             send_event(hwnd, WindowEvent::KeyDown { vk, ctrl });
+            LRESULT(0)
+        }
+
+        WM_MOUSEMOVE => {
+            let x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            send_event(hwnd, WindowEvent::MouseMove { x, y });
+            LRESULT(0)
+        }
+
+        WM_LBUTTONDOWN => {
+            let x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            // Capture mouse so we continue receiving events during drag.
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(hwnd);
+            send_event(hwnd, WindowEvent::LButtonDown { x, y });
+            LRESULT(0)
+        }
+
+        WM_LBUTTONUP => {
+            windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture().ok();
+            send_event(hwnd, WindowEvent::LButtonUp);
             LRESULT(0)
         }
 
@@ -139,12 +154,9 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
-/// Send a `WindowEvent` to the main loop. Silently drops if the channel is full.
 unsafe fn send_event(hwnd: HWND, event: WindowEvent) {
     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-    if ptr == 0 {
-        return;
-    }
+    if ptr == 0 { return; }
     let state = &*(ptr as *const WindowState);
     let _ = state.tx.try_send(event);
 }
