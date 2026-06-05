@@ -13,7 +13,9 @@ pub const FRAME_COUNT: usize = 2;
 
 /// All DX12 per-frame state for one swap chain.
 struct FrameResources {
-    render_target: ID3D12Resource,
+    /// `None` only during the window between releasing buffers and recreating
+    /// them in `resize()`.  Always `Some` during normal rendering.
+    render_target: Option<ID3D12Resource>,
     cmd_allocator: ID3D12CommandAllocator,
     fence_value: u64,
 }
@@ -129,7 +131,7 @@ impl Dx12Context {
                     .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
                     .unwrap();
 
-                FrameResources { render_target, cmd_allocator, fence_value: 0 }
+                FrameResources { render_target: Some(render_target), cmd_allocator, fence_value: 0 }
             });
 
             // ── Command list (starts closed — caller must Reset before use) ──
@@ -193,7 +195,7 @@ impl Dx12Context {
 
             // Transition back buffer: PRESENT → RENDER_TARGET
             let barrier = transition_barrier(
-                &self.frames[self.frame_index].render_target,
+                self.frames[self.frame_index].render_target.as_ref().unwrap(),
                 D3D12_RESOURCE_STATE_PRESENT,
                 D3D12_RESOURCE_STATE_RENDER_TARGET,
             );
@@ -212,7 +214,7 @@ impl Dx12Context {
         unsafe {
             // Transition: RENDER_TARGET → PRESENT
             let barrier = transition_barrier(
-                &self.frames[self.frame_index].render_target,
+                self.frames[self.frame_index].render_target.as_ref().unwrap(),
                 D3D12_RESOURCE_STATE_RENDER_TARGET,
                 D3D12_RESOURCE_STATE_PRESENT,
             );
@@ -245,11 +247,11 @@ impl Dx12Context {
             // Wait for GPU idle before releasing resources.
             self.flush_gpu()?;
 
-            // Release all render targets before resizing.
+            // CRITICAL: set each slot to None so the COM ref-count drops to zero
+            // before ResizeBuffers is called.  Any live ID3D12Resource reference
+            // to a swap-chain buffer causes DXGI_ERROR_INVALID_CALL (0x887A0001).
             for frame in &mut self.frames {
-                // Drop the old resource — replace with a default that we overwrite.
-                // We use ManuallyDrop semantics by just overwriting after resize.
-                let _ = &frame.render_target;
+                frame.render_target = None;
             }
 
             self.swap_chain.ResizeBuffers(
@@ -262,10 +264,10 @@ impl Dx12Context {
 
             let rtv_base = self.rtv_heap.GetCPUDescriptorHandleForHeapStart();
             for (i, frame) in self.frames.iter_mut().enumerate() {
-                frame.render_target = self.swap_chain.GetBuffer(i as u32)
-                    .context("GetBuffer after resize")?;
+                frame.render_target = Some(self.swap_chain.GetBuffer(i as u32)
+                    .context("GetBuffer after resize")?);
                 self.device.CreateRenderTargetView(
-                    &frame.render_target,
+                    frame.render_target.as_ref().unwrap(),
                     None,
                     D3D12_CPU_DESCRIPTOR_HANDLE {
                         ptr: rtv_base.ptr + i * self.rtv_stride as usize,
