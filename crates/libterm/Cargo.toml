@@ -7,6 +7,8 @@ authors.workspace = true
 [dependencies]
 tokio.workspace = true
 vte.workspace = true
+russh.workspace = true
+russh-keys.workspace = true
 serde.workspace = true
 toml.workspace = true
 uuid.workspace = true
@@ -14,17 +16,10 @@ thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 bytes.workspace = true
-
-# SSH — optional for Phase 1, gated to avoid compile errors on missing deps
-russh = { workspace = true, optional = true }
-russh-keys = { workspace = true, optional = true }
+async-trait.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
-
-[features]
-default = []
-ssh = ["russh", "russh-keys"]

@@ -1,8 +1,8 @@
-//! TermForge — Phase 3 entry point.
+//! TermForge — Phase 4 entry point.
 //!
-//! Manages multiple ConPTY sessions, routes keyboard input to the active
-//! session, renders chrome (tab bar, sidebar, status bar) + terminal panes
-//! via the DX12 compositor, and handles pane split drag-to-resize.
+//! Supports multiple local (ConPTY) and remote (SSH) sessions, a full DX12
+//! chrome render pass, collapsible sidebar, split-pane drag, and the SSH
+//! manager modal (Ctrl+H).
 
 mod input;
 mod ui;
@@ -15,13 +15,16 @@ use libterm::{
     block::detector::BlockDetector,
     mux::{layout::PaneLayout, session::{Session, SessionKind}},
     pty::{conpty::ConPty, Pty},
+    ssh::{client::{SshAuth, SshClient}, host_store::HostStore},
     vt::VtParser,
 };
 use renderer_dx12::{compositor::Compositor, context::Dx12Context};
 use tokio::sync::mpsc::UnboundedReceiver;
-use ui::chrome::{self, ChromeLayout, ChromeState, SPLIT_HANDLE_W};
+use ui::{
+    chrome::{self, ChromeLayout, ChromeState, SPLIT_HANDLE_W},
+    ssh_manager::{generate_ssh_manager_commands, SshManagerState},
+};
 use window::{Window, WindowEvent};
-
 use input::{char_to_pty_bytes, vk_to_pty_bytes};
 
 const INIT_W: u32 = 1280;
@@ -32,27 +35,48 @@ const INIT_H: u32 = 768;
 struct Entry {
     session:   Session,
     vt_parser: VtParser,
-    pty:       ConPty,
+    pty:       Box<dyn Pty + Send>,
     pty_rx:    UnboundedReceiver<Vec<u8>>,
 }
 
 impl Entry {
-    fn spawn(kind: SessionKind, shell: &str) -> Result<Self> {
-        let cols: u16 = 220;
-        let rows: u16 = 50;
-        let session_id = uuid::Uuid::new_v4();
-        let session    = Session::new(kind, cols, rows);
-        let detector   = BlockDetector::new(session_id);
-        let vt_parser  = VtParser::new(cols, rows, detector);
-
-        let (pty_tx, pty_rx) = tokio::sync::mpsc::unbounded_channel();
-        let pty = ConPty::spawn(shell, cols, rows, pty_tx)?;
-
-        Ok(Self { session, vt_parser, pty, pty_rx })
+    /// Spawn a local ConPTY session.
+    fn spawn_local(shell: &str) -> Result<Self> {
+        let (cols, rows) = (220u16, 50u16);
+        let sid          = uuid::Uuid::new_v4();
+        let session      = Session::new(SessionKind::Local, cols, rows);
+        let detector     = BlockDetector::new(sid);
+        let vt_parser    = VtParser::new(cols, rows, detector);
+        let (tx, rx)     = tokio::sync::mpsc::unbounded_channel();
+        let pty          = ConPty::spawn(shell, cols, rows, tx)?;
+        Ok(Self { session, vt_parser, pty: Box::new(pty), pty_rx: rx })
     }
 
-    /// Drain all pending PTY output into the VT parser.  Returns true if
-    /// anything was processed (session needs re-render).
+    /// Connect an SSH session.
+    async fn spawn_ssh(
+        hostname: String,
+        port: u16,
+        username: String,
+        auth: SshAuth,
+    ) -> Result<Self> {
+        let (cols, rows) = (220u16, 50u16);
+        let title        = format!("{username}@{hostname}");
+        let sid          = uuid::Uuid::new_v4();
+        let kind         = SessionKind::Ssh {
+            host: hostname.clone(),
+            user: username.clone(),
+        };
+        let mut session  = Session::new(kind, cols, rows);
+        session.title    = title;
+        let detector     = BlockDetector::new(sid);
+        let vt_parser    = VtParser::new(cols, rows, detector);
+        let (tx, rx)     = tokio::sync::mpsc::unbounded_channel();
+        let pty          = SshClient::connect(
+            &hostname, port, &username, auth, cols, rows, tx,
+        ).await?;
+        Ok(Self { session, vt_parser, pty: Box::new(pty), pty_rx: rx })
+    }
+
     fn drain_pty(&mut self) -> bool {
         let mut dirty = false;
         while let Ok(bytes) = self.pty_rx.try_recv() {
@@ -66,23 +90,18 @@ impl Entry {
         dirty
     }
 
-    /// Resize PTY to match the current pane pixel dimensions + cell size.
-    fn resize_pty(&mut self, pane_w: f32, pane_h: f32, cell_w: u32, cell_h: u32) {
-        let new_cols = ((pane_w / cell_w as f32) as u16).max(10);
-        let new_rows = ((pane_h / cell_h as f32) as u16).max(3);
+    fn resize_pty(&mut self, pane_w: f32, pane_h: f32, cw: u32, ch: u32) {
+        let new_cols = ((pane_w / cw as f32) as u16).max(10);
+        let new_rows = ((pane_h / ch as f32) as u16).max(3);
         let _ = self.pty.resize(new_cols, new_rows);
     }
 }
 
-// ── Split-drag state ──────────────────────────────────────────────────────────
+// ── Split drag state ──────────────────────────────────────────────────────────
 
 struct DragState {
-    /// Pixel x of the handle when the drag began.
     origin_x:    f32,
-    /// Ratio at drag start.
     start_ratio: f32,
-    /// Content area x + w captured at drag start (to normalise mouse delta).
-    content_x:   f32,
     content_w:   f32,
 }
 
@@ -92,54 +111,71 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+    tracing::info!("TermForge starting — Phase 4 (SSH + multi-session)");
 
-    tracing::info!("TermForge starting — Phase 3 (chrome + multi-session)");
-
-    // Tokio runtime for UnboundedReceiver::try_recv on the main thread.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let _guard = rt.enter();
 
-    // ── Window ───────────────────────────────────────────────────────────────
+    // ── Window & compositor ────────────────────────────────────────────────
     let (event_tx, event_rx) = mpsc::sync_channel::<WindowEvent>(512);
-    let window = Window::new("TermForge", INIT_W, INIT_H, event_tx)?;
-
-    // ── Compositor (DX12 + glyph atlas) ─────────────────────────────────────
-    let ctx = Dx12Context::new(window.hwnd, INIT_W, INIT_H)?;
+    let window      = Window::new("TermForge", INIT_W, INIT_H, event_tx)?;
+    let ctx         = Dx12Context::new(window.hwnd, INIT_W, INIT_H)?;
     let mut compositor = Compositor::build(ctx, "Cascadia Code", 13.0)?;
-    let (cell_w, cell_h) = compositor.cell_size();
+    let (cw, ch)    = compositor.cell_size();
 
-    // ── Sessions ─────────────────────────────────────────────────────────────
+    // ── Initial local session ──────────────────────────────────────────────
     let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
-    let mut entries: Vec<Entry> = vec![Entry::spawn(SessionKind::Local, &shell)?];
+    let mut entries: Vec<Entry> = vec![Entry::spawn_local(&shell)?];
 
-    // ── App state ─────────────────────────────────────────────────────────────
+    // ── SSH host store ─────────────────────────────────────────────────────
+    let host_store   = HostStore::load().unwrap_or_default();
+    let mut ssh_mgr  = SshManagerState::new(host_store.hosts.clone());
+
+    // ── App state ──────────────────────────────────────────────────────────
     let mut window_w    = INIT_W;
     let mut window_h    = INIT_H;
     let mut active_tab  = 0usize;
     let mut sidebar_vis = true;
-    // None = single pane; Some(r) = two-pane horizontal split at ratio r.
     let mut split_ratio: Option<f32> = None;
-    let mut drag: Option<DragState> = None;
+    let mut drag: Option<DragState>  = None;
     let mut running = true;
 
     while running {
-        // ── PTY drain ────────────────────────────────────────────────────────
-        for entry in &mut entries {
-            entry.drain_pty();
-        }
+        // ── PTY drain ────────────────────────────────────────────────────
+        for entry in &mut entries { entry.drain_pty(); }
 
-        // ── Pump Win32 messages ───────────────────────────────────────────────
+        // ── Win32 messages ────────────────────────────────────────────────
         drain_win32_messages();
 
-        // ── Handle window events ──────────────────────────────────────────────
+        // ── Window events ─────────────────────────────────────────────────
         while let Ok(event) = event_rx.try_recv() {
             match event {
                 WindowEvent::Close => running = false,
 
                 WindowEvent::Char(cu) => {
-                    if let Some(bytes) = char_to_pty_bytes(cu) {
+                    let c = char::from_u32(cu as u32).unwrap_or('\0');
+
+                    if ssh_mgr.open {
+                        // Route to SSH manager
+                        if let Some(host) = ssh_mgr.handle_char(c) {
+                            let auth = ssh_auth_for(&host);
+                            match rt.block_on(Entry::spawn_ssh(
+                                host.hostname.clone(),
+                                host.port,
+                                host.username.clone(),
+                                auth,
+                            )) {
+                                Ok(e)  => {
+                                    entries.push(e);
+                                    active_tab = entries.len() - 1;
+                                    ssh_mgr.open = false;
+                                }
+                                Err(e) => tracing::error!("SSH connect: {e}"),
+                            }
+                        }
+                    } else if let Some(bytes) = char_to_pty_bytes(cu) {
                         if let Some(e) = entries.get_mut(active_tab) {
                             let _ = e.pty.write(&bytes);
                         }
@@ -147,41 +183,26 @@ fn main() -> Result<()> {
                 }
 
                 WindowEvent::KeyDown { vk, ctrl } => {
-                    // ── Global shortcuts ──────────────────────────────────────
+                    // ── SSH manager navigation ────────────────────────────
+                    if ssh_mgr.open {
+                        match vk {
+                            0x26 => ssh_mgr.handle_key_up(),    // VK_UP
+                            0x28 => ssh_mgr.handle_key_down(),  // VK_DOWN
+                            0x1B => ssh_mgr.handle_escape(),    // VK_ESCAPE
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // ── Global shortcuts ──────────────────────────────────
                     if ctrl {
                         match vk {
-                            // Ctrl+\ — toggle sidebar
-                            0xDC => { sidebar_vis = !sidebar_vis; continue; }
-                            // Ctrl+T — new local tab
-                            0x54 => {
-                                if let Ok(e) = Entry::spawn(SessionKind::Local, &shell) {
-                                    entries.push(e);
-                                    active_tab = entries.len() - 1;
-                                }
-                                continue;
-                            }
-                            // Ctrl+W — close active tab
-                            0x57 => {
-                                if entries.len() > 1 {
-                                    entries.remove(active_tab);
-                                    active_tab = active_tab.min(entries.len() - 1);
-                                }
-                                continue;
-                            }
-                            // Ctrl+Tab — next tab
-                            0x09 => {
-                                active_tab = (active_tab + 1) % entries.len();
-                                continue;
-                            }
-                            // Ctrl+\ split toggle  (Ctrl+P = split)
-                            0x50 => {
-                                split_ratio = match split_ratio {
-                                    None    => Some(0.5),
-                                    Some(_) => None,
-                                };
-                                continue;
-                            }
-                            // Ctrl+1..9 — switch tab
+                            0xDC => { sidebar_vis = !sidebar_vis; continue; }          // Ctrl+\
+                            0x48 => { ssh_mgr.open = !ssh_mgr.open; continue; }        // Ctrl+H
+                            0x54 => { spawn_tab(&mut entries, &shell); active_tab = entries.len() - 1; continue; } // Ctrl+T
+                            0x57 => { close_tab(&mut entries, &mut active_tab); continue; } // Ctrl+W
+                            0x09 => { active_tab = (active_tab + 1) % entries.len().max(1); continue; } // Ctrl+Tab
+                            0x50 => { split_ratio = match split_ratio { None => Some(0.5), Some(_) => None }; continue; } // Ctrl+P
                             n @ 0x31..=0x39 => {
                                 let idx = (n - 0x31) as usize;
                                 if idx < entries.len() { active_tab = idx; }
@@ -190,7 +211,7 @@ fn main() -> Result<()> {
                             _ => {}
                         }
                     }
-                    // Forward escape-sequence keys to active PTY.
+
                     if let Some(bytes) = vk_to_pty_bytes(vk, ctrl) {
                         if let Some(e) = entries.get_mut(active_tab) {
                             let _ = e.pty.write(&bytes);
@@ -202,38 +223,32 @@ fn main() -> Result<()> {
                     window_w = width;
                     window_h = height;
                     compositor.resize(width, height)?;
-                    // PTY resize handled below after chrome layout is recalculated.
                 }
 
                 WindowEvent::LButtonDown { x, y } => {
-                    // ── Tab click ─────────────────────────────────────────────
                     let layout = ChromeLayout::compute(
                         window_w as f32, window_h as f32, sidebar_vis);
+
+                    // Tab click
                     if layout.tabbar.contains(x as f32, y as f32) {
-                        let cw = cell_w as f32;
                         let mut tx = layout.tabbar.x + 8.0;
-                        for (i, entry) in entries.iter().enumerate() {
-                            let label = entry.session.title.as_str();
-                            let tw = 10.0 + 6.0 + 4.0 + label.chars().count() as f32 * cw + 10.0;
+                        for (i, e) in entries.iter().enumerate() {
+                            let tw = tab_width(&e.session.title, cw);
                             if (x as f32) >= tx && (x as f32) < tx + tw {
-                                active_tab = i;
-                                break;
+                                active_tab = i; break;
                             }
                             tx += tw + 2.0;
                         }
                     }
 
-                    // ── Split handle drag start ────────────────────────────────
+                    // Split drag
                     if let Some(ratio) = split_ratio {
-                        let layout = ChromeLayout::compute(
-                            window_w as f32, window_h as f32, sidebar_vis);
                         let ct = layout.content;
-                        let handle_x = ct.x + ct.w * ratio;
-                        if (x as f32 - handle_x).abs() <= SPLIT_HANDLE_W + 4.0 {
+                        let hx = ct.x + ct.w * ratio;
+                        if (x as f32 - hx).abs() <= SPLIT_HANDLE_W + 4.0 {
                             drag = Some(DragState {
                                 origin_x:    x as f32,
                                 start_ratio: ratio,
-                                content_x:   ct.x,
                                 content_w:   ct.w,
                             });
                         }
@@ -242,71 +257,50 @@ fn main() -> Result<()> {
 
                 WindowEvent::MouseMove { x, .. } => {
                     if let Some(ref ds) = drag {
-                        let delta = x as f32 - ds.origin_x;
-                        let new_ratio = (ds.start_ratio + delta / ds.content_w)
-                            .clamp(0.1, 0.9);
-                        split_ratio = Some(new_ratio);
+                        let delta     = x as f32 - ds.origin_x;
+                        split_ratio   = Some((ds.start_ratio + delta / ds.content_w).clamp(0.1, 0.9));
                     }
                 }
 
-                WindowEvent::LButtonUp => {
-                    drag = None;
-                }
+                WindowEvent::LButtonUp => { drag = None; }
             }
         }
 
-        // ── Build chrome layout ───────────────────────────────────────────────
+        // ── Chrome + layout ───────────────────────────────────────────────
         let chrome_layout = ChromeLayout::compute(
             window_w as f32, window_h as f32, sidebar_vis);
         let ct = chrome_layout.content;
 
-        // ── Build pane layout + resize PTYs ──────────────────────────────────
-        let (layout, render_entries): (PaneLayout, Vec<usize>) = match split_ratio {
+        let (layout, render_idx): (PaneLayout, Vec<usize>) = match split_ratio {
             None => {
+                if let Some(e) = entries.get_mut(active_tab) {
+                    e.resize_pty(ct.w, ct.h, cw, ch);
+                }
                 let id = entries[active_tab].session.id;
-                let pane_w = ct.w;
-                let pane_h = ct.h;
-                entries[active_tab].resize_pty(pane_w, pane_h, cell_w, cell_h);
                 (PaneLayout::leaf(id), vec![active_tab])
             }
             Some(ratio) => {
-                let left_idx  = active_tab;
-                let right_idx = if entries.len() < 2 {
-                    // Only one session: show it on both sides (read-only right).
-                    active_tab
-                } else {
-                    (active_tab + 1) % entries.len()
-                };
-                let left_id  = entries[left_idx].session.id;
-                let right_id = entries[right_idx].session.id;
-                entries[left_idx].resize_pty(ct.w * ratio, ct.h, cell_w, cell_h);
-                entries[right_idx].resize_pty(ct.w * (1.0 - ratio), ct.h, cell_w, cell_h);
+                let l = active_tab;
+                let r = if entries.len() > 1 { (active_tab + 1) % entries.len() } else { active_tab };
+                if let Some(e) = entries.get_mut(l) { e.resize_pty(ct.w * ratio, ct.h, cw, ch); }
+                if l != r { if let Some(e) = entries.get_mut(r) { e.resize_pty(ct.w * (1.0-ratio), ct.h, cw, ch); } }
                 let layout = PaneLayout::hsplit(
-                    PaneLayout::leaf(left_id),
-                    PaneLayout::leaf(right_id),
+                    PaneLayout::leaf(entries[l].session.id),
+                    PaneLayout::leaf(entries[r].session.id),
                     ratio,
                 );
-                (layout, vec![left_idx, right_idx])
+                (layout, vec![l, r])
             }
         };
 
-        // Collect split handle x positions for chrome rendering.
-        let handle_xs: Vec<f32> = layout.split_handle_xs(ct.x, ct.y, ct.w, ct.h);
+        let handle_xs = layout.split_handle_xs(ct.x, ct.y, ct.w, ct.h);
 
-        // ── Chrome commands ───────────────────────────────────────────────────
-        let error_count = entries.iter()
-            .filter(|e| e.session.blocks.all()
-                .last()
-                .map(|b| b.exit_code == Some(1))
-                .unwrap_or(false))
-            .count();
+        let chrome_sessions: Vec<Session> = entries.iter().map(|e| e.session.clone_for_render()).collect();
+        let error_count = entries.iter().filter(|e|
+            e.session.blocks.all().last().map(|b| b.exit_code == Some(1)).unwrap_or(false)
+        ).count();
 
-        // Collect shallow session copies for chrome generation (title + kind only).
-        let chrome_sessions: Vec<Session> = entries.iter()
-            .map(|e| e.session.clone_for_render())
-            .collect();
-
-        let chrome_cmds = chrome::generate_commands(&ChromeState {
+        let mut chrome_cmds = chrome::generate_commands(&ChromeState {
             layout:          &chrome_layout,
             sessions:        &chrome_sessions,
             active_tab,
@@ -314,25 +308,27 @@ fn main() -> Result<()> {
             sidebar_visible: sidebar_vis,
             split_handles:   &handle_xs,
             error_count,
-            cell_w,
-            cell_h,
+            cell_w: cw, cell_h: ch,
         });
 
-        // ── Render ────────────────────────────────────────────────────────────
-        // Collect render snapshots (only sessions in current layout).
-        let render_sessions: Vec<Session> = render_entries.iter()
+        // SSH manager overlay on top
+        chrome_cmds.extend(generate_ssh_manager_commands(
+            &ssh_mgr, window_w as f32, window_h as f32, cw, ch,
+        ));
+
+        // ── Render ────────────────────────────────────────────────────────
+        let render_sessions: Vec<Session> = render_idx.iter()
             .map(|&i| entries[i].session.clone_for_render())
             .collect();
 
-        // Only render if any visible session changed or chrome needs refresh.
-        let any_dirty = render_entries.iter().any(|&i| entries[i].session.is_dirty());
-        if any_dirty || !chrome_cmds.is_empty() {
+        let any_dirty = render_idx.iter().any(|&i| entries[i].session.is_dirty())
+            || ssh_mgr.open;
+
+        if any_dirty {
             compositor.render_frame_with_chrome(
-                &render_sessions,
-                &layout,
+                &render_sessions, &layout,
                 &chrome_cmds,
-                window_w,
-                window_h,
+                window_w, window_h,
                 Some((ct.x, ct.y, ct.w, ct.h)),
             )?;
         }
@@ -343,6 +339,8 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 fn drain_win32_messages() {
     unsafe {
         use windows::Win32::UI::WindowsAndMessaging::*;
@@ -352,5 +350,35 @@ fn drain_win32_messages() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+}
+
+fn spawn_tab(entries: &mut Vec<Entry>, shell: &str) {
+    match Entry::spawn_local(shell) {
+        Ok(e)  => entries.push(e),
+        Err(e) => tracing::error!("spawn tab: {e}"),
+    }
+}
+
+fn close_tab(entries: &mut Vec<Entry>, active_tab: &mut usize) {
+    if entries.len() > 1 {
+        entries.remove(*active_tab);
+        *active_tab = (*active_tab).min(entries.len() - 1);
+    }
+}
+
+fn tab_width(title: &str, cw: u32) -> f32 {
+    // pad + dot_gap + text + pad
+    10.0 + 6.0 + 4.0 + title.chars().count() as f32 * cw as f32 + 10.0
+}
+
+fn ssh_auth_for(host: &libterm::ssh::host_store::HostConfig) -> SshAuth {
+    if let Some(ref kp) = host.key_path {
+        SshAuth::PrivateKey {
+            key_path:   std::path::PathBuf::from(kp),
+            passphrase: None,
+        }
+    } else {
+        SshAuth::Agent
     }
 }

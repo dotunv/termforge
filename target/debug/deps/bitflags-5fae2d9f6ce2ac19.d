@@ -1,0 +1,11 @@
+C:\Users\olutu\code\projects\termforge\target\debug\deps\bitflags-5fae2d9f6ce2ac19.d: C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\lib.rs C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\iter.rs C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\parser.rs C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\traits.rs C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\public.rs C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\internal.rs C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\external.rs
+
+C:\Users\olutu\code\projects\termforge\target\debug\deps\libbitflags-5fae2d9f6ce2ac19.rmeta: C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\lib.rs C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\iter.rs C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\parser.rs C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\traits.rs C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\public.rs C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\internal.rs C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\external.rs
+
+C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\lib.rs:
+C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\iter.rs:
+C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\parser.rs:
+C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\traits.rs:
+C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\public.rs:
+C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\internal.rs:
+C:\Users\olutu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bitflags-2.12.1\src\external.rs:
