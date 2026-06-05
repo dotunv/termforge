@@ -4,10 +4,11 @@
 //! list of [`UiCommand`]s describing every chrome element for the current
 //! frame.  The compositor draws them in one pass before the terminal panes.
 
+use libterm::block::store::{BlockStatus, CommandBlock};
 use libterm::mux::session::{Session, SessionKind};
 use renderer_dx12::ui_renderer::{hex, UiCommand,
     COL_BG, COL_PANEL, COL_BORDER, COL_TEXT, COL_MUTED,
-    COL_GREEN, COL_BLUE, COL_PURPLE, COL_AMBER};
+    COL_GREEN, COL_BLUE, COL_PURPLE, COL_AMBER, COL_RED};
 
 // ── Fixed chrome heights / widths ────────────────────────────────────────────
 pub const TITLEBAR_H:  f32 = 36.0;
@@ -77,6 +78,8 @@ pub struct ChromeState<'a> {
     /// Cell dimensions from atlas (used for text vertical centring).
     pub cell_w: u32,
     pub cell_h: u32,
+    /// Recent blocks of the active agent session (empty for non-agent sessions).
+    pub agent_blocks: &'a [CommandBlock],
 }
 
 pub fn generate_commands(s: &ChromeState<'_>) -> Vec<UiCommand> {
@@ -212,6 +215,53 @@ pub fn generate_commands(s: &ChromeState<'_>) -> Vec<UiCommand> {
             cmds.push(dot(sx + 12.0, sy + item_h * 0.5, 4.0, COL_MUTED));
             cmds.push(text(label, sx + 22.0, sy + (item_h - ch) * 0.5, COL_MUTED, COL_PANEL));
             sy += item_h;
+        }
+
+        // ── Agent block history (shown only when active tab is an Agent) ──────
+        if !s.agent_blocks.is_empty() {
+            // Divider
+            cmds.push(UiCommand::FillRect {
+                x: sx + 12.0, y: sy + 2.0, w: sb.w - 24.0, h: 1.0,
+                color: hex(COL_BORDER),
+            });
+            sy += 6.0;
+
+            cmds.push(text("RECENT BLOCKS", sx + 12.0, sy, COL_PURPLE, COL_PANEL));
+            sy += item_h;
+
+            for block in s.agent_blocks.iter().rev().take(8) {
+                let (dot_col, badge) = match block.status {
+                    BlockStatus::Running   => (COL_PURPLE, "run"),
+                    BlockStatus::Success   => (COL_GREEN,  "ok "),
+                    BlockStatus::Error     => (COL_RED,    "err"),
+                    BlockStatus::Cancelled => (COL_MUTED,  "---"),
+                };
+                let item_bg = COL_PANEL;
+
+                cmds.push(dot(sx + 14.0, sy + item_h * 0.5, 3.5, dot_col));
+
+                // Truncate command to fit sidebar width (~18 chars)
+                let cmd = &block.command;
+                let max_chars = 18usize;
+                let label: String = if cmd.chars().count() > max_chars {
+                    format!("{}…", &cmd[..cmd.char_indices().nth(max_chars - 1).map(|(i,_)| i).unwrap_or(cmd.len())])
+                } else {
+                    cmd.clone()
+                };
+                cmds.push(text(&label, sx + 24.0, sy + (item_h - ch) * 0.5, COL_TEXT, item_bg));
+
+                // Right-align badge + optional duration
+                let dur_str = if let Some(ms) = block.duration_ms() {
+                    if ms >= 1000 { format!("{:.1}s", ms as f32 / 1000.0) } else { format!("{ms}ms") }
+                } else {
+                    badge.to_string()
+                };
+                let bx = sx + sb.w - 1.0 - dur_str.len() as f32 * cw - 6.0;
+                cmds.push(text(&dur_str, bx, sy + (item_h - ch) * 0.5, dot_col, item_bg));
+
+                sy += item_h;
+                if sy + item_h > sb.y + sb.h - 4.0 { break; }
+            }
         }
     }
 

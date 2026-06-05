@@ -14,8 +14,13 @@ pub enum SessionKind {
     Local,
     /// SSH session (blue).
     Ssh { host: String, user: String },
-    /// AI agent session (purple).
-    Agent { agent_id: String },
+    /// AI agent session (purple) — runs any CLI tool as a structured session.
+    Agent {
+        /// Short display name for the session (usually the command basename).
+        name:  String,
+        /// Model / engine label, e.g. "claude" or "gpt-4o".  May be empty.
+        model: String,
+    },
 }
 
 pub struct Session {
@@ -32,9 +37,9 @@ impl Session {
     pub fn new(kind: SessionKind, cols: u16, rows: u16) -> Self {
         let id = Uuid::new_v4();
         let title = match &kind {
-            SessionKind::Local => "local".to_string(),
-            SessionKind::Ssh { host, user } => format!("{user}@{host}"),
-            SessionKind::Agent { agent_id } => format!("agent/{agent_id}"),
+            SessionKind::Local                      => "local".to_string(),
+            SessionKind::Ssh  { host, user }        => format!("{user}@{host}"),
+            SessionKind::Agent { name, .. }         => format!("agent:{name}"),
         };
         Self {
             id,

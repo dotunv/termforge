@@ -103,6 +103,18 @@ impl SshManagerState {
     pub fn handle_key_up(&mut self)    { if self.selected > 0 { self.selected -= 1; } }
     pub fn handle_key_down(&mut self)  { if self.selected + 1 < self.hosts.len() { self.selected += 1; } }
 
+    /// Delete the currently selected host from the list.
+    /// Returns `true` if a host was removed (caller should persist to disk).
+    pub fn handle_delete(&mut self) -> bool {
+        if self.mode == ManagerMode::List && !self.hosts.is_empty() {
+            self.hosts.remove(self.selected);
+            self.selected = self.selected.min(self.hosts.len().saturating_sub(1));
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn handle_escape(&mut self) {
         match self.mode {
             ManagerMode::NewHost => {
@@ -274,7 +286,7 @@ fn render_list(
     let footer_y = body_y + visible as f32 * item_h + 8.0;
     cmds.push(UiCommand::DrawText {
         x: mx + pad_x, y: footer_y,
-        text: "[↑↓] navigate   [Enter] connect   [N] new host   [Esc] back".to_string(),
+        text: "[↑↓] navigate   [Enter] connect   [N] new   [D] delete   [Esc] back".to_string(),
         fg: hex(COL_MUTED), bg: hex(COL_PANEL),
     });
 }

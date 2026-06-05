@@ -1,8 +1,7 @@
-//! TermForge — Phase 4 entry point.
+//! TermForge — Phase 5 entry point.
 //!
-//! Supports multiple local (ConPTY) and remote (SSH) sessions, a full DX12
-//! chrome render pass, collapsible sidebar, split-pane drag, and the SSH
-//! manager modal (Ctrl+H).
+//! Adds agent sessions (purple, Ctrl+A), block history overlay in the sidebar,
+//! agent launcher modal, SSH host persistence, and delete-host (D key).
 
 mod input;
 mod ui;
@@ -12,7 +11,7 @@ use std::sync::mpsc;
 
 use anyhow::Result;
 use libterm::{
-    block::detector::BlockDetector,
+    block::{detector::BlockDetector, store::CommandBlock},
     mux::{layout::PaneLayout, session::{Session, SessionKind}},
     pty::{conpty::ConPty, Pty},
     ssh::{client::{SshAuth, SshClient}, host_store::HostStore},
@@ -21,6 +20,7 @@ use libterm::{
 use renderer_dx12::{compositor::Compositor, context::Dx12Context};
 use tokio::sync::mpsc::UnboundedReceiver;
 use ui::{
+    agent_launcher::{generate_agent_launcher_commands, AgentLauncherState},
     chrome::{self, ChromeLayout, ChromeState, SPLIT_HANDLE_W},
     ssh_manager::{generate_ssh_manager_commands, SshManagerState},
 };
@@ -49,6 +49,27 @@ impl Entry {
         let vt_parser    = VtParser::new(cols, rows, detector);
         let (tx, rx)     = tokio::sync::mpsc::unbounded_channel();
         let pty          = ConPty::spawn(shell, cols, rows, tx)?;
+        Ok(Self { session, vt_parser, pty: Box::new(pty), pty_rx: rx })
+    }
+
+    /// Spawn a local ConPTY session tagged as Agent (purple).
+    fn spawn_agent(command: &str, model: &str) -> Result<Self> {
+        let (cols, rows) = (220u16, 50u16);
+        let sid          = uuid::Uuid::new_v4();
+        // Use the basename of the command as the short name.
+        let name = std::path::Path::new(command)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(command)
+            .to_string();
+        let kind    = SessionKind::Agent { name, model: model.to_string() };
+        let mut session  = Session::new(kind, cols, rows);
+        // Override title with the raw command for clarity.
+        session.title = command.to_string();
+        let detector = BlockDetector::new(sid);
+        let vt_parser = VtParser::new(cols, rows, detector);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let pty       = ConPty::spawn(command, cols, rows, tx)?;
         Ok(Self { session, vt_parser, pty: Box::new(pty), pty_rx: rx })
     }
 
@@ -111,7 +132,7 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-    tracing::info!("TermForge starting — Phase 4 (SSH + multi-session)");
+    tracing::info!("TermForge starting — Phase 5 (agent sessions)");
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -130,8 +151,9 @@ fn main() -> Result<()> {
     let mut entries: Vec<Entry> = vec![Entry::spawn_local(&shell)?];
 
     // ── SSH host store ─────────────────────────────────────────────────────
-    let host_store   = HostStore::load().unwrap_or_default();
-    let mut ssh_mgr  = SshManagerState::new(host_store.hosts.clone());
+    let mut host_store = HostStore::load().unwrap_or_default();
+    let mut ssh_mgr    = SshManagerState::new(host_store.hosts.clone());
+    let mut agent_launcher = AgentLauncherState::new();
 
     // ── App state ──────────────────────────────────────────────────────────
     let mut window_w    = INIT_W;
@@ -160,6 +182,10 @@ fn main() -> Result<()> {
                     if ssh_mgr.open {
                         // Route to SSH manager
                         if let Some(host) = ssh_mgr.handle_char(c) {
+                            // Persist immediately when a new host is added.
+                            host_store.hosts = ssh_mgr.hosts.clone();
+                            let _ = host_store.save();
+
                             let auth = ssh_auth_for(&host);
                             match rt.block_on(Entry::spawn_ssh(
                                 host.hostname.clone(),
@@ -175,6 +201,16 @@ fn main() -> Result<()> {
                                 Err(e) => tracing::error!("SSH connect: {e}"),
                             }
                         }
+                    } else if agent_launcher.open {
+                        if let Some((cmd, model)) = agent_launcher.handle_char(c) {
+                            match Entry::spawn_agent(&cmd, &model) {
+                                Ok(e)  => {
+                                    entries.push(e);
+                                    active_tab = entries.len() - 1;
+                                }
+                                Err(e) => tracing::error!("agent spawn: {e}"),
+                            }
+                        }
                     } else if let Some(bytes) = char_to_pty_bytes(cu) {
                         if let Some(e) = entries.get_mut(active_tab) {
                             let _ = e.pty.write(&bytes);
@@ -183,12 +219,27 @@ fn main() -> Result<()> {
                 }
 
                 WindowEvent::KeyDown { vk, ctrl } => {
+                    // ── Agent launcher keyboard ───────────────────────────
+                    if agent_launcher.open {
+                        match vk {
+                            0x1B => agent_launcher.handle_escape(), // VK_ESCAPE
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     // ── SSH manager navigation ────────────────────────────
                     if ssh_mgr.open {
                         match vk {
                             0x26 => ssh_mgr.handle_key_up(),    // VK_UP
                             0x28 => ssh_mgr.handle_key_down(),  // VK_DOWN
                             0x1B => ssh_mgr.handle_escape(),    // VK_ESCAPE
+                            0x44 => {                           // D — delete host
+                                if ssh_mgr.handle_delete() {
+                                    host_store.hosts = ssh_mgr.hosts.clone();
+                                    let _ = host_store.save();
+                                }
+                            }
                             _ => {}
                         }
                         continue;
@@ -199,6 +250,7 @@ fn main() -> Result<()> {
                         match vk {
                             0xDC => { sidebar_vis = !sidebar_vis; continue; }          // Ctrl+\
                             0x48 => { ssh_mgr.open = !ssh_mgr.open; continue; }        // Ctrl+H
+                            0x41 => { agent_launcher.open = !agent_launcher.open; continue; } // Ctrl+A
                             0x54 => { spawn_tab(&mut entries, &shell); active_tab = entries.len() - 1; continue; } // Ctrl+T
                             0x57 => { close_tab(&mut entries, &mut active_tab); continue; } // Ctrl+W
                             0x09 => { active_tab = (active_tab + 1) % entries.len().max(1); continue; } // Ctrl+Tab
@@ -300,6 +352,18 @@ fn main() -> Result<()> {
             e.session.blocks.all().last().map(|b| b.exit_code == Some(1)).unwrap_or(false)
         ).count();
 
+        // Collect recent agent blocks for the sidebar overlay (only for agent sessions).
+        let agent_blocks: Vec<CommandBlock> =
+            if let Some(e) = entries.get(active_tab) {
+                if matches!(e.session.kind, SessionKind::Agent { .. }) {
+                    e.session.blocks.clone_recent(20)
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+
         let mut chrome_cmds = chrome::generate_commands(&ChromeState {
             layout:          &chrome_layout,
             sessions:        &chrome_sessions,
@@ -309,11 +373,17 @@ fn main() -> Result<()> {
             split_handles:   &handle_xs,
             error_count,
             cell_w: cw, cell_h: ch,
+            agent_blocks:    &agent_blocks,
         });
 
         // SSH manager overlay on top
         chrome_cmds.extend(generate_ssh_manager_commands(
             &ssh_mgr, window_w as f32, window_h as f32, cw, ch,
+        ));
+
+        // Agent launcher overlay (topmost)
+        chrome_cmds.extend(generate_agent_launcher_commands(
+            &agent_launcher, window_w as f32, window_h as f32, cw, ch,
         ));
 
         // ── Render ────────────────────────────────────────────────────────
@@ -322,7 +392,8 @@ fn main() -> Result<()> {
             .collect();
 
         let any_dirty = render_idx.iter().any(|&i| entries[i].session.is_dirty())
-            || ssh_mgr.open;
+            || ssh_mgr.open
+            || agent_launcher.open;
 
         if any_dirty {
             compositor.render_frame_with_chrome(

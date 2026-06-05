@@ -35,9 +35,40 @@ pub enum BlockKind {
 
 #[derive(Debug, Clone)]
 pub struct AgentContext {
-    pub agent_id: String,
-    pub task: String,
+    /// Human-readable model tag, e.g. "claude-opus-4-5" or "gpt-4o".
+    pub model:      String,
+    /// High-level task description (first prompt / system label).
+    pub task:       String,
+    /// Ordered list of tool names called so far.
     pub tool_calls: Vec<String>,
+    /// Total input tokens consumed.
+    pub tokens_in:  u32,
+    /// Total output tokens produced.
+    pub tokens_out: u32,
+    /// Estimated cost in USD (0.0 when unknown).
+    pub cost_usd:   f32,
+}
+
+impl AgentContext {
+    pub fn new(model: impl Into<String>, task: impl Into<String>) -> Self {
+        Self {
+            model:      model.into(),
+            task:       task.into(),
+            tool_calls: Vec::new(),
+            tokens_in:  0,
+            tokens_out: 0,
+            cost_usd:   0.0,
+        }
+    }
+
+    pub fn add_tool_call(&mut self, name: impl Into<String>) {
+        self.tool_calls.push(name.into());
+    }
+
+    /// Returns a compact cost string, or empty string if cost is unknown.
+    pub fn cost_display(&self) -> String {
+        if self.cost_usd > 0.0 { format!("${:.4}", self.cost_usd) } else { String::new() }
+    }
 }
 
 impl CommandBlock {
@@ -76,7 +107,7 @@ impl CommandBlock {
 }
 
 /// Queryable store of all command blocks for a session.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct BlockStore {
     blocks: Vec<CommandBlock>,
 }
@@ -101,4 +132,13 @@ impl BlockStore {
     pub fn running(&self) -> impl Iterator<Item = &CommandBlock> {
         self.blocks.iter().filter(|b| b.status == BlockStatus::Running)
     }
+
+    /// Clone the most recent `n` blocks (O(n), safe to call per-frame for small n).
+    pub fn clone_recent(&self, n: usize) -> Vec<CommandBlock> {
+        let start = self.blocks.len().saturating_sub(n);
+        self.blocks[start..].to_vec()
+    }
+
+    pub fn len(&self) -> usize { self.blocks.len() }
+    pub fn is_empty(&self) -> bool { self.blocks.is_empty() }
 }
