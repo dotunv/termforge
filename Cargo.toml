@@ -1,0 +1,53 @@
+[workspace]
+members = [
+    "crates/libterm",
+    "crates/renderer-dx12",
+    "platform/windows",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Victor Oluwasomi Dotun"]
+license = "MIT"
+
+[workspace.dependencies]
+# async runtime
+tokio = { version = "1", features = ["full"] }
+
+# VT parsing
+vte = "0.13"
+
+# SSH
+russh = "0.44"
+russh-keys = "0.44"
+
+# serialization / config
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# utilities
+uuid = { version = "1", features = ["v4"] }
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+bytes = "1"
+
+# Windows-specific (referenced per-crate with cfg)
+windows = { version = "0.58", features = [
+    "Win32_System_Console",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }

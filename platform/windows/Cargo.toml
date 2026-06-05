@@ -1,0 +1,20 @@
+[package]
+name = "termforge"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "termforge"
+path = "src/main.rs"
+
+[dependencies]
+libterm = { path = "../../crates/libterm" }
+renderer-dx12 = { path = "../../crates/renderer-dx12" }
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
