@@ -8,7 +8,7 @@ use crate::grid::TerminalGrid;
 
 pub type TabId = Uuid;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionKind {
     /// Local PTY session (green).
     Local,
@@ -56,5 +56,18 @@ impl Session {
 
     pub fn clear_dirty(&self) {
         self.dirty.store(false, Ordering::Relaxed);
+    }
+
+    /// Shallow render copy: clones the grid and shares the dirty flag.
+    /// Used to hand a snapshot to the compositor without cloning block history.
+    pub fn clone_for_render(&self) -> Session {
+        Session {
+            id: self.id,
+            kind: self.kind.clone(),
+            title: self.title.clone(),
+            grid: self.grid.clone_grid(),
+            blocks: BlockStore::default(),
+            dirty: self.dirty.clone(),
+        }
     }
 }

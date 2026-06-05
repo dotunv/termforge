@@ -1,0 +1,1 @@
+Result<Foundation::HWND, windows_result::error::Error>: Param<Foundation::HWND, core::r#type::CopyType>

@@ -12,9 +12,10 @@ path = "src/main.rs"
 libterm = { path = "../../crates/libterm" }
 renderer-dx12 = { path = "../../crates/renderer-dx12" }
 tokio.workspace = true
+uuid.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true

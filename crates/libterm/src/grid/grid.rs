@@ -203,6 +203,21 @@ impl TerminalGrid {
         }
     }
 
+    /// Cheap snapshot of the cell grid for the render thread.
+    pub fn clone_grid(&self) -> TerminalGrid {
+        TerminalGrid {
+            cols: self.cols,
+            rows: self.rows,
+            cells: self.cells.clone(),
+            cursor_col: self.cursor_col,
+            cursor_row: self.cursor_row,
+            current_fg: self.current_fg,
+            current_bg: self.current_bg,
+            current_attrs: self.current_attrs,
+            scrollback: ScrollbackBuffer::new(0), // not needed in render copy
+        }
+    }
+
     /// Returns all text content of the visible grid as a plain string (rows joined by newlines).
     pub fn visible_text(&self) -> String {
         self.cells
