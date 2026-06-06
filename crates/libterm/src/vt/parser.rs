@@ -91,14 +91,46 @@ impl Perform for VtPerformer {
     fn csi_dispatch(
         &mut self,
         params: &Params,
-        _intermediates: &[u8],
+        intermediates: &[u8],
         _ignore: bool,
         action: char,
     ) {
+        // Flatten all sub-parameters into a single vec so that colon-separated
+        // params (e.g. ESC[38:2:255:0:0m for RGB color) and the more common
+        // semicolon-separated form (ESC[38;2;255;0;0m) are handled uniformly.
+        // Without this, `params[i+2..i+4]` slices for RGB SGR were reading
+        // the first sub-parameter of each param group, producing garbage colors.
         let p: Vec<u16> = params
             .iter()
-            .map(|s| s.first().copied().unwrap_or(0))
+            .flat_map(|s| s.iter().copied())
             .collect();
+
+        // DEC private modes: CSI ? Ps h/l  (intermediate byte = b'?')
+        if intermediates.first() == Some(&b'?') {
+            match action {
+                'h' => {
+                    for &mode in &p {
+                        match mode {
+                            25   => self.grid.set_cursor_visible(true),
+                            1049 => self.grid.enter_alt_screen(),
+                            _ => {}
+                        }
+                    }
+                }
+                'l' => {
+                    for &mode in &p {
+                        match mode {
+                            25   => self.grid.set_cursor_visible(false),
+                            1049 => self.grid.exit_alt_screen(),
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match action {
             // Cursor position: CUP / HVP
             'H' | 'f' => {
@@ -128,6 +160,43 @@ impl Perform for VtPerformer {
             'K' => self.grid.erase_in_line(p.first().copied().unwrap_or(0)),
             // Select graphic rendition (color/attrs)
             'm' => self.grid.sgr(&p),
+            // DECSTBM — set scroll region: CSI Pt ; Pb r
+            // Parameters are 1-based; default top=1, default bottom=rows.
+            'r' => {
+                let top = p.first().copied().unwrap_or(1).saturating_sub(1);
+                let bot = p.get(1).copied()
+                    .map(|v| v.saturating_sub(1))
+                    .unwrap_or_else(|| self.grid.rows().saturating_sub(1));
+                self.grid.set_scroll_region(top, bot);
+            }
+            // CHA — Cursor Character Absolute (column, 1-based)
+            'G' => {
+                let col = p.first().copied().unwrap_or(1).saturating_sub(1);
+                self.grid.cursor_col_abs(col);
+            }
+            // VPA — Line Position Absolute (row, 1-based)
+            'd' => {
+                let row = p.first().copied().unwrap_or(1).saturating_sub(1);
+                self.grid.cursor_row_abs(row);
+            }
+            // CNL — Cursor Next Line
+            'E' => self.grid.cursor_next_line(p.first().copied().unwrap_or(1)),
+            // CPL — Cursor Previous Line
+            'F' => self.grid.cursor_prev_line(p.first().copied().unwrap_or(1)),
+            // IL — Insert Lines
+            'L' => self.grid.insert_lines(p.first().copied().unwrap_or(1)),
+            // DL — Delete Lines
+            'M' => self.grid.delete_lines(p.first().copied().unwrap_or(1)),
+            // DCH — Delete Characters
+            'P' => self.grid.delete_chars(p.first().copied().unwrap_or(1)),
+            // ICH — Insert Characters
+            '@' => self.grid.insert_chars(p.first().copied().unwrap_or(1)),
+            // ECH — Erase Characters
+            'X' => self.grid.erase_chars(p.first().copied().unwrap_or(1)),
+            // SU — Scroll Up
+            'S' => self.grid.scroll_up(p.first().copied().unwrap_or(1)),
+            // SD — Scroll Down
+            'T' => self.grid.scroll_down(p.first().copied().unwrap_or(1)),
             _ => {}
         }
     }
@@ -164,7 +233,14 @@ impl Perform for VtPerformer {
     fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {}
     fn put(&mut self, _byte: u8) {}
     fn unhook(&mut self) {}
-    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, _byte: u8) {}
+    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
+        match byte {
+            // ESC M — Reverse Index: move cursor up one line, scrolling down
+            // at the top of the scroll region.  Needed by vim, less, htop.
+            b'M' => self.grid.reverse_index(),
+            _ => {}
+        }
+    }
 }
 
 impl VtPerformer {

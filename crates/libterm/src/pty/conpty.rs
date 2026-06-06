@@ -11,10 +11,10 @@ use windows::Win32::System::Console::{
 };
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
-    CreateProcessW, InitializeProcThreadAttributeList, ResumeThread, SuspendThread,
-    UpdateProcThreadAttribute, WaitForSingleObject, EXTENDED_STARTUPINFO_PRESENT,
-    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-    STARTUPINFOEXW,
+    CreateProcessW, InitializeProcThreadAttributeList, ResumeThread, SetEvent, SuspendThread,
+    UpdateProcThreadAttribute, WaitForSingleObject,
+    EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
+    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW,
 };
 
 use super::Pty;
@@ -36,11 +36,17 @@ unsafe impl Send for ConPty {}
 impl ConPty {
     /// Spawn `command` inside a ConPTY of size `cols`×`rows`.
     /// `output_tx` receives raw output bytes from the child process.
+    ///
+    /// `wake_event_raw` — raw `isize` value of a Win32 auto-reset event
+    /// (`CreateEventW`).  The reader task calls `SetEvent` on it after each
+    /// successful send so the main loop can use `MsgWaitForMultipleObjectsEx`
+    /// instead of a 1 ms sleep.  Pass `0` to disable.
     pub fn spawn(
         command: &str,
         cols: u16,
         rows: u16,
         output_tx: mpsc::UnboundedSender<Vec<u8>>,
+        wake_event_raw: isize,
     ) -> Result<Self> {
         unsafe {
             // ── Pipe pair: child stdout → our reader ──────────────────────────
@@ -71,6 +77,7 @@ impl ConPty {
             let read_handle_raw = pty_read.0 as isize;
             tokio::task::spawn_blocking(move || {
                 let handle = HANDLE(read_handle_raw as *mut std::ffi::c_void);
+                let wake  = HANDLE(wake_event_raw as *mut std::ffi::c_void);
                 let mut buf = vec![0u8; 4096];
                 loop {
                     let mut read = 0u32;
@@ -80,6 +87,11 @@ impl ConPty {
                     }
                     if output_tx.send(buf[..read as usize].to_vec()).is_err() {
                         break;
+                    }
+                    // Signal the main loop so it wakes immediately rather
+                    // than waiting for the 1 ms sleep to expire.
+                    if wake_event_raw != 0 {
+                        let _ = SetEvent(wake);
                     }
                 }
                 // Close read end when done

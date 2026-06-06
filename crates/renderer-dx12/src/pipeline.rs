@@ -132,9 +132,11 @@ unsafe fn create_root_signature(device: &ID3D12Device) -> Result<ID3D12RootSigna
         },
     ];
 
-    // Static sampler (point / linear for glyph atlas — bilinear looks good at non-integer scales).
+    // Point sampler: glyph atlas cells are laid out on exact pixel boundaries,
+    // so bilinear filtering blurs coverage values across neighbouring glyphs.
+    // POINT gives crisp, sub-pixel-accurate text at integer scales.
     let sampler = D3D12_STATIC_SAMPLER_DESC {
-        Filter: D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+        Filter: D3D12_FILTER_MIN_MAG_MIP_POINT,
         AddressU: D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
         AddressV: D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
         AddressW: D3D12_TEXTURE_ADDRESS_MODE_CLAMP,

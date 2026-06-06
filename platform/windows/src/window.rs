@@ -4,8 +4,10 @@ use anyhow::{Context, Result};
 use windows::core::w;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmIsCompositionEnabled};
+use windows::Win32::Graphics::Gdi::CreateSolidBrush;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::MARGINS;
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -35,11 +37,17 @@ pub enum WindowEvent {
     },
     LButtonUp,
     Close,
+    /// Sent when the window moves to a monitor with a different DPI.
+    /// `w` and `h` are the new physical pixel dimensions at the new DPI
+    /// (the OS already repositioned the window in `wnd_proc`).
+    DpiChanged { dpi: u32, w: i32, h: i32 },
 }
 
 /// Owns the Win32 HWND and manages window class registration.
 pub struct Window {
     pub hwnd: HWND,
+    /// Current monitor DPI (96 = 100%, 144 = 150%, 192 = 200%).
+    pub dpi: u32,
 }
 
 struct WindowState {
@@ -58,12 +66,18 @@ impl Window {
 
             let class_name = w!("TermForgeWindow");
 
+            // hbrBackground: dark terminal colour (#0d1117) so any brief OS-
+            // managed paint before the first DX12 frame shows dark, not white.
+            // COLORREF = 0x00BBGGRR → R=0x0D, G=0x11, B=0x17 → 0x0017110D.
+            let bg_brush = CreateSolidBrush(COLORREF(0x0017_110D));
+
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 style: CS_HREDRAW | CS_VREDRAW,
                 lpfnWndProc: Some(wnd_proc),
                 hInstance: hinstance,
                 hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+                hbrBackground: bg_brush,
                 lpszClassName: class_name,
                 ..Default::default()
             };
@@ -76,11 +90,15 @@ impl Window {
             // WS_THICKFRAME kept for OS resize; WS_CAPTION removed so our custom
             // 36px titlebar is the only title bar. WM_NCCALCSIZE zeroes the NC
             // area so the DX12 surface covers the full window rect.
+            // WS_POPUP avoids any default NC area entirely.
+            // WS_THICKFRAME gives us OS resize hit-testing.
+            // WS_SYSMENU enables Alt+F4, taskbar right-click, and snap layouts.
+            // WS_EX_APPWINDOW ensures the window appears in the taskbar.
             let hwnd = CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
+                WS_EX_APPWINDOW,
                 class_name,
                 windows::core::PCWSTR(title_wide.as_ptr()),
-                WS_OVERLAPPEDWINDOW & !WS_CAPTION,
+                WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 width as i32,
@@ -92,16 +110,26 @@ impl Window {
             )
             .context("CreateWindowExW")?;
 
-            // Extend the DWM frame into the client area with negative margins so
-            // the DWM still draws the drop-shadow even though we have no NC area.
+            // Extend 1px into the top of the client area so DWM draws the
+            // window drop-shadow on the top edge.  Negative margins would make
+            // DWM render its own title bar treatment on top of our DX12 surface.
             if DwmIsCompositionEnabled().is_ok() {
-                let margins = MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 };
+                let margins = MARGINS { cxLeftWidth: 0, cxRightWidth: 0, cyTopHeight: 1, cyBottomHeight: 0 };
                 let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
             }
 
-            let _ = ShowWindow(hwnd, SW_SHOW);
-            Ok(Self { hwnd })
+            // Query actual monitor DPI so the atlas is built at the right size.
+            let dpi = GetDpiForWindow(hwnd);
+
+            Ok(Self { hwnd, dpi })
         }
+    }
+
+    /// Make the window visible. Call exactly once, after the first rendered
+    /// frame has been submitted to the swap chain, so the window never
+    /// appears in an uninitialized (white) state.
+    pub fn show(&self) {
+        unsafe { let _ = ShowWindow(self.hwnd, SW_SHOW); }
     }
 }
 
@@ -166,11 +194,19 @@ unsafe extern "system" fn wnd_proc(
                     (false, false, true,  false) => LRESULT(HTTOP         as isize),
                     (false, false, false, true ) => LRESULT(HTBOTTOM      as isize),
                     _ => {
-                        // Inside the custom 36px titlebar → allow dragging.
-                        // The titlebar buttons are handled in client-area mouse events.
+                        // Custom 36px titlebar: HTCAPTION for drag.
+                        // Traffic lights (close/minimize/maximize) live at
+                        // x=8..52 on the left.  Return HTCLIENT there so
+                        // WM_LBUTTONDOWN fires instead of being swallowed
+                        // by the OS caption drag handler.
+                        let client_x = x - rc.left;
                         let client_y = y - rc.top;
                         if client_y < 36 {
-                            LRESULT(HTCAPTION as isize)
+                            if client_x < 52 {
+                                LRESULT(HTCLIENT as isize)
+                            } else {
+                                LRESULT(HTCAPTION as isize)
+                            }
                         } else {
                             LRESULT(HTCLIENT as isize)
                         }
@@ -178,6 +214,32 @@ unsafe extern "system" fn wnd_proc(
                 };
             }
             default
+        }
+
+        WM_DPICHANGED => {
+            // wparam: LOWORD = new DPI; lparam = pointer to RECT with suggested
+            // new window position at the new DPI.
+            let new_dpi = (wparam.0 & 0xFFFF) as u32;
+            let rect = &*(lparam.0 as *const RECT);
+            send_event(
+                hwnd,
+                WindowEvent::DpiChanged {
+                    dpi: new_dpi,
+                    w: rect.right - rect.left,
+                    h: rect.bottom - rect.top,
+                },
+            );
+            // Reposition the window to the OS-recommended rect for the new DPI.
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            LRESULT(0)
         }
 
         WM_SIZE => {

@@ -197,9 +197,7 @@ fn process_request(
 // ── Win32 pipe helpers ────────────────────────────────────────────────────────
 
 fn create_pipe_instance() -> anyhow::Result<windows::Win32::Foundation::HANDLE> {
-    use windows::Win32::Storage::FileSystem::{
-        FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
-    };
+    use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
     use windows::Win32::System::Pipes::{
         CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
     };

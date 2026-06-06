@@ -1,5 +1,7 @@
 pub mod agent_launcher;
+pub mod block_overlay;
 pub mod chrome;
+pub mod layout;
 pub mod settings;
 pub mod sidebar;
 pub mod ssh_manager;

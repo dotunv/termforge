@@ -9,18 +9,20 @@
 
 use std::path::PathBuf;
 
+use anyhow::Result;
+use libterm::mux::session::SessionKind;
 use serde::{Deserialize, Serialize};
+
+use crate::entry::Entry;
+
+// ── Data types ────────────────────────────────────────────────────────────────
 
 /// One session's resurrection data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
-    /// Session kind tag.
     pub kind: SessionRecordKind,
-    /// Display title.
     pub title: String,
-    /// Grid columns at time of snapshot.
     pub cols: u16,
-    /// Grid rows at time of snapshot.
     pub rows: u16,
 }
 
@@ -45,7 +47,6 @@ pub struct Snapshot {
 impl Snapshot {
     pub const VERSION: u32 = 1;
 
-    /// Absolute path to `%APPDATA%\TermForge\session_snapshot.json`.
     pub fn path() -> PathBuf {
         let base = std::env::var("APPDATA")
             .map(PathBuf::from)
@@ -78,4 +79,81 @@ impl Snapshot {
         }
         Some(snap)
     }
+}
+
+// ── Helpers called by AppState ────────────────────────────────────────────────
+
+/// Restore sessions from a snapshot, or fall back to spawning one default shell.
+/// Returns `(entries, active_tab)`.
+pub fn restore_or_default(
+    shell: &str,
+    fallback_cols: u16,
+    fallback_rows: u16,
+    _rt: &tokio::runtime::Runtime,
+) -> (Vec<Entry>, usize) {
+    if let Some(snap) = Snapshot::load() {
+        let mut entries = Vec::new();
+        for rec in &snap.sessions {
+            let result: Result<Entry> = match &rec.kind {
+                SessionRecordKind::Local { command } => {
+                    Entry::spawn_local(command, rec.cols, rec.rows)
+                }
+                SessionRecordKind::Agent { command, model } => {
+                    Entry::spawn_agent(command, model)
+                }
+                SessionRecordKind::Ssh { .. } => {
+                    // SSH sessions are not auto-reconnected on startup.
+                    Entry::spawn_local(shell, rec.cols, rec.rows)
+                }
+            };
+            match result {
+                Ok(e) => entries.push(e),
+                Err(err) => tracing::warn!("restore session failed: {err}"),
+            }
+        }
+        if !entries.is_empty() {
+            let active = snap.active.min(entries.len() - 1);
+            tracing::info!("restored {} session(s) from snapshot", entries.len());
+            return (entries, active);
+        }
+    }
+    match Entry::spawn_local(shell, fallback_cols, fallback_rows) {
+        Ok(e) => (vec![e], 0),
+        Err(err) => {
+            tracing::error!("failed to spawn default shell: {err}");
+            (Vec::new(), 0)
+        }
+    }
+}
+
+/// Serialize current entries into a Snapshot and persist to disk.
+pub fn persist(entries: &[Entry], active_tab: usize, default_shell: &str) {
+    let sessions: Vec<SessionRecord> = entries
+        .iter()
+        .map(|e| {
+            let (cols, rows) = (e.session.grid.cols(), e.session.grid.rows());
+            let kind = match &e.session.kind {
+                SessionKind::Local => SessionRecordKind::Local {
+                    command: default_shell.to_string(),
+                },
+                SessionKind::Ssh { host, user } => SessionRecordKind::Ssh {
+                    host: host.clone(),
+                    user: user.clone(),
+                    port: 22,
+                },
+                SessionKind::Agent { model, .. } => SessionRecordKind::Agent {
+                    command: e.session.title.clone(),
+                    model: model.clone(),
+                },
+            };
+            SessionRecord { kind, title: e.session.title.clone(), cols, rows }
+        })
+        .collect();
+
+    Snapshot {
+        version: Snapshot::VERSION,
+        active: active_tab.min(sessions.len().saturating_sub(1)),
+        sessions,
+    }
+    .save();
 }
