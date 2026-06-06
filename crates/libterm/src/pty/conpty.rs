@@ -11,9 +11,10 @@ use windows::Win32::System::Console::{
 };
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
-    CreateProcessW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
-    WaitForSingleObject, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
-    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, STARTUPINFOEXW,
+    CreateProcessW, InitializeProcThreadAttributeList, ResumeThread, SuspendThread,
+    UpdateProcThreadAttribute, WaitForSingleObject, EXTENDED_STARTUPINFO_PRESENT,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+    STARTUPINFOEXW,
 };
 
 use super::Pty;
@@ -43,19 +44,20 @@ impl ConPty {
     ) -> Result<Self> {
         unsafe {
             // ── Pipe pair: child stdout → our reader ──────────────────────────
-            let mut pty_read = HANDLE::default();   // we read from this
-            let mut pty_write = HANDLE::default();  // child writes to this (via ConPTY)
-            CreatePipe(&mut pty_read, &mut pty_write, None, 0)
-                .context("CreatePipe (output)")?;
+            let mut pty_read = HANDLE::default(); // we read from this
+            let mut pty_write = HANDLE::default(); // child writes to this (via ConPTY)
+            CreatePipe(&mut pty_read, &mut pty_write, None, 0).context("CreatePipe (output)")?;
 
             // ── Pipe pair: our writer → child stdin ───────────────────────────
-            let mut shell_read = HANDLE::default();  // child reads (via ConPTY)
+            let mut shell_read = HANDLE::default(); // child reads (via ConPTY)
             let mut shell_write = HANDLE::default(); // we write to this
-            CreatePipe(&mut shell_read, &mut shell_write, None, 0)
-                .context("CreatePipe (input)")?;
+            CreatePipe(&mut shell_read, &mut shell_write, None, 0).context("CreatePipe (input)")?;
 
             // ── Create the pseudo-console ─────────────────────────────────────
-            let size = COORD { X: cols as i16, Y: rows as i16 };
+            let size = COORD {
+                X: cols as i16,
+                Y: rows as i16,
+            };
             // ConPTY takes ownership of shell_read (input) and pty_write (output)
             let hpcon = CreatePseudoConsole(size, shell_read, pty_write, 0)
                 .context("CreatePseudoConsole")?;
@@ -101,14 +103,18 @@ impl ConPty {
             InitializeProcThreadAttributeList(attr_list, 1, 0, &mut attr_size)
                 .context("InitializeProcThreadAttributeList")?;
 
-            // Add the ConPTY attribute
-            let hpcon_val = hpcon.0 as usize;
+            // Add the ConPTY attribute.  For PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
+            // the *handle itself* is the attribute value (lpValue = HPCON), not a
+            // pointer to it — matching Microsoft's ConPTY sample
+            // (`UpdateProcThreadAttribute(..., hPC, sizeof(HPCON), ...)`).  Passing
+            // `&hpcon` instead makes the kernel treat a stack address as the
+            // pseudoconsole, so the child silently allocates its own console.
             UpdateProcThreadAttribute(
                 attr_list,
                 0,
                 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
-                Some(&hpcon_val as *const usize as *const std::ffi::c_void),
-                std::mem::size_of::<usize>(),
+                Some(hpcon.0 as *const std::ffi::c_void),
+                std::mem::size_of::<HPCON>(),
                 None,
                 None,
             )
@@ -139,7 +145,11 @@ impl ConPty {
             )
             .context("CreateProcessW")?;
 
-            Ok(Self { hpcon, write_pipe: shell_write, process_info })
+            Ok(Self {
+                hpcon,
+                write_pipe: shell_write,
+                process_info,
+            })
         }
     }
 
@@ -155,6 +165,16 @@ impl ConPty {
 }
 
 impl Pty for ConPty {
+    /// Suspend the primary thread of the child process to freeze CPU usage.
+    fn suspend(&mut self) {
+        unsafe { SuspendThread(self.process_info.hThread); }
+    }
+
+    /// Resume the primary thread of the child process.
+    fn resume(&mut self) {
+        unsafe { ResumeThread(self.process_info.hThread); }
+    }
+
     fn write(&mut self, data: &[u8]) -> Result<()> {
         unsafe {
             let mut written = 0u32;
@@ -166,8 +186,14 @@ impl Pty for ConPty {
 
     fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
         unsafe {
-            ResizePseudoConsole(self.hpcon, COORD { X: cols as i16, Y: rows as i16 })
-                .context("ResizePseudoConsole")?;
+            ResizePseudoConsole(
+                self.hpcon,
+                COORD {
+                    X: cols as i16,
+                    Y: rows as i16,
+                },
+            )
+            .context("ResizePseudoConsole")?;
         }
         Ok(())
     }

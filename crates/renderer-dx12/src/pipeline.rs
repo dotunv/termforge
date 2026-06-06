@@ -5,10 +5,10 @@
 //! The pixel shader samples the R8 glyph atlas and lerps fg/bg.
 
 use anyhow::{Context, Result};
-use windows::Win32::Graphics::Direct3D12::D3D_ROOT_SIGNATURE_VERSION_1;
 use windows::Win32::Graphics::Direct3D::Fxc::{
     D3DCompile, D3DCOMPILE_DEBUG, D3DCOMPILE_OPTIMIZATION_LEVEL3, D3DCOMPILE_SKIP_OPTIMIZATION,
 };
+use windows::Win32::Graphics::Direct3D12::D3D_ROOT_SIGNATURE_VERSION_1;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 
@@ -87,7 +87,10 @@ impl RenderPipeline {
         unsafe {
             let root_signature = create_root_signature(device)?;
             let pso = create_pso(device, &root_signature)?;
-            Ok(Self { root_signature, pso })
+            Ok(Self {
+                root_signature,
+                pso,
+            })
         }
     }
 }
@@ -156,7 +159,8 @@ unsafe fn create_root_signature(device: &ID3D12Device) -> Result<ID3D12RootSigna
         D3D_ROOT_SIGNATURE_VERSION_1,
         &mut blob,
         Some(&mut error_blob),
-    ).map_err(|e| {
+    )
+    .map_err(|e| {
         if let Some(err) = &error_blob {
             let msg = unsafe {
                 let ptr = err.GetBufferPointer() as *const u8;
@@ -170,13 +174,12 @@ unsafe fn create_root_signature(device: &ID3D12Device) -> Result<ID3D12RootSigna
     })?;
 
     let blob = blob.unwrap();
-    device.CreateRootSignature(
-        0,
-        std::slice::from_raw_parts(
-            blob.GetBufferPointer() as *const u8,
-            blob.GetBufferSize(),
-        ),
-    ).context("CreateRootSignature")
+    device
+        .CreateRootSignature(
+            0,
+            std::slice::from_raw_parts(blob.GetBufferPointer() as *const u8, blob.GetBufferSize()),
+        )
+        .context("CreateRootSignature")
 }
 
 unsafe fn create_pso(
@@ -198,7 +201,7 @@ unsafe fn create_pso(
     // Input layout matching CellVertex.
     let position_sem = windows::core::s!("POSITION");
     let texcoord_sem = windows::core::s!("TEXCOORD");
-    let color_sem    = windows::core::s!("COLOR");
+    let color_sem = windows::core::s!("COLOR");
 
     let input_layout = [
         D3D12_INPUT_ELEMENT_DESC {
@@ -318,7 +321,8 @@ unsafe fn compile_shader(
         0,
         &mut code,
         Some(&mut errors),
-    ).map_err(|e| {
+    )
+    .map_err(|e| {
         if let Some(err) = &errors {
             let ptr = err.GetBufferPointer() as *const u8;
             let len = err.GetBufferSize();

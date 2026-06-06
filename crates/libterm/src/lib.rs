@@ -8,7 +8,7 @@ pub mod vt;
 
 #[cfg(test)]
 mod tests {
-    mod grid_tests;
     mod block_tests;
+    mod grid_tests;
     mod vt_tests;
 }

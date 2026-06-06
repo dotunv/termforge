@@ -25,6 +25,7 @@ russh-keys = "0.44"
 
 # serialization / config
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
 
 # utilities
@@ -39,6 +40,8 @@ async-trait = "0.1"
 # Windows-specific (referenced per-crate with cfg)
 windows = { version = "0.58", features = [
     "Win32_System_Console",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",
@@ -48,6 +51,8 @@ windows = { version = "0.58", features = [
     "Win32_System_IO",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_Controls",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D_Fxc",
     "Win32_Graphics_Direct3D12",

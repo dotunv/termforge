@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use windows::core::Interface;
+use windows::Win32::Foundation::HWND;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
-use windows::Win32::Foundation::HWND;
 
 /// Number of swap-chain back buffers (double-buffered).
 pub const FRAME_COUNT: usize = 2;
@@ -55,7 +55,9 @@ impl Dx12Context {
                 // Enable D3D12 debug layer in debug builds.
                 let mut debug: Option<ID3D12Debug> = None;
                 if D3D12GetDebugInterface(&mut debug).is_ok() {
-                    if let Some(d) = debug { d.EnableDebugLayer(); }
+                    if let Some(d) = debug {
+                        d.EnableDebugLayer();
+                    }
                 }
             }
 
@@ -65,16 +67,16 @@ impl Dx12Context {
             let device = device.unwrap();
 
             // ── Command queue ────────────────────────────────────────────────
-            let cmd_queue: ID3D12CommandQueue = device.CreateCommandQueue(
-                &D3D12_COMMAND_QUEUE_DESC {
+            let cmd_queue: ID3D12CommandQueue = device
+                .CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC {
                     Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
                     ..Default::default()
-                },
-            ).context("CreateCommandQueue")?;
+                })
+                .context("CreateCommandQueue")?;
 
             // ── DXGI factory + swap chain ─────────────────────────────────────
-            let factory: IDXGIFactory4 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))
-                .context("CreateDXGIFactory2")?;
+            let factory: IDXGIFactory4 =
+                CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).context("CreateDXGIFactory2")?;
 
             let sc_desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: width,
@@ -83,7 +85,10 @@ impl Dx12Context {
                 BufferCount: FRAME_COUNT as u32,
                 BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
                 ..Default::default()
             };
 
@@ -94,28 +99,31 @@ impl Dx12Context {
                 .context("IDXGISwapChain3 cast")?;
 
             // Disable Alt+Enter fullscreen toggle (we manage this ourselves).
-            factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER).ok();
+            factory
+                .MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER)
+                .ok();
 
             // ── RTV descriptor heap ───────────────────────────────────────────
-            let rtv_heap: ID3D12DescriptorHeap = device.CreateDescriptorHeap(
-                &D3D12_DESCRIPTOR_HEAP_DESC {
+            let rtv_heap: ID3D12DescriptorHeap = device
+                .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
                     Type: D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
                     NumDescriptors: FRAME_COUNT as u32,
                     ..Default::default()
-                },
-            ).context("CreateDescriptorHeap (RTV)")?;
-            let rtv_stride = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+                })
+                .context("CreateDescriptorHeap (RTV)")?;
+            let rtv_stride =
+                device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
             let rtv_base = rtv_heap.GetCPUDescriptorHandleForHeapStart();
 
             // ── SRV heap (shader-visible) — slot 0 reserved for glyph atlas ──
-            let srv_heap: ID3D12DescriptorHeap = device.CreateDescriptorHeap(
-                &D3D12_DESCRIPTOR_HEAP_DESC {
+            let srv_heap: ID3D12DescriptorHeap = device
+                .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
                     Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
                     NumDescriptors: 16, // plenty for Phase 2
                     Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
                     ..Default::default()
-                },
-            ).context("CreateDescriptorHeap (SRV)")?;
+                })
+                .context("CreateDescriptorHeap (SRV)")?;
 
             // ── Per-frame resources ───────────────────────────────────────────
             let frame_index = swap_chain.GetCurrentBackBufferIndex() as usize;
@@ -131,24 +139,29 @@ impl Dx12Context {
                     .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
                     .unwrap();
 
-                FrameResources { render_target: Some(render_target), cmd_allocator, fence_value: 0 }
+                FrameResources {
+                    render_target: Some(render_target),
+                    cmd_allocator,
+                    fence_value: 0,
+                }
             });
 
             // ── Command list (starts closed — caller must Reset before use) ──
-            let cmd_list: ID3D12GraphicsCommandList = device.CreateCommandList(
-                0,
-                D3D12_COMMAND_LIST_TYPE_DIRECT,
-                &frames[frame_index].cmd_allocator,
-                None,
-            ).context("CreateCommandList")?;
+            let cmd_list: ID3D12GraphicsCommandList = device
+                .CreateCommandList(
+                    0,
+                    D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    &frames[frame_index].cmd_allocator,
+                    None,
+                )
+                .context("CreateCommandList")?;
             cmd_list.Close().context("initial cmd_list Close")?;
 
             // ── Fence ────────────────────────────────────────────────────────
             let fence: ID3D12Fence = device
                 .CreateFence(0, D3D12_FENCE_FLAG_NONE)
                 .context("CreateFence")?;
-            let fence_event = CreateEventW(None, false, false, None)
-                .context("CreateEventW")?;
+            let fence_event = CreateEventW(None, false, false, None).context("CreateEventW")?;
 
             let viewport = D3D12_VIEWPORT {
                 Width: width as f32,
@@ -156,7 +169,11 @@ impl Dx12Context {
                 MaxDepth: 1.0,
                 ..Default::default()
             };
-            let scissor = RECT { right: width as i32, bottom: height as i32, ..Default::default() };
+            let scissor = RECT {
+                right: width as i32,
+                bottom: height as i32,
+                ..Default::default()
+            };
 
             Ok(Self {
                 device,
@@ -185,17 +202,23 @@ impl Dx12Context {
             let frame = &self.frames[self.frame_index];
             // Wait if GPU is still using this allocator's commands.
             if self.fence.GetCompletedValue() < frame.fence_value {
-                self.fence.SetEventOnCompletion(frame.fence_value, self.fence_event)
+                self.fence
+                    .SetEventOnCompletion(frame.fence_value, self.fence_event)
                     .context("SetEventOnCompletion")?;
                 WaitForSingleObject(self.fence_event, u32::MAX);
             }
 
             frame.cmd_allocator.Reset().context("cmd_allocator Reset")?;
-            self.cmd_list.Reset(&frame.cmd_allocator, None).context("cmd_list Reset")?;
+            self.cmd_list
+                .Reset(&frame.cmd_allocator, None)
+                .context("cmd_list Reset")?;
 
             // Transition back buffer: PRESENT → RENDER_TARGET
             let barrier = transition_barrier(
-                self.frames[self.frame_index].render_target.as_ref().unwrap(),
+                self.frames[self.frame_index]
+                    .render_target
+                    .as_ref()
+                    .unwrap(),
                 D3D12_RESOURCE_STATE_PRESENT,
                 D3D12_RESOURCE_STATE_RENDER_TARGET,
             );
@@ -214,7 +237,10 @@ impl Dx12Context {
         unsafe {
             // Transition: RENDER_TARGET → PRESENT
             let barrier = transition_barrier(
-                self.frames[self.frame_index].render_target.as_ref().unwrap(),
+                self.frames[self.frame_index]
+                    .render_target
+                    .as_ref()
+                    .unwrap(),
                 D3D12_RESOURCE_STATE_RENDER_TARGET,
                 D3D12_RESOURCE_STATE_PRESENT,
             );
@@ -231,7 +257,8 @@ impl Dx12Context {
             // Signal fence for this frame
             let signal_value = self.next_fence_value;
             self.next_fence_value += 1;
-            self.cmd_queue.Signal(&self.fence, signal_value)
+            self.cmd_queue
+                .Signal(&self.fence, signal_value)
                 .context("Signal")?;
             self.frames[self.frame_index].fence_value = signal_value;
 
@@ -254,18 +281,23 @@ impl Dx12Context {
                 frame.render_target = None;
             }
 
-            self.swap_chain.ResizeBuffers(
-                FRAME_COUNT as u32,
-                width,
-                height,
-                DXGI_FORMAT_UNKNOWN, // preserve format
-                DXGI_SWAP_CHAIN_FLAG(0),
-            ).context("ResizeBuffers")?;
+            self.swap_chain
+                .ResizeBuffers(
+                    FRAME_COUNT as u32,
+                    width,
+                    height,
+                    DXGI_FORMAT_UNKNOWN, // preserve format
+                    DXGI_SWAP_CHAIN_FLAG(0),
+                )
+                .context("ResizeBuffers")?;
 
             let rtv_base = self.rtv_heap.GetCPUDescriptorHandleForHeapStart();
             for (i, frame) in self.frames.iter_mut().enumerate() {
-                frame.render_target = Some(self.swap_chain.GetBuffer(i as u32)
-                    .context("GetBuffer after resize")?);
+                frame.render_target = Some(
+                    self.swap_chain
+                        .GetBuffer(i as u32)
+                        .context("GetBuffer after resize")?,
+                );
                 self.device.CreateRenderTargetView(
                     frame.render_target.as_ref().unwrap(),
                     None,
@@ -284,7 +316,11 @@ impl Dx12Context {
                 MaxDepth: 1.0,
                 ..Default::default()
             };
-            self.scissor = RECT { right: width as i32, bottom: height as i32, ..Default::default() };
+            self.scissor = RECT {
+                right: width as i32,
+                bottom: height as i32,
+                ..Default::default()
+            };
             Ok(())
         }
     }
@@ -294,9 +330,12 @@ impl Dx12Context {
         unsafe {
             let value = self.next_fence_value;
             self.next_fence_value += 1;
-            self.cmd_queue.Signal(&self.fence, value).context("flush Signal")?;
+            self.cmd_queue
+                .Signal(&self.fence, value)
+                .context("flush Signal")?;
             if self.fence.GetCompletedValue() < value {
-                self.fence.SetEventOnCompletion(value, self.fence_event)
+                self.fence
+                    .SetEventOnCompletion(value, self.fence_event)
                     .context("flush SetEventOnCompletion")?;
                 WaitForSingleObject(self.fence_event, u32::MAX);
             }
@@ -308,7 +347,9 @@ impl Dx12Context {
 impl Drop for Dx12Context {
     fn drop(&mut self) {
         let _ = self.flush_gpu();
-        unsafe { CloseHandle(self.fence_event).ok(); }
+        unsafe {
+            CloseHandle(self.fence_event).ok();
+        }
     }
 }
 

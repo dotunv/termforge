@@ -1,5 +1,5 @@
-use uuid::Uuid;
 use super::session::{Session, TabId};
+use uuid::Uuid;
 
 pub type WorkspaceId = Uuid;
 

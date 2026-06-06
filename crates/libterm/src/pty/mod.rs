@@ -9,4 +9,8 @@ pub trait Pty: Send {
     fn write(&mut self, data: &[u8]) -> anyhow::Result<()>;
     /// Resize the PTY.
     fn resize(&mut self, cols: u16, rows: u16) -> anyhow::Result<()>;
+    /// Suspend the child process (freeze CPU).  Default: no-op.
+    fn suspend(&mut self) {}
+    /// Resume a previously suspended child process.  Default: no-op.
+    fn resume(&mut self) {}
 }

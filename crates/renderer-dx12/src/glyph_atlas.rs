@@ -11,7 +11,7 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 
 /// Printable ASCII range stored in the atlas.
 const FIRST_CHAR: u32 = 0x20; // space
-const LAST_CHAR: u32 = 0x7E;  // tilde
+const LAST_CHAR: u32 = 0x7E; // tilde
 const GLYPH_COUNT: u32 = LAST_CHAR - FIRST_CHAR + 1; // 95
 const ATLAS_COLS: u32 = 16;
 const ATLAS_ROWS: u32 = (GLYPH_COUNT + ATLAS_COLS - 1) / ATLAS_COLS; // 6
@@ -44,16 +44,20 @@ impl GlyphAtlas {
         font_family: &str,
         font_size_pt: f32,
         dpi: f32,
-    ) -> Result<(Self, ID3D12Resource /* upload buffer, keep alive until exec */)> {
+    ) -> Result<(
+        Self,
+        ID3D12Resource, /* upload buffer, keep alive until exec */
+    )> {
         unsafe {
             // ── DirectWrite setup ─────────────────────────────────────────────
             let dwrite: IDWriteFactory =
-                DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
-                    .context("DWriteCreateFactory")?;
+                DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).context("DWriteCreateFactory")?;
 
             let font_size_dip = font_size_pt * dpi / 72.0;
-            let font_family_w: Vec<u16> =
-                font_family.encode_utf16().chain(std::iter::once(0)).collect();
+            let font_family_w: Vec<u16> = font_family
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
 
             let text_format: IDWriteTextFormat = dwrite
                 .CreateTextFormat(
@@ -70,12 +74,7 @@ impl GlyphAtlas {
             // ── Measure cell dimensions from 'M' ─────────────────────────────
             let m_wide = [b'M' as u16];
             let layout: IDWriteTextLayout = dwrite
-                .CreateTextLayout(
-                    &m_wide,
-                    &text_format,
-                    1000.0,
-                    1000.0,
-                )
+                .CreateTextLayout(&m_wide, &text_format, 1000.0, 1000.0)
                 .context("CreateTextLayout (M)")?;
 
             let mut metrics = DWRITE_TEXT_METRICS::default();
@@ -155,7 +154,9 @@ impl GlyphAtlas {
                 };
 
                 // Space glyph — leave blank in atlas.
-                if cp == b' ' as u32 { continue; }
+                if cp == b' ' as u32 {
+                    continue;
+                }
 
                 // Resolve glyph index.
                 let codepoints = [cp];
@@ -164,12 +165,19 @@ impl GlyphAtlas {
                     .GetGlyphIndices(codepoints.as_ptr(), 1, glyph_index.as_mut_ptr())
                     .context("GetGlyphIndices")?;
 
-                if glyph_index[0] == 0 { continue; }
+                if glyph_index[0] == 0 {
+                    continue;
+                }
 
                 // Glyph metrics for advance.
                 let mut glyph_metrics = [DWRITE_GLYPH_METRICS::default(); 1];
                 font_face
-                    .GetDesignGlyphMetrics(glyph_index.as_ptr(), 1, glyph_metrics.as_mut_ptr(), false)
+                    .GetDesignGlyphMetrics(
+                        glyph_index.as_ptr(),
+                        1,
+                        glyph_metrics.as_mut_ptr(),
+                        false,
+                    )
                     .context("GetDesignGlyphMetrics")?;
                 let advance = glyph_metrics[0].advanceWidth as f32 / design_units * font_size_dip;
 
@@ -203,35 +211,54 @@ impl GlyphAtlas {
                     )
                     .context("CreateGlyphRunAnalysis")?;
 
+                // The glyph run was analysed with a ClearType rendering mode, so
+                // we must query CLEARTYPE_3x1 bounds/texture (3 subpixel bytes per
+                // pixel).  Requesting ALIASED_1x1 here returns an *empty* rect and
+                // produces a blank atlas — the classic DirectWrite mismatch.
                 let bounds = analysis
-                    .GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1)
+                    .GetAlphaTextureBounds(DWRITE_TEXTURE_CLEARTYPE_3x1)
                     .context("GetAlphaTextureBounds")?;
 
                 let bw = (bounds.right - bounds.left).max(0) as u32;
                 let bh = (bounds.bottom - bounds.top).max(0) as u32;
-                if bw == 0 || bh == 0 { continue; }
+                if bw == 0 || bh == 0 {
+                    continue;
+                }
 
-                let mut glyph_pixels = vec![0u8; (bw * bh) as usize];
+                // CLEARTYPE_3x1 = 3 bytes (R,G,B coverage) per pixel.
+                let mut glyph_pixels = vec![0u8; (bw * bh * 3) as usize];
                 analysis
-                    .CreateAlphaTexture(
-                        DWRITE_TEXTURE_ALIASED_1x1,
-                        &bounds,
-                        &mut glyph_pixels,
-                    )
+                    .CreateAlphaTexture(DWRITE_TEXTURE_CLEARTYPE_3x1, &bounds, &mut glyph_pixels)
                     .context("CreateAlphaTexture")?;
 
-                // Blit glyph_pixels into atlas_data, clipped to cell bounds.
-                let dst_x = bounds.left.max(cell_x as i32) as u32;
-                let dst_y = bounds.top.max(cell_y as i32) as u32;
-
+                // Blit into atlas_data: average the 3 subpixel coverages into a
+                // single grayscale alpha, mapping each glyph pixel to its true
+                // atlas position and clipping to the cell bounds.
                 for gy in 0..bh {
-                    let ay = dst_y + gy;
-                    if ay >= cell_y + cell_h || ay >= atlas_h { break; }
+                    let ay = bounds.top + gy as i32;
+                    if ay < cell_y as i32 || ay >= (cell_y + cell_h) as i32 || ay >= atlas_h as i32
+                    {
+                        continue;
+                    }
                     for gx in 0..bw {
-                        let ax = dst_x + gx;
-                        if ax >= cell_x + cell_w || ax >= atlas_w { break; }
-                        atlas_data[(ay * atlas_w + ax) as usize] =
-                            glyph_pixels[(gy * bw + gx) as usize];
+                        let ax = bounds.left + gx as i32;
+                        if ax < cell_x as i32
+                            || ax >= (cell_x + cell_w) as i32
+                            || ax >= atlas_w as i32
+                        {
+                            continue;
+                        }
+                        let idx = ((gy * bw + gx) * 3) as usize;
+                        let r = glyph_pixels[idx] as u32;
+                        let g = glyph_pixels[idx + 1] as u32;
+                        let b = glyph_pixels[idx + 2] as u32;
+                        // BT.709 luminance weights give perceptually correct
+                        // grayscale alpha from ClearType subpixel coverage.
+                        // Simple (R+G+B)/3 over-weights red/blue and produces
+                        // visibly thin, slightly blurry glyphs.
+                        let luma = (r * 54 + g * 183 + b * 19) >> 8;
+                        atlas_data[(ay as u32 * atlas_w + ax as u32) as usize] =
+                            luma.min(255) as u8;
                     }
                 }
             }
@@ -244,19 +271,27 @@ impl GlyphAtlas {
                 DepthOrArraySize: 1,
                 MipLevels: 1,
                 Format: DXGI_FORMAT_R8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
                 Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
                 ..Default::default()
             };
             let mut texture: Option<ID3D12Resource> = None;
-            device.CreateCommittedResource(
-                &D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() },
-                D3D12_HEAP_FLAG_NONE,
-                &texture_desc,
-                D3D12_RESOURCE_STATE_COPY_DEST,
-                None,
-                &mut texture,
-            ).context("CreateCommittedResource (atlas)")?;
+            device
+                .CreateCommittedResource(
+                    &D3D12_HEAP_PROPERTIES {
+                        Type: D3D12_HEAP_TYPE_DEFAULT,
+                        ..Default::default()
+                    },
+                    D3D12_HEAP_FLAG_NONE,
+                    &texture_desc,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    None,
+                    &mut texture,
+                )
+                .context("CreateCommittedResource (atlas)")?;
             let texture = texture.unwrap();
 
             // ── Upload buffer ─────────────────────────────────────────────────
@@ -265,28 +300,41 @@ impl GlyphAtlas {
             let upload_size = (row_pitch * atlas_h) as u64;
 
             let mut upload_buf: Option<ID3D12Resource> = None;
-            device.CreateCommittedResource(
-                &D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_UPLOAD, ..Default::default() },
-                D3D12_HEAP_FLAG_NONE,
-                &D3D12_RESOURCE_DESC {
-                    Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-                    Width: upload_size,
-                    Height: 1,
-                    DepthOrArraySize: 1,
-                    MipLevels: 1,
-                    SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                    Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-                    ..Default::default()
-                },
-                D3D12_RESOURCE_STATE_GENERIC_READ,
-                None,
-                &mut upload_buf,
-            ).context("CreateCommittedResource (atlas upload)")?;
+            device
+                .CreateCommittedResource(
+                    &D3D12_HEAP_PROPERTIES {
+                        Type: D3D12_HEAP_TYPE_UPLOAD,
+                        ..Default::default()
+                    },
+                    D3D12_HEAP_FLAG_NONE,
+                    &D3D12_RESOURCE_DESC {
+                        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                        Width: upload_size,
+                        Height: 1,
+                        DepthOrArraySize: 1,
+                        MipLevels: 1,
+                        SampleDesc: DXGI_SAMPLE_DESC {
+                            Count: 1,
+                            Quality: 0,
+                        },
+                        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                        ..Default::default()
+                    },
+                    D3D12_RESOURCE_STATE_GENERIC_READ,
+                    None,
+                    &mut upload_buf,
+                )
+                .context("CreateCommittedResource (atlas upload)")?;
             let upload_buf = upload_buf.unwrap();
 
             // Map upload buffer and fill row-by-row (accounting for row pitch padding).
             let mut mapped_ptr = std::ptr::null_mut();
-            upload_buf.Map(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }), Some(&mut mapped_ptr))
+            upload_buf
+                .Map(
+                    0,
+                    Some(&D3D12_RANGE { Begin: 0, End: 0 }),
+                    Some(&mut mapped_ptr),
+                )
                 .context("Map upload buffer")?;
             for y in 0..atlas_h {
                 let src = atlas_data[(y * atlas_w) as usize..((y + 1) * atlas_w) as usize].as_ptr();
@@ -315,7 +363,9 @@ impl GlyphAtlas {
             let dst = D3D12_TEXTURE_COPY_LOCATION {
                 pResource: std::mem::ManuallyDrop::new(Some(texture.clone())),
                 Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                    SubresourceIndex: 0,
+                },
             };
             upload_cmd_list.CopyTextureRegion(&dst, 0, 0, 0, &src, None);
 
@@ -328,7 +378,14 @@ impl GlyphAtlas {
             upload_cmd_list.ResourceBarrier(&[barrier]);
 
             Ok((
-                Self { texture, cell_w, cell_h, atlas_w, atlas_h, uvs },
+                Self {
+                    texture,
+                    cell_w,
+                    cell_h,
+                    atlas_w,
+                    atlas_h,
+                    uvs,
+                },
                 upload_buf,
             ))
         }
@@ -347,9 +404,8 @@ impl GlyphAtlas {
     /// Create an SRV for the atlas texture in the given heap slot.
     pub fn create_srv(&self, device: &ID3D12Device, heap: &ID3D12DescriptorHeap, slot: u32) {
         unsafe {
-            let stride = device.GetDescriptorHandleIncrementSize(
-                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-            );
+            let stride =
+                device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
             let base = heap.GetCPUDescriptorHandleForHeapStart();
             let handle = D3D12_CPU_DESCRIPTOR_HANDLE {
                 ptr: base.ptr + (slot * stride) as usize,

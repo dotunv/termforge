@@ -7,7 +7,10 @@ fn write_chars_appear_in_grid() {
         grid.write_char(c);
     }
     let text = grid.visible_text();
-    assert!(text.contains("hello"), "expected 'hello' in grid output, got: {text:?}");
+    assert!(
+        text.contains("hello"),
+        "expected 'hello' in grid output, got: {text:?}"
+    );
 }
 
 #[test]
@@ -39,8 +42,14 @@ fn erase_in_line_clears_content() {
     grid.set_cursor(5, 0);
     grid.erase_in_line(0); // erase from cursor to end
     let text = grid.visible_text();
-    assert!(text.starts_with("hello"), "expected 'hello' prefix, got: {text:?}");
-    assert!(!text.contains("world"), "expected 'world' erased, got: {text:?}");
+    assert!(
+        text.starts_with("hello"),
+        "expected 'hello' prefix, got: {text:?}"
+    );
+    assert!(
+        !text.contains("world"),
+        "expected 'world' erased, got: {text:?}"
+    );
 }
 
 #[test]
@@ -53,5 +62,8 @@ fn scrollback_accumulates_on_overflow() {
         grid.carriage_return();
         grid.line_feed();
     }
-    assert!(grid.scrollback.len() > 0, "expected scrollback to have rows");
+    assert!(
+        grid.scrollback.len() > 0,
+        "expected scrollback to have rows"
+    );
 }

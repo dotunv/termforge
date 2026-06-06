@@ -1,7 +1,7 @@
 use uuid::Uuid;
 
-use crate::block::store::{BlockStatus, BlockStore, CommandBlock};
 use crate::block::detector::BlockDetector;
+use crate::block::store::{BlockStatus, BlockStore};
 use crate::vt::sequences::Osc133;
 
 #[test]
@@ -52,6 +52,9 @@ fn osc133_parse() {
     assert_eq!(Osc133::parse("133;A"), Some(Osc133::PromptStart));
     assert_eq!(Osc133::parse("133;C"), Some(Osc133::CommandStart));
     assert_eq!(Osc133::parse("133;D;0"), Some(Osc133::CommandFinished(0)));
-    assert_eq!(Osc133::parse("133;D;127"), Some(Osc133::CommandFinished(127)));
+    assert_eq!(
+        Osc133::parse("133;D;127"),
+        Some(Osc133::CommandFinished(127))
+    );
     assert_eq!(Osc133::parse("999;X"), None);
 }

@@ -1,5 +1,5 @@
-use std::collections::VecDeque;
 use super::cell::Cell;
+use std::collections::VecDeque;
 
 /// A fixed-capacity scrollback buffer storing rows pushed off the top of the grid.
 pub struct ScrollbackBuffer {

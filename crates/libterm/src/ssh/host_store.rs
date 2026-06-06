@@ -27,10 +27,16 @@ pub struct HostConfig {
     pub jump_host: Option<String>,
 }
 
-fn default_port() -> u16 { 22 }
+fn default_port() -> u16 {
+    22
+}
 
 impl HostConfig {
-    pub fn new(name: impl Into<String>, hostname: impl Into<String>, username: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        hostname: impl Into<String>,
+        username: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             hostname: hostname.into(),
@@ -64,10 +70,8 @@ impl HostStore {
     pub fn load() -> Result<Self> {
         let path = store_path();
         let hosts = if path.exists() {
-            let text = std::fs::read_to_string(&path)
-                .context("read hosts.toml")?;
-            let file: StoreFile = toml::from_str(&text)
-                .context("parse hosts.toml")?;
+            let text = std::fs::read_to_string(&path).context("read hosts.toml")?;
+            let file: StoreFile = toml::from_str(&text).context("parse hosts.toml")?;
             file.hosts
         } else {
             Vec::new()
@@ -79,7 +83,9 @@ impl HostStore {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).context("create config dir")?;
         }
-        let file = StoreFile { hosts: self.hosts.clone() };
+        let file = StoreFile {
+            hosts: self.hosts.clone(),
+        };
         let text = toml::to_string_pretty(&file).context("serialise hosts")?;
         std::fs::write(&self.path, text).context("write hosts.toml")?;
         Ok(())
@@ -102,7 +108,10 @@ impl HostStore {
 
 impl Default for HostStore {
     fn default() -> Self {
-        Self { hosts: Vec::new(), path: store_path() }
+        Self {
+            hosts: Vec::new(),
+            path: store_path(),
+        }
     }
 }
 

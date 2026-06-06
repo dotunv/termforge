@@ -1,6 +1,8 @@
 use std::time::Instant;
 use uuid::Uuid;
 
+use crate::vt::sequences::OscNotification;
+
 pub type BlockId = Uuid;
 pub type SessionId = Uuid;
 
@@ -16,6 +18,8 @@ pub struct CommandBlock {
     pub status: BlockStatus,
     pub kind: BlockKind,
     pub agent_ctx: Option<AgentContext>,
+    /// Agent-pushed notification state (from OSC 9001).
+    pub notification: Option<OscNotification>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -36,28 +40,28 @@ pub enum BlockKind {
 #[derive(Debug, Clone)]
 pub struct AgentContext {
     /// Human-readable model tag, e.g. "claude-opus-4-5" or "gpt-4o".
-    pub model:      String,
+    pub model: String,
     /// High-level task description (first prompt / system label).
-    pub task:       String,
+    pub task: String,
     /// Ordered list of tool names called so far.
     pub tool_calls: Vec<String>,
     /// Total input tokens consumed.
-    pub tokens_in:  u32,
+    pub tokens_in: u32,
     /// Total output tokens produced.
     pub tokens_out: u32,
     /// Estimated cost in USD (0.0 when unknown).
-    pub cost_usd:   f32,
+    pub cost_usd: f32,
 }
 
 impl AgentContext {
     pub fn new(model: impl Into<String>, task: impl Into<String>) -> Self {
         Self {
-            model:      model.into(),
-            task:       task.into(),
+            model: model.into(),
+            task: task.into(),
             tool_calls: Vec::new(),
-            tokens_in:  0,
+            tokens_in: 0,
             tokens_out: 0,
-            cost_usd:   0.0,
+            cost_usd: 0.0,
         }
     }
 
@@ -67,7 +71,11 @@ impl AgentContext {
 
     /// Returns a compact cost string, or empty string if cost is unknown.
     pub fn cost_display(&self) -> String {
-        if self.cost_usd > 0.0 { format!("${:.4}", self.cost_usd) } else { String::new() }
+        if self.cost_usd > 0.0 {
+            format!("${:.4}", self.cost_usd)
+        } else {
+            String::new()
+        }
     }
 }
 
@@ -84,13 +92,22 @@ impl CommandBlock {
             status: BlockStatus::Running,
             kind: BlockKind::Command,
             agent_ctx: None,
+            notification: None,
         }
+    }
+
+    pub fn set_notification(&mut self, n: OscNotification) {
+        self.notification = Some(n);
     }
 
     pub fn finish(&mut self, exit_code: i32) {
         self.exit_code = Some(exit_code);
         self.finished_at = Some(Instant::now());
-        self.status = if exit_code == 0 { BlockStatus::Success } else { BlockStatus::Error };
+        self.status = if exit_code == 0 {
+            BlockStatus::Success
+        } else {
+            BlockStatus::Error
+        };
     }
 
     pub fn append_output(&mut self, bytes: &[u8]) {
@@ -102,7 +119,8 @@ impl CommandBlock {
     }
 
     pub fn duration_ms(&self) -> Option<u128> {
-        self.finished_at.map(|f| f.duration_since(self.started_at).as_millis())
+        self.finished_at
+            .map(|f| f.duration_since(self.started_at).as_millis())
     }
 }
 
@@ -130,7 +148,9 @@ impl BlockStore {
     }
 
     pub fn running(&self) -> impl Iterator<Item = &CommandBlock> {
-        self.blocks.iter().filter(|b| b.status == BlockStatus::Running)
+        self.blocks
+            .iter()
+            .filter(|b| b.status == BlockStatus::Running)
     }
 
     /// Clone the most recent `n` blocks (O(n), safe to call per-frame for small n).
@@ -139,6 +159,10 @@ impl BlockStore {
         self.blocks[start..].to_vec()
     }
 
-    pub fn len(&self) -> usize { self.blocks.len() }
-    pub fn is_empty(&self) -> bool { self.blocks.is_empty() }
+    pub fn len(&self) -> usize {
+        self.blocks.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
 }

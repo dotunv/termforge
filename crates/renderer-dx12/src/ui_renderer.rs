@@ -25,20 +25,39 @@ pub fn hex(s: &str) -> [f32; 4] {
 
 fn srgb(c: u8) -> f32 {
     let f = c as f32 / 255.0;
-    if f <= 0.04045 { f / 12.92 } else { ((f + 0.055) / 1.055).powf(2.4) }
+    if f <= 0.04045 {
+        f / 12.92
+    } else {
+        ((f + 0.055) / 1.055).powf(2.4)
+    }
 }
 
-pub const COL_BG:       &str = "#0d1117";
-pub const COL_PANEL:    &str = "#161b22";
-pub const COL_BORDER:   &str = "#30363d";
-pub const COL_TEXT:     &str = "#e6edf3";
-pub const COL_MUTED:    &str = "#8b949e";
-pub const COL_GREEN:    &str = "#3fb950";
-pub const COL_BLUE:     &str = "#58a6ff";
-pub const COL_PURPLE:   &str = "#d2a8ff";
-pub const COL_RED:      &str = "#f85149";
-pub const COL_AMBER:    &str = "#e3b341";
+pub const COL_BG: &str = "#0d1117";
+pub const COL_PANEL: &str = "#161b22";
+pub const COL_BORDER: &str = "#30363d";
+pub const COL_TEXT: &str = "#e6edf3";
+pub const COL_MUTED: &str = "#8b949e";
+pub const COL_GREEN: &str = "#3fb950";
+pub const COL_BLUE: &str = "#58a6ff";
+pub const COL_PURPLE: &str = "#d2a8ff";
+pub const COL_RED: &str = "#f85149";
+pub const COL_AMBER: &str = "#e3b341";
 pub const COL_ACTIVE_TAB: &str = "#0d1117";
+pub const COL_FAINT: &str = "#6e7681"; // text-faint — section labels, timestamps
+pub const COL_HOVER: &str = "#1c2128"; // bg-hover — sidebar active/hover
+pub const COL_RAISED: &str = "#21262d"; // bg-raised — badges, tooltips
+
+// Block header backgrounds (Section 16.2)
+pub const COL_BLOCK_SUCCESS_BG: &str = "#0d2f1a";
+pub const COL_BLOCK_SUCCESS_BD: &str = "#1a4a2a";
+pub const COL_BLOCK_ERROR_BG: &str = "#2d1117";
+pub const COL_BLOCK_ERROR_BD: &str = "#4a1a1a";
+pub const COL_BLOCK_RUNNING_BG: &str = "#0c1f3d";
+pub const COL_BLOCK_RUNNING_BD: &str = "#1a2a4a";
+pub const COL_BLOCK_AGENT_BG: &str = "#1e1040";
+pub const COL_BLOCK_AGENT_BD: &str = "#2d1a5a";
+pub const COL_BLOCK_AWAIT_BG: &str = "#2d2000";
+pub const COL_BLOCK_AWAIT_BD: &str = "#4a3800";
 
 // ────────────────────────────────────────────────────────────────────────────
 // Command list
@@ -48,10 +67,22 @@ pub const COL_ACTIVE_TAB: &str = "#0d1117";
 #[derive(Debug, Clone)]
 pub enum UiCommand {
     /// Solid-colour rectangle (pixel coordinates).
-    FillRect { x: f32, y: f32, w: f32, h: f32, color: [f32; 4] },
+    FillRect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: [f32; 4],
+    },
 
     /// Horizontal 1px border at the bottom of a rect.
-    BottomBorder { x: f32, y: f32, w: f32, h: f32, color: [f32; 4] },
+    BottomBorder {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: [f32; 4],
+    },
 
     /// Axis-aligned text rendered with the glyph atlas.
     DrawText {
@@ -63,7 +94,12 @@ pub enum UiCommand {
     },
 
     /// Small filled square that represents a coloured dot.
-    DrawDot { cx: f32, cy: f32, r: f32, color: [f32; 4] },
+    DrawDot {
+        cx: f32,
+        cy: f32,
+        r: f32,
+        color: [f32; 4],
+    },
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -78,12 +114,36 @@ pub fn build_quads(cmds: &[UiCommand], atlas: &GlyphAtlas) -> Vec<CellVertex> {
     for cmd in cmds {
         match cmd {
             UiCommand::FillRect { x, y, w, h, color } => {
-                push_quad(&mut out, *x, *y, *w, *h, space_uv.u0, space_uv.v0, space_uv.u1, space_uv.v1, [0.0;4], *color);
+                push_quad(
+                    &mut out,
+                    *x,
+                    *y,
+                    *w,
+                    *h,
+                    space_uv.u0,
+                    space_uv.v0,
+                    space_uv.u1,
+                    space_uv.v1,
+                    [0.0; 4],
+                    *color,
+                );
             }
 
             UiCommand::BottomBorder { x, y, w, h, color } => {
                 // 1px strip at bottom.
-                push_quad(&mut out, *x, y + h - 1.0, *w, 1.0, space_uv.u0, space_uv.v0, space_uv.u1, space_uv.v1, [0.0;4], *color);
+                push_quad(
+                    &mut out,
+                    *x,
+                    y + h - 1.0,
+                    *w,
+                    1.0,
+                    space_uv.u0,
+                    space_uv.v0,
+                    space_uv.u1,
+                    space_uv.v1,
+                    [0.0; 4],
+                    *color,
+                );
             }
 
             UiCommand::DrawText { x, y, text, fg, bg } => {
@@ -92,7 +152,9 @@ pub fn build_quads(cmds: &[UiCommand], atlas: &GlyphAtlas) -> Vec<CellVertex> {
                 for (i, c) in text.chars().enumerate() {
                     let cx = x + i as f32 * cw;
                     let uv = atlas.uv_for_char(c);
-                    push_quad(&mut out, cx, *y, cw, ch, uv.u0, uv.v0, uv.u1, uv.v1, *fg, *bg);
+                    push_quad(
+                        &mut out, cx, *y, cw, ch, uv.u0, uv.v0, uv.u1, uv.v1, *fg, *bg,
+                    );
                 }
             }
 
@@ -100,7 +162,19 @@ pub fn build_quads(cmds: &[UiCommand], atlas: &GlyphAtlas) -> Vec<CellVertex> {
                 let x = cx - r;
                 let y = cy - r;
                 let side = r * 2.0;
-                push_quad(&mut out, x, y, side, side, space_uv.u0, space_uv.v0, space_uv.u1, space_uv.v1, [0.0;4], *color);
+                push_quad(
+                    &mut out,
+                    x,
+                    y,
+                    side,
+                    side,
+                    space_uv.u0,
+                    space_uv.v0,
+                    space_uv.u1,
+                    space_uv.v1,
+                    [0.0; 4],
+                    *color,
+                );
             }
         }
     }
@@ -113,19 +187,30 @@ pub fn build_quads(cmds: &[UiCommand], atlas: &GlyphAtlas) -> Vec<CellVertex> {
 
 fn push_quad(
     out: &mut Vec<CellVertex>,
-    x: f32, y: f32, w: f32, h: f32,
-    u0: f32, v0: f32, u1: f32, v1: f32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
     fg: [f32; 4],
     bg: [f32; 4],
 ) {
     let (x1, y1) = (x + w, y + h);
-    let tl = vert(x,  y,  u0, v0, fg, bg);
-    let tr = vert(x1, y,  u1, v0, fg, bg);
-    let bl = vert(x,  y1, u0, v1, fg, bg);
+    let tl = vert(x, y, u0, v0, fg, bg);
+    let tr = vert(x1, y, u1, v0, fg, bg);
+    let bl = vert(x, y1, u0, v1, fg, bg);
     let br = vert(x1, y1, u1, v1, fg, bg);
     out.extend_from_slice(&[tl, tr, bl, tr, br, bl]);
 }
 
-fn vert(px: f32, py: f32, u: f32, v: f32, fg: [f32;4], bg: [f32;4]) -> CellVertex {
-    CellVertex { pos: [px, py], uv: [u, v], fg, bg }
+fn vert(px: f32, py: f32, u: f32, v: f32, fg: [f32; 4], bg: [f32; 4]) -> CellVertex {
+    CellVertex {
+        pos: [px, py],
+        uv: [u, v],
+        fg,
+        bg,
+    }
 }

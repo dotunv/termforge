@@ -32,9 +32,15 @@ impl TerminalGrid {
         vec![Cell::default(); cols]
     }
 
-    pub fn cols(&self) -> u16 { self.cols }
-    pub fn rows(&self) -> u16 { self.rows }
-    pub fn cursor(&self) -> (u16, u16) { (self.cursor_col, self.cursor_row) }
+    pub fn cols(&self) -> u16 {
+        self.cols
+    }
+    pub fn rows(&self) -> u16 {
+        self.rows
+    }
+    pub fn cursor(&self) -> (u16, u16) {
+        (self.cursor_col, self.cursor_row)
+    }
 
     pub fn cell(&self, col: u16, row: u16) -> Option<&Cell> {
         self.cells.get(row as usize)?.get(col as usize)
@@ -162,7 +168,10 @@ impl TerminalGrid {
                 4 => self.current_attrs.underline = true,
                 7 => self.current_attrs.inverse = true,
                 9 => self.current_attrs.strikethrough = true,
-                22 => { self.current_attrs.bold = false; self.current_attrs.dim = false; }
+                22 => {
+                    self.current_attrs.bold = false;
+                    self.current_attrs.dim = false;
+                }
                 23 => self.current_attrs.italic = false,
                 24 => self.current_attrs.underline = false,
                 27 => self.current_attrs.inverse = false,
@@ -183,7 +192,11 @@ impl TerminalGrid {
                         self.current_fg = Color::Indexed(params[i + 2] as u8);
                         i += 2;
                     } else if params.get(i + 1).copied() == Some(2) && i + 4 < params.len() {
-                        self.current_fg = Color::Rgb(params[i+2] as u8, params[i+3] as u8, params[i+4] as u8);
+                        self.current_fg = Color::Rgb(
+                            params[i + 2] as u8,
+                            params[i + 3] as u8,
+                            params[i + 4] as u8,
+                        );
                         i += 4;
                     }
                 }
@@ -193,7 +206,11 @@ impl TerminalGrid {
                         self.current_bg = Color::Indexed(params[i + 2] as u8);
                         i += 2;
                     } else if params.get(i + 1).copied() == Some(2) && i + 4 < params.len() {
-                        self.current_bg = Color::Rgb(params[i+2] as u8, params[i+3] as u8, params[i+4] as u8);
+                        self.current_bg = Color::Rgb(
+                            params[i + 2] as u8,
+                            params[i + 3] as u8,
+                            params[i + 4] as u8,
+                        );
                         i += 4;
                     }
                 }

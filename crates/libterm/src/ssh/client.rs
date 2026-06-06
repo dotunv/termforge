@@ -100,14 +100,15 @@ impl SshClient {
 
         // Authenticate
         let authed = match auth {
-            SshAuth::Password(ref pw) => {
-                session
-                    .authenticate_password(username, pw)
-                    .await
-                    .context("SSH password auth")?
-            }
+            SshAuth::Password(ref pw) => session
+                .authenticate_password(username, pw)
+                .await
+                .context("SSH password auth")?,
 
-            SshAuth::PrivateKey { ref key_path, ref passphrase } => {
+            SshAuth::PrivateKey {
+                ref key_path,
+                ref passphrase,
+            } => {
                 let key = russh_keys::load_secret_key(key_path, passphrase.as_deref())
                     .context("load private key")?;
                 session
@@ -160,7 +161,10 @@ impl SshClient {
             .context("request_pty")?;
 
         // Start a shell
-        channel.request_shell(false).await.context("request_shell")?;
+        channel
+            .request_shell(false)
+            .await
+            .context("request_shell")?;
 
         // Spawn the async I/O loop
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SshCmd>();

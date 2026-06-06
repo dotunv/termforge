@@ -17,7 +17,7 @@ pub enum SessionKind {
     /// AI agent session (purple) — runs any CLI tool as a structured session.
     Agent {
         /// Short display name for the session (usually the command basename).
-        name:  String,
+        name: String,
         /// Model / engine label, e.g. "claude" or "gpt-4o".  May be empty.
         model: String,
     },
@@ -37,9 +37,9 @@ impl Session {
     pub fn new(kind: SessionKind, cols: u16, rows: u16) -> Self {
         let id = Uuid::new_v4();
         let title = match &kind {
-            SessionKind::Local                      => "local".to_string(),
-            SessionKind::Ssh  { host, user }        => format!("{user}@{host}"),
-            SessionKind::Agent { name, .. }         => format!("agent:{name}"),
+            SessionKind::Local => "local".to_string(),
+            SessionKind::Ssh { host, user } => format!("{user}@{host}"),
+            SessionKind::Agent { name, .. } => format!("agent:{name}"),
         };
         Self {
             id,

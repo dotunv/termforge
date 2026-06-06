@@ -30,8 +30,8 @@ pub fn discover_keys() -> Vec<SshKey> {
     let ssh_dir = ssh_dir();
     let candidates = [
         ("id_ed25519", KeyKind::Ed25519),
-        ("id_rsa",     KeyKind::Rsa),
-        ("id_ecdsa",   KeyKind::Ecdsa),
+        ("id_rsa", KeyKind::Rsa),
+        ("id_ecdsa", KeyKind::Ecdsa),
     ];
 
     let mut keys = Vec::new();
@@ -50,12 +50,17 @@ pub fn discover_keys() -> Vec<SshKey> {
     if let Ok(entries) = std::fs::read_dir(&ssh_dir) {
         for entry in entries.flatten() {
             let p = entry.path();
-            if p.extension().is_some() { continue; } // skip .pub files
-            let name = p.file_name()
+            if p.extension().is_some() {
+                continue;
+            } // skip .pub files
+            let name = p
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
-            if candidates.iter().any(|(f, _)| *f == name) { continue; }
+            if candidates.iter().any(|(f, _)| *f == name) {
+                continue;
+            }
             if is_private_key(&p) {
                 keys.push(SshKey {
                     name,
@@ -74,8 +79,7 @@ fn is_private_key(path: &PathBuf) -> bool {
     std::fs::read_to_string(path)
         .ok()
         .map(|s| {
-            s.starts_with("-----BEGIN ")
-                || s.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----")
+            s.starts_with("-----BEGIN ") || s.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----")
         })
         .unwrap_or(false)
 }
