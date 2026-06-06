@@ -212,15 +212,45 @@ fn render_pane_headers(s: &ChromeState<'_>, cmds: &mut Vec<UiCommand>) {
                 bg: hex(COL_PANEL),
             });
 
-            // Label — bright on active pane, faint on inactive
+            // Primary label: the working directory (what's *happening*) when the
+            // shell reports it via OSC 7, falling back to the static session
+            // title.  CWD is the thing that changes with the user's work, so it
+            // carries more information than the title.
             let label_fg = if is_active { COL_TEXT } else { COL_FAINT };
-            cmds.push(UiCommand::DrawUiText {
-                x: dot_x + 8.0,
-                y: py + (hdr.h - ch) * 0.5,
-                text: session.title.clone(),
-                fg: hex(label_fg),
-                bg: hex(COL_PANEL),
-            });
+            let label_x = dot_x + 8.0;
+            let label_y = py + (hdr.h - ch) * 0.5;
+            match session.cwd.as_deref() {
+                Some(cwd) => {
+                    // Lead with the session title (faint) so the type is still
+                    // legible, then the CWD as the bright primary token.
+                    cmds.push(UiCommand::DrawUiText {
+                        x: label_x,
+                        y: label_y,
+                        text: format!("{}  ", session.title),
+                        fg: hex(COL_FAINT),
+                        bg: hex(COL_PANEL),
+                    });
+                    let title_w = (session.title.chars().count() as f32 + 2.0) * ucw;
+                    let avail = (pw - (label_x - px) - title_w - 64.0).max(0.0);
+                    let max_chars = (avail / ucw) as usize;
+                    cmds.push(UiCommand::DrawUiText {
+                        x: label_x + title_w,
+                        y: label_y,
+                        text: shorten_path(cwd, max_chars),
+                        fg: hex(label_fg),
+                        bg: hex(COL_PANEL),
+                    });
+                }
+                None => {
+                    cmds.push(UiCommand::DrawUiText {
+                        x: label_x,
+                        y: label_y,
+                        text: session.title.clone(),
+                        fg: hex(label_fg),
+                        bg: hex(COL_PANEL),
+                    });
+                }
+            }
 
             // Right-aligned pane actions: split · close
             let act_x = px + pw - 8.0;
@@ -477,4 +507,20 @@ fn bottom_border(r: Rect, color: &str) -> UiCommand {
 
 fn ui_text(t: &str, x: f32, y: f32, fg: &str, bg: &str) -> UiCommand {
     UiCommand::DrawUiText { x, y, text: t.to_string(), fg: hex(fg), bg: hex(bg) }
+}
+
+/// Truncate a filesystem path to fit `max_chars`, keeping the tail (the most
+/// specific, most useful part) and prefixing an ellipsis when cut.
+fn shorten_path(path: &str, max_chars: usize) -> String {
+    let count = path.chars().count();
+    if max_chars == 0 {
+        return String::new();
+    }
+    if count <= max_chars {
+        return path.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let skip = count - keep;
+    let tail: String = path.chars().skip(skip).collect();
+    format!("\u{2026}{tail}")
 }

@@ -135,6 +135,9 @@ impl Entry {
             self.last_activity = std::time::Instant::now();
             self.session.grid = self.vt_parser.grid().clone_grid();
             self.session.blocks = self.vt_parser.blocks().clone();
+            if let Some(cwd) = self.vt_parser.cwd() {
+                self.session.cwd = Some(cwd.to_string());
+            }
             self.session.mark_dirty();
         }
         dirty

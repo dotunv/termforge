@@ -572,6 +572,12 @@ impl AppState {
             String::new()
         };
 
+        // Working directory of the active session (OSC 7), shown in command bar.
+        let active_cwd: Option<String> = self
+            .entries
+            .get(self.active_tab)
+            .and_then(|e| e.session.cwd.clone());
+
         // Build chrome commands.
         let mut chrome_cmds = chrome::generate_commands(&ChromeState {
             layout: &layout,
@@ -580,7 +586,7 @@ impl AppState {
             active_pane_session_idx: self.active_tab,
             tab_exit_codes: &tab_exit_codes,
             active_shell_name: &active_shell_name,
-            active_cwd: None, // CWD via OSC 7 not yet wired
+            active_cwd: active_cwd.as_deref(),
             workspace_names: &WORKSPACE_NAMES,
             active_workspace: self.active_workspace,
             sidebar_visible: self.sidebar_vis,

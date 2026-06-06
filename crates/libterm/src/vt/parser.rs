@@ -19,6 +19,7 @@ impl VtParser {
                 grid: TerminalGrid::new(cols, rows),
                 detector,
                 blocks: BlockStore::default(),
+                cwd: None,
             },
         }
     }
@@ -52,12 +53,19 @@ impl VtParser {
     pub fn blocks_mut(&mut self) -> &mut BlockStore {
         &mut self.performer.blocks
     }
+
+    /// Current working directory reported by the shell via OSC 7, if any.
+    pub fn cwd(&self) -> Option<&str> {
+        self.performer.cwd.as_deref()
+    }
 }
 
 struct VtPerformer {
     grid: TerminalGrid,
     detector: BlockDetector,
     blocks: BlockStore,
+    /// Working directory reported via OSC 7 (`\e]7;file://host/path\e\\`).
+    cwd: Option<String>,
 }
 
 impl Perform for VtPerformer {
@@ -218,7 +226,9 @@ impl Perform for VtPerformer {
             })
             .collect();
         if let Ok(s) = std::str::from_utf8(&joined) {
-            if let Some(marker) = Osc133::parse(s) {
+            if let Some(path) = parse_osc7_cwd(s).or_else(|| parse_osc9_9_cwd(s)) {
+                self.cwd = Some(path);
+            } else if let Some(marker) = Osc133::parse(s) {
                 let action = self.detector.handle(marker);
                 self.detector.apply(action, &mut self.blocks);
             } else if let Some(notif) = OscNotification::parse(s) {
@@ -250,5 +260,127 @@ impl VtPerformer {
                 block.append_output(bytes);
             }
         }
+    }
+}
+
+/// Parse an OSC 7 working-directory report.
+///
+/// The payload looks like `7;file://hostname/C:/Users/me/code` (Windows) or
+/// `7;file://hostname/home/me` (POSIX).  Returns the decoded filesystem path,
+/// or `None` if `s` is not an OSC 7 sequence.
+fn parse_osc7_cwd(s: &str) -> Option<String> {
+    let rest = s.strip_prefix("7;")?;
+    let after_scheme = rest.strip_prefix("file://")?;
+    // Skip the authority (hostname) up to the first '/'.  The slash is the
+    // start of the path and must be kept for POSIX absolute paths.
+    let path = match after_scheme.find('/') {
+        Some(i) => &after_scheme[i..],
+        None => after_scheme,
+    };
+    let decoded = percent_decode(path);
+    // Windows paths arrive as "/C:/Users/..." — drop the leading slash and
+    // normalise to backslashes so they read like native paths in the chrome.
+    let normalised = if decoded.len() >= 3
+        && decoded.as_bytes()[0] == b'/'
+        && decoded.as_bytes()[2] == b':'
+    {
+        decoded[1..].replace('/', "\\")
+    } else {
+        decoded
+    };
+    if normalised.is_empty() { None } else { Some(normalised) }
+}
+
+/// Parse an OSC 9;9 working-directory report (the Windows/ConEmu convention
+/// emitted by ConPTY and PowerShell shell integration):
+/// `9;9;C:\Users\me\code` or `9;9;"C:\Users\me\code"`.
+fn parse_osc9_9_cwd(s: &str) -> Option<String> {
+    let rest = s.strip_prefix("9;9;")?;
+    let trimmed = rest.trim().trim_matches('"');
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Minimal `%XX` percent-decoding for OSC 7 paths (e.g. spaces as `%20`).
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod osc7_tests {
+    use super::parse_osc7_cwd;
+
+    #[test]
+    fn windows_path() {
+        assert_eq!(
+            parse_osc7_cwd("7;file://host/C:/Users/me/code"),
+            Some("C:\\Users\\me\\code".to_string())
+        );
+    }
+
+    #[test]
+    fn posix_path() {
+        assert_eq!(
+            parse_osc7_cwd("7;file://host/home/me"),
+            Some("/home/me".to_string())
+        );
+    }
+
+    #[test]
+    fn percent_decoded_space() {
+        assert_eq!(
+            parse_osc7_cwd("7;file://host/C:/My%20Docs"),
+            Some("C:\\My Docs".to_string())
+        );
+    }
+
+    #[test]
+    fn not_osc7() {
+        assert_eq!(parse_osc7_cwd("133;A"), None);
+    }
+
+    #[test]
+    fn osc9_9_quoted() {
+        assert_eq!(
+            super::parse_osc9_9_cwd("9;9;\"C:\\Users\\me\\code\""),
+            Some("C:\\Users\\me\\code".to_string())
+        );
+    }
+
+    #[test]
+    fn osc9_9_unquoted() {
+        assert_eq!(
+            super::parse_osc9_9_cwd("9;9;C:\\Users\\me"),
+            Some("C:\\Users\\me".to_string())
+        );
+    }
+
+    #[test]
+    fn process_stores_cwd_from_osc9_9() {
+        use crate::block::detector::BlockDetector;
+        use crate::vt::VtParser;
+        let mut p = VtParser::new(80, 24, BlockDetector::new(uuid::Uuid::new_v4()));
+        // ESC ] 9 ; 9 ; <path> BEL
+        p.process(b"\x1b]9;9;C:\\Users\\me\\code\x07");
+        assert_eq!(p.cwd(), Some("C:\\Users\\me\\code"));
     }
 }

@@ -29,6 +29,8 @@ pub struct Session {
     pub title: String,
     pub grid: TerminalGrid,
     pub blocks: BlockStore,
+    /// Working directory reported by the shell via OSC 7, if any.
+    pub cwd: Option<String>,
     /// Set to true whenever the grid changes; compositor clears it after drawing.
     pub dirty: Arc<AtomicBool>,
 }
@@ -47,6 +49,7 @@ impl Session {
             title,
             grid: TerminalGrid::new(cols, rows),
             blocks: BlockStore::default(),
+            cwd: None,
             dirty: Arc::new(AtomicBool::new(true)),
         }
     }
@@ -72,6 +75,7 @@ impl Session {
             title: self.title.clone(),
             grid: self.grid.clone_grid(),
             blocks: BlockStore::default(),
+            cwd: self.cwd.clone(),
             dirty: self.dirty.clone(),
         }
     }
