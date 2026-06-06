@@ -84,7 +84,7 @@ pub struct ChromeState<'a> {
     pub active_shell_name: &'a str,
     /// Working directory for the active session, if known via OSC 7.
     pub active_cwd: Option<&'a str>,
-    pub workspace_names: &'a [&'a str],
+    pub workspace_names: &'a [String],
     pub active_workspace: usize,
     pub sidebar_visible: bool,
     pub split_handles: &'a [f32],

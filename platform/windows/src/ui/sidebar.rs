@@ -1,11 +1,14 @@
 //! Sidebar rendering and hit-testing.
 //!
-//! The sidebar contains:
-//!   • Workspace label (active workspace name + blue dot)
-//!   • Session list (one row per open session, active highlighted)
-//!   • WORKSPACES section (one row per workspace slot)
-//!   • TOOLS section (SSH manager, key vault, agent runs)
-//!   • Agent block history (only when an agent session is active)
+//! Layout, top to bottom:
+//!   • SESSIONS  — one row per open session, active highlighted (switches tab)
+//!   • WORKSPACES — one row per workspace + a "New workspace" row (created on
+//!                  demand; no pre-populated demo data)
+//!   • TOOLS     — SSH manager, key vault, agent runs (open overlays, marked ›)
+//!   • RECENT BLOCKS — agent block history, only when an agent session is active
+//!
+//! `render` and `hit_test` walk the same vertical cursor; keep their section
+//! offsets in sync when editing either one.
 
 use libterm::block::store::BlockStatus;
 use libterm::mux::session::{Session, SessionKind};
@@ -47,13 +50,11 @@ pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
 
     let mut sy = sb.y + 6.0;
 
-    // ── Workspace label row ───────────────────────────────────────────────────
-    let ws_name = s.workspace_names.get(s.active_workspace).copied().unwrap_or("TermForge");
-    cmds.push(circle(sx + 14.0, sy + item_h * 0.5, 4.0, COL_BLUE, COL_PANEL));
-    cmds.push(ui_text(ws_name, sx + text_pad, sy + (item_h - ch) * 0.5, COL_BLUE, COL_PANEL));
+    // ── SESSIONS section ──────────────────────────────────────────────────────
+    sy += 6.0;
+    cmds.push(section_header("SESSIONS", sx + 12.0, sy));
     sy += item_h;
 
-    // ── Session list ──────────────────────────────────────────────────────────
     for (i, session) in s.sessions.iter().enumerate() {
         let is_active = i == s.active_tab;
         let item_bg = if is_active { COL_HOVER } else { COL_PANEL };
@@ -99,7 +100,7 @@ pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
     cmds.push(section_header("WORKSPACES", sx + 12.0, sy));
     sy += item_h;
 
-    for (i, &name) in s.workspace_names.iter().enumerate() {
+    for (i, name) in s.workspace_names.iter().enumerate() {
         let is_active_ws = i == s.active_workspace;
         let item_bg = if is_active_ws { COL_HOVER } else { COL_PANEL };
         let dot_col = if is_active_ws { COL_BLUE } else { COL_MUTED };
@@ -128,6 +129,12 @@ pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
         sy += item_h;
     }
 
+    // "New workspace" row — creates an empty workspace on click.
+    let plus_y = sy + (item_h - ch) * 0.5;
+    cmds.push(ui_text("+", sx + 13.0, plus_y, COL_FAINT, COL_PANEL));
+    cmds.push(ui_text("New workspace", sx + text_pad, plus_y, COL_FAINT, COL_PANEL));
+    sy += item_h;
+
     // ── TOOLS section ─────────────────────────────────────────────────────────
     sy += 4.0;
     cmds.push(div_line(sx + 12.0, sy, sb.w - 24.0));
@@ -135,14 +142,18 @@ pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
     cmds.push(section_header("TOOLS", sx + 12.0, sy));
     sy += item_h;
 
-    let tools = [
-        "\u{2263} SSH manager",
-        "\u{25C6} key vault",
-        "\u{25CE} agent runs",
-    ];
+    let tools = ["SSH manager", "key vault", "agent runs"];
     for label in &tools {
         cmds.push(circle(sx + 14.0, sy + item_h * 0.5, 2.5, COL_MUTED, COL_PANEL));
         cmds.push(ui_text(label, sx + text_pad, sy + (item_h - ch) * 0.5, COL_MUTED, COL_PANEL));
+        // Faint chevron: signals the row opens a panel rather than selecting in place.
+        cmds.push(ui_text(
+            "\u{203A}",
+            sx + sb.w - 1.0 - ucw - 10.0,
+            sy + (item_h - ch) * 0.5,
+            COL_FAINT,
+            COL_PANEL,
+        ));
         sy += item_h;
     }
 
@@ -211,6 +222,7 @@ pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
 pub enum SidebarHit {
     Session(usize),
     Workspace(usize),
+    NewWorkspace,
     SshManager,
     KeyVault,
     AgentRuns,
@@ -230,8 +242,8 @@ pub fn hit_test(
     let item_h = cell_h + 10.0;
     let mut sy = sb.y + 6.0;
 
-    // Workspace label row — informational only
-    sy += item_h;
+    // SESSIONS header (gap + header band)
+    sy += 6.0 + item_h;
 
     // Session rows
     for i in 0..session_count {
@@ -249,6 +261,12 @@ pub fn hit_test(
         }
         sy += item_h;
     }
+
+    // "New workspace" row
+    if y >= sy && y < sy + item_h {
+        return Some(SidebarHit::NewWorkspace);
+    }
+    sy += item_h;
 
     // Divider + TOOLS header + tool rows
     sy += 4.0 + 6.0 + item_h;

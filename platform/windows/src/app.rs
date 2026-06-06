@@ -30,7 +30,7 @@ use crate::{
         ssh_manager::{generate_ssh_manager_commands, SshManagerState},
     },
     window::{Window, WindowEvent},
-    workspace::{WorkspaceSlot, WORKSPACE_NAMES},
+    workspace::{WorkspaceSlot, DEFAULT_WORKSPACE_NAME},
 };
 
 const HIBERNATE_SECS: u64 = 300;
@@ -106,14 +106,12 @@ impl AppState {
         window_w: u32,
         window_h: u32,
     ) -> Self {
-        // Build four workspace slots; put the restored sessions in slot 0.
-        let mut workspace_slots: Vec<WorkspaceSlot> = WORKSPACE_NAMES
-            .iter()
-            .map(|_| WorkspaceSlot::empty())
-            .collect();
+        // Start with a single workspace; more are created on demand. The
+        // restored sessions live in the working copy (`entries`), so slot 0's
+        // `entries` stays empty until the user switches away from it.
+        let mut workspace_slots: Vec<WorkspaceSlot> =
+            vec![WorkspaceSlot::new(DEFAULT_WORKSPACE_NAME)];
         workspace_slots[0].active_tab = initial_active;
-        // The working copy starts as slot 0's sessions.
-        // workspace_slots[0].entries stays empty; we hold them in `entries`.
 
         let ipc_sessions = ipc::new_session_list();
         let ipc_rx = ipc::start(ipc_sessions.clone());
@@ -447,13 +445,16 @@ impl AppState {
         // Sidebar
         if let Some(sb) = layout.sidebar {
             if sb.contains(x as f32, y as f32) {
-                match sidebar_hit_test(sb, x as f32, y as f32, self.entries.len(), ch as f32, WORKSPACE_NAMES.len()) {
+                match sidebar_hit_test(sb, x as f32, y as f32, self.entries.len(), ch as f32, self.workspace_slots.len()) {
                     Some(SidebarHit::Session(i)) => {
                         self.active_tab = i;
                         if let Some(e) = self.entries.get_mut(i) { e.wake(); }
                     }
                     Some(SidebarHit::Workspace(ws_idx)) => {
                         self.switch_workspace(ws_idx);
+                    }
+                    Some(SidebarHit::NewWorkspace) => {
+                        self.add_workspace();
                     }
                     Some(SidebarHit::SshManager) => { self.ssh_mgr.open = true; }
                     Some(SidebarHit::AgentRuns) => { self.agent_launcher.open = true; }
@@ -506,6 +507,15 @@ impl AppState {
     }
 
     // ── Workspace switching ───────────────────────────────────────────────────
+
+    /// Create a new, empty workspace and switch to it. The new workspace gets a
+    /// fresh shell on first activation (handled by `switch_workspace`).
+    fn add_workspace(&mut self) {
+        let name = format!("workspace {}", self.workspace_slots.len() + 1);
+        self.workspace_slots.push(WorkspaceSlot::new(name));
+        let new_idx = self.workspace_slots.len() - 1;
+        self.switch_workspace(new_idx);
+    }
 
     fn switch_workspace(&mut self, ws_idx: usize) {
         if ws_idx == self.active_workspace { return; }
@@ -572,6 +582,10 @@ impl AppState {
             String::new()
         };
 
+        // Workspace names for the sidebar (dynamic; created on demand).
+        let workspace_names: Vec<String> =
+            self.workspace_slots.iter().map(|w| w.name.clone()).collect();
+
         // Working directory of the active session (OSC 7), shown in command bar.
         let active_cwd: Option<String> = self
             .entries
@@ -587,7 +601,7 @@ impl AppState {
             tab_exit_codes: &tab_exit_codes,
             active_shell_name: &active_shell_name,
             active_cwd: active_cwd.as_deref(),
-            workspace_names: &WORKSPACE_NAMES,
+            workspace_names: &workspace_names,
             active_workspace: self.active_workspace,
             sidebar_visible: self.sidebar_vis,
             split_handles: &handle_xs,
