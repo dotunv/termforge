@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -125,22 +126,51 @@ impl CommandBlock {
 }
 
 /// Queryable store of all command blocks for a session.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct BlockStore {
     blocks: Vec<CommandBlock>,
+    /// Monotonically increasing counter bumped on every push and on every
+    /// handout of a `&mut CommandBlock` (the caller *may* mutate through it,
+    /// so we invalidate conservatively). Render caches snapshot this to skip
+    /// re-cloning unchanged data.
+    change_counter: Cell<u64>,
+}
+
+impl Default for BlockStore {
+    fn default() -> Self {
+        Self {
+            blocks: Vec::new(),
+            change_counter: Cell::new(0),
+        }
+    }
 }
 
 impl BlockStore {
+    /// Returns the current change counter. Render caches can snapshot this
+    /// and compare on subsequent frames to avoid redundant work.
+    pub fn change_counter(&self) -> u64 {
+        self.change_counter.get()
+    }
+
     pub fn push(&mut self, block: CommandBlock) {
         self.blocks.push(block);
+        self.change_counter.set(self.change_counter.get() + 1);
     }
 
     pub fn get_mut(&mut self, id: BlockId) -> Option<&mut CommandBlock> {
-        self.blocks.iter_mut().find(|b| b.id == id)
+        let r = self.blocks.iter_mut().find(|b| b.id == id);
+        if r.is_some() {
+            self.change_counter.set(self.change_counter.get() + 1);
+        }
+        r
     }
 
     pub fn last_mut(&mut self) -> Option<&mut CommandBlock> {
-        self.blocks.last_mut()
+        let r = self.blocks.last_mut();
+        if r.is_some() {
+            self.change_counter.set(self.change_counter.get() + 1);
+        }
+        r
     }
 
     pub fn all(&self) -> &[CommandBlock] {

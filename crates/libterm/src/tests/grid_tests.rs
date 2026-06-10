@@ -63,7 +63,7 @@ fn scrollback_accumulates_on_overflow() {
         grid.line_feed();
     }
     assert!(
-        grid.scrollback.len() > 0,
+        !grid.scrollback.is_empty(),
         "expected scrollback to have rows"
     );
 }

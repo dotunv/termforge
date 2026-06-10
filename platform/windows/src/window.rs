@@ -8,6 +8,7 @@ use windows::Win32::Graphics::Gdi::CreateSolidBrush;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse;
 use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -17,6 +18,9 @@ const RESIZE_BORDER: i32 = 8;
 /// Messages sent from the WndProc back to the main loop.
 #[derive(Debug)]
 pub enum WindowEvent {
+    /// The OS invalidated part of the window (occlusion, capture, restore):
+    /// re-present the last frame.
+    Paint,
     Char(u16),
     KeyDown {
         vk: u32,
@@ -194,22 +198,11 @@ unsafe extern "system" fn wnd_proc(
                     (false, false, true,  false) => LRESULT(HTTOP         as isize),
                     (false, false, false, true ) => LRESULT(HTBOTTOM      as isize),
                     _ => {
-                        // Custom 36px titlebar: HTCAPTION for drag.
-                        // Traffic lights (close/minimize/maximize) live at
-                        // x=8..52 on the left.  Return HTCLIENT there so
-                        // WM_LBUTTONDOWN fires instead of being swallowed
-                        // by the OS caption drag handler.
-                        let client_x = x - rc.left;
-                        let client_y = y - rc.top;
-                        if client_y < 36 {
-                            if client_x < 52 {
-                                LRESULT(HTCLIENT as isize)
-                            } else {
-                                LRESULT(HTCAPTION as isize)
-                            }
-                        } else {
-                            LRESULT(HTCLIENT as isize)
-                        }
+                        // Custom titlebar: the whole bar is HTCLIENT so tabs
+                        // and caption buttons receive WM_LBUTTONDOWN.  The app
+                        // starts the OS drag loop itself (WM_NCLBUTTONDOWN +
+                        // HTCAPTION) when a click lands on empty bar space.
+                        LRESULT(HTCLIENT as isize)
                     }
                 };
             }
@@ -256,6 +249,18 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
 
+        WM_PAINT => {
+            // Validate the dirty region, then ask the app to re-blit its
+            // back buffer — without this the window stays blank after
+            // occlusion and PrintWindow-based capture sees nothing.
+            use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
+            let mut ps = PAINTSTRUCT::default();
+            let _ = BeginPaint(hwnd, &mut ps);
+            let _ = EndPaint(hwnd, &ps);
+            send_event(hwnd, WindowEvent::Paint);
+            LRESULT(0)
+        }
+
         WM_KEYDOWN => {
             let vk = wparam.0 as u32;
             let ctrl = GetKeyState(0x11) as i16 & (0x8000u16 as i16) != 0;
@@ -266,7 +271,25 @@ unsafe extern "system" fn wnd_proc(
         WM_MOUSEMOVE => {
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            // Request WM_MOUSELEAVE so we know when the cursor leaves the
+            // client area and can clear hover highlights.
+            unsafe {
+                let mut tme = KeyboardAndMouse::TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<KeyboardAndMouse::TRACKMOUSEEVENT>() as u32,
+                    dwFlags: KeyboardAndMouse::TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = KeyboardAndMouse::TrackMouseEvent(&mut tme);
+            }
             send_event(hwnd, WindowEvent::MouseMove { x, y });
+            LRESULT(0)
+        }
+
+        // Not re-exported by the WindowsAndMessaging glob — without the full
+        // path this arm would bind a variable and swallow every message.
+        windows::Win32::UI::Controls::WM_MOUSELEAVE => {
+            send_event(hwnd, WindowEvent::MouseMove { x: -1, y: -1 });
             LRESULT(0)
         }
 

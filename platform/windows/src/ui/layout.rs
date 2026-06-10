@@ -2,25 +2,22 @@
 
 use libterm::block::store::CommandBlock;
 use libterm::mux::session::Session;
+use renderer_windows::tokens;
 
-// ── Fixed chrome dimensions ───────────────────────────────────────────────────
+// ── Fixed chrome dimensions (from design tokens) ──────────────────────────────
 
-/// Single unified surface replacing the old separate titlebar (36px) + tabbar (32px).
-/// Contains traffic lights, session tabs, and gear icon all in one 40px row.
-pub const SESSION_BAR_H: f32 = 40.0;
-/// Pixel width reserved for the traffic-light zone on the left of the session bar.
-/// Tabs begin at this x-offset.
-pub const TL_ZONE_W: f32 = 52.0;
-pub const SIDEBAR_W: f32 = 190.0;
-pub const STATUSBAR_H: f32 = 22.0;
-pub const PANE_HEADER_H: f32 = 24.0;
-pub const SPLIT_HANDLE_W: f32 = 4.0;
+pub const SESSION_BAR_H: f32 = tokens::TITLEBAR_HEIGHT;
+pub const CAPTION_ZONE_W: f32 = tokens::CAPTION_ZONE_W;
+pub const SIDEBAR_W: f32 = tokens::SIDEBAR_W;
+pub const STATUSBAR_H: f32 = tokens::STATUSBAR_HEIGHT;
+pub const PANE_HEADER_H: f32 = tokens::PANE_HEADER_H;
+pub const SPLIT_HANDLE_W: f32 = tokens::SPLIT_HANDLE_W;
 
-// Traffic light geometry
-pub const TL_RADIUS: f32 = 5.0;
-pub const TL_X0: f32 = 17.0;
-pub const TL_GAP: f32 = 16.0;
-pub const TL_Y: f32 = SESSION_BAR_H / 2.0;
+/// Left pad before the first session tab (caption buttons are on the right).
+pub const TAB_PAD_LEFT: f32 = 8.0;
+
+// Caption button geometry (full-bleed 46px backplates, Windows 11 spec)
+pub const CAPTION_BTN_W: f32 = tokens::CAPTION_BTN_W;
 
 // ── Rect ──────────────────────────────────────────────────────────────────────
 
@@ -42,59 +39,60 @@ impl Rect {
 
 #[derive(Debug, Clone)]
 pub struct ChromeLayout {
-    /// Unified session bar: traffic lights + tabs + gear.
     pub session_bar: Rect,
     pub sidebar: Option<Rect>,
     pub content: Rect,
     pub statusbar: Rect,
-    pub window_w: f32,
-    pub window_h: f32,
 }
 
 impl ChromeLayout {
     pub fn compute(window_w: f32, window_h: f32, sidebar_visible: bool) -> Self {
+        let offset = if sidebar_visible { SIDEBAR_W } else { 0.0 };
+        Self::compute_animated(window_w, window_h, sidebar_visible, offset)
+    }
+
+    pub fn compute_animated(
+        window_w: f32,
+        window_h: f32,
+        _sidebar_visible: bool,
+        anim_offset: f32,
+    ) -> Self {
         let session_bar = Rect { x: 0.0, y: 0.0, w: window_w, h: SESSION_BAR_H };
         let statusbar = Rect { x: 0.0, y: window_h - STATUSBAR_H, w: window_w, h: STATUSBAR_H };
         let body_top = SESSION_BAR_H;
         let body_h = window_h - body_top - STATUSBAR_H;
-        let (sidebar, content) = if sidebar_visible {
-            let sb = Rect { x: 0.0, y: body_top, w: SIDEBAR_W, h: body_h };
-            let ct = Rect { x: SIDEBAR_W, y: body_top, w: window_w - SIDEBAR_W, h: body_h };
+        // The offset alone decides the rendered width, so hide animations
+        // (visibility already false, offset shrinking to 0) still draw.
+        let sw = anim_offset.clamp(0.0, SIDEBAR_W);
+        let sb_w = if sw > 1.0 { sw } else { 0.0 };
+        let (sidebar, content) = if sb_w > 0.0 {
+            let sb = Rect { x: 0.0, y: body_top, w: sb_w, h: body_h };
+            let ct = Rect { x: sb_w, y: body_top, w: window_w - sb_w, h: body_h };
             (Some(sb), ct)
         } else {
             (None, Rect { x: 0.0, y: body_top, w: window_w, h: body_h })
         };
-        Self { session_bar, sidebar, content, statusbar, window_w, window_h }
+        Self { session_bar, sidebar, content, statusbar }
     }
 }
 
 // ── ChromeState ───────────────────────────────────────────────────────────────
 
-/// All state the chrome sub-renderers need to produce their command lists.
 pub struct ChromeState<'a> {
     pub layout: &'a ChromeLayout,
     pub sessions: &'a [Session],
     pub active_tab: usize,
-    /// Which session_idx is the "active pane" (the one receiving keyboard input).
-    /// In single-pane mode this equals `active_tab`.
     pub active_pane_session_idx: usize,
-    /// Last command exit code per tab (index == tab index). `None` = no commands yet.
     pub tab_exit_codes: &'a [Option<i32>],
-    /// Shell name for the active session (e.g. "powershell", "user@host", "claude").
     pub active_shell_name: &'a str,
-    /// Working directory for the active session, if known via OSC 7.
     pub active_cwd: Option<&'a str>,
     pub workspace_names: &'a [String],
     pub active_workspace: usize,
-    pub sidebar_visible: bool,
     pub split_handles: &'a [f32],
-    pub error_count: usize,
-    pub awaiting_count: usize,
-    pub cell_w: u32,
     pub cell_h: u32,
     pub agent_blocks: &'a [CommandBlock],
     pub pane_rects: &'a [(f32, f32, f32, f32, usize)],
-    /// Average Segoe UI character width (px).  Use atlas.measure_ui_text() for
-    /// precise measurements; this is for quick proportional layout estimates.
     pub ui_char_w: f32,
+    pub badge_widths: &'a [f32],
+    pub mouse_pos: (f32, f32),
 }

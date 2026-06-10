@@ -244,11 +244,10 @@ impl Perform for VtPerformer {
     fn put(&mut self, _byte: u8) {}
     fn unhook(&mut self) {}
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
-        match byte {
-            // ESC M — Reverse Index: move cursor up one line, scrolling down
-            // at the top of the scroll region.  Needed by vim, less, htop.
-            b'M' => self.grid.reverse_index(),
-            _ => {}
+        // ESC M — Reverse Index: move cursor up one line, scrolling down
+        // at the top of the scroll region.  Needed by vim, less, htop.
+        if byte == b'M' {
+            self.grid.reverse_index();
         }
     }
 }

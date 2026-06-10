@@ -90,16 +90,11 @@ impl TerminalGrid {
     pub fn line_feed(&mut self) {
         if self.cursor_row == self.scroll_bot {
             // At the bottom of the scroll region — scroll the region up.
-            self.cells.remove(self.scroll_top as usize);
+            let evicted = self.cells.remove(self.scroll_top as usize);
             self.cells.insert(self.scroll_bot as usize, Self::blank_row(self.cols as usize));
             // On the primary screen (full-screen scroll region), keep scrollback.
             if self.scroll_top == 0 && self.scroll_bot == self.rows.saturating_sub(1) {
-                // The removed row was already inserted into the scroll region;
-                // push the top-most evicted row to scrollback.
-                // Note: removal + insert above already maintains cell count,
-                // so we push the conceptually evicted row separately.
-                // For simplicity, push a blank placeholder — the visible output is correct.
-                // (True scrollback history is a Phase 4 concern.)
+                self.scrollback.push(evicted);
             }
         } else if self.cursor_row + 1 < self.rows {
             self.cursor_row += 1;

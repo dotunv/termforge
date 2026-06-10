@@ -1,30 +1,11 @@
-//! Sidebar rendering and hit-testing.
-//!
-//! Layout, top to bottom:
-//!   • SESSIONS  — one row per open session, active highlighted (switches tab)
-//!   • WORKSPACES — one row per workspace + a "New workspace" row (created on
-//!                  demand; no pre-populated demo data)
-//!   • TOOLS     — SSH manager, key vault, agent runs (open overlays, marked ›)
-//!   • RECENT BLOCKS — agent block history, only when an agent session is active
-//!
-//! `render` and `hit_test` walk the same vertical cursor; keep their section
-//! offsets in sync when editing either one.
-
 use libterm::block::store::BlockStatus;
 use libterm::mux::session::{Session, SessionKind};
-use renderer_dx12::ui_renderer::{
-    hex, UiCommand,
-    COL_BADGE_BLUE_BG, COL_BADGE_GREEN_BG, COL_BADGE_PURPLE_BG,
-    COL_BLUE, COL_BORDER, COL_FAINT, COL_GREEN, COL_HOVER, COL_MUTED,
-    COL_PANEL, COL_PURPLE, COL_RED, COL_TEXT,
-};
+use renderer_windows::ui_renderer::UiCommand;
+use renderer_windows::tokens::*;
 
 use super::layout::{ChromeState, Rect};
 
-// ── Public entry point ────────────────────────────────────────────────────────
-
 /// Build all `UiCommand`s for the sidebar area.
-/// Returns an empty vec when the sidebar is hidden.
 pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
     let sb = match s.layout.sidebar {
         Some(r) => r,
@@ -39,13 +20,13 @@ pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
     let sx = sb.x;
 
     // Background + right border
-    cmds.push(fill(sb, COL_PANEL));
+    cmds.push(fill(sb, BG_SURFACE));
     cmds.push(UiCommand::FillRect {
         x: sb.x + sb.w - 1.0,
         y: sb.y,
         w: 1.0,
         h: sb.h,
-        color: hex(COL_BORDER),
+        color: BORDER_DEFAULT,
     });
 
     let mut sy = sb.y + 6.0;
@@ -55,43 +36,47 @@ pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
     cmds.push(section_header("SESSIONS", sx + 12.0, sy));
     sy += item_h;
 
-    for (i, session) in s.sessions.iter().enumerate() {
-        let is_active = i == s.active_tab;
-        let item_bg = if is_active { COL_HOVER } else { COL_PANEL };
-        let (dot_color, label) = session_dot_info(session);
-        let (badge_text, badge_fg, badge_bg) = session_badge(session);
+        let labels =
+            super::chrome::display_labels(s.sessions.iter().map(|s| s.title.as_str()));
+        for (i, session) in s.sessions.iter().enumerate() {
+            let is_active = i == s.active_tab;
+            let is_hovered = mouse_in(s, sx, sy, sb.w - 1.0, item_h);
+            let item_bg = if is_active { BG_ACTIVE } else if is_hovered { BG_HOVER } else { BG_SURFACE };
+            let (dot_color, _) = session_dot_info(session);
+            let label = labels[i].as_str();
+            let (badge_text, badge_fg, badge_bg) = session_badge(session);
 
-        cmds.push(UiCommand::FillRect {
-            x: sx,
-            y: sy,
-            w: sb.w - 1.0,
-            h: item_h,
-            color: hex(item_bg),
-        });
-
-        if is_active {
             cmds.push(UiCommand::FillRect {
                 x: sx,
                 y: sy,
-                w: 3.0,
+                w: sb.w - 1.0,
                 h: item_h,
-                color: hex(dot_color),
+                color: item_bg,
             });
+
+            if is_active {
+                cmds.push(UiCommand::FillRect {
+                    x: sx,
+                    y: sy,
+                    w: 3.0,
+                    h: item_h,
+                    color: dot_color,
+                });
+            }
+
+            cmds.push(circle(sx + 20.0, sy + item_h * 0.5, 3.0, dot_color, item_bg));
+
+            let text_col = if is_active || is_hovered { TEXT_PRIMARY } else { TEXT_MUTED };
+            cmds.push(ui_text(label, sx + text_pad, sy + (item_h - ch) * 0.5, text_col, item_bg));
+
+            let badge_w = s.badge_widths.get(i).copied().unwrap_or(60.0);
+            let badge_x = sx + sb.w - 1.0 - badge_w - 8.0;
+            let badge_y = sy + (item_h - ch - 4.0) * 0.5;
+            cmds.push(round_rect(badge_x, badge_y, badge_w, ch + 4.0, badge_bg, item_bg));
+            cmds.push(ui_text(badge_text, badge_x + 5.0, badge_y + 2.0, badge_fg, badge_bg));
+
+            sy += item_h;
         }
-
-        cmds.push(circle(sx + 20.0, sy + item_h * 0.5, 3.0, dot_color, item_bg));
-
-        let text_col = if is_active { COL_TEXT } else { COL_MUTED };
-        cmds.push(ui_text(label, sx + text_pad, sy + (item_h - ch) * 0.5, text_col, item_bg));
-
-        let badge_w = badge_text.chars().count() as f32 * ucw + 10.0;
-        let badge_x = sx + sb.w - 1.0 - badge_w - 8.0;
-        let badge_y = sy + (item_h - ch - 4.0) * 0.5;
-        cmds.push(round_rect(badge_x, badge_y, badge_w, ch + 4.0, badge_bg, item_bg));
-        cmds.push(ui_text(badge_text, badge_x + 5.0, badge_y + 2.0, badge_fg, badge_bg));
-
-        sy += item_h;
-    }
 
     // ── WORKSPACES section ────────────────────────────────────────────────────
     sy += 4.0;
@@ -102,9 +87,10 @@ pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
 
     for (i, name) in s.workspace_names.iter().enumerate() {
         let is_active_ws = i == s.active_workspace;
-        let item_bg = if is_active_ws { COL_HOVER } else { COL_PANEL };
-        let dot_col = if is_active_ws { COL_BLUE } else { COL_MUTED };
-        let text_col = if is_active_ws { COL_TEXT } else { COL_MUTED };
+        let is_hovered = mouse_in(s, sx, sy, sb.w - 1.0, item_h);
+        let item_bg = if is_active_ws { BG_ACTIVE } else if is_hovered { BG_HOVER } else { BG_SURFACE };
+        let dot_col = if is_active_ws || is_hovered { BLUE } else { TEXT_MUTED };
+        let text_col = if is_active_ws || is_hovered { TEXT_PRIMARY } else { TEXT_MUTED };
         let dot_r = if is_active_ws { 3.0 } else { 2.5 };
 
         if is_active_ws {
@@ -113,14 +99,22 @@ pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
                 y: sy,
                 w: sb.w - 1.0,
                 h: item_h,
-                color: hex(COL_HOVER),
+                color: BG_ACTIVE,
             });
             cmds.push(UiCommand::FillRect {
                 x: sx,
                 y: sy,
                 w: 3.0,
                 h: item_h,
-                color: hex(COL_BLUE),
+                color: BLUE,
+            });
+        } else if is_hovered {
+            cmds.push(UiCommand::FillRect {
+                x: sx,
+                y: sy,
+                w: sb.w - 1.0,
+                h: item_h,
+                color: BG_HOVER,
             });
         }
 
@@ -129,10 +123,18 @@ pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
         sy += item_h;
     }
 
-    // "New workspace" row — creates an empty workspace on click.
+    // "New workspace" row
+    let plus_hover = mouse_in(s, sx, sy, sb.w - 1.0, item_h);
+    if plus_hover {
+        cmds.push(UiCommand::FillRect {
+            x: sx, y: sy, w: sb.w - 1.0, h: item_h,
+            color: BG_HOVER,
+        });
+    }
+    let plus_bg = if plus_hover { BG_HOVER } else { BG_SURFACE };
     let plus_y = sy + (item_h - ch) * 0.5;
-    cmds.push(ui_text("+", sx + 13.0, plus_y, COL_FAINT, COL_PANEL));
-    cmds.push(ui_text("New workspace", sx + text_pad, plus_y, COL_FAINT, COL_PANEL));
+    cmds.push(ui_text("+", sx + 13.0, plus_y, TEXT_FAINT, plus_bg));
+    cmds.push(ui_text("New workspace", sx + text_pad, plus_y, TEXT_FAINT, plus_bg));
     sy += item_h;
 
     // ── TOOLS section ─────────────────────────────────────────────────────────
@@ -142,22 +144,47 @@ pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
     cmds.push(section_header("TOOLS", sx + 12.0, sy));
     sy += item_h;
 
-    let tools = ["SSH manager", "key vault", "agent runs"];
-    for label in &tools {
-        cmds.push(circle(sx + 14.0, sy + item_h * 0.5, 2.5, COL_MUTED, COL_PANEL));
-        cmds.push(ui_text(label, sx + text_pad, sy + (item_h - ch) * 0.5, COL_MUTED, COL_PANEL));
-        // Faint chevron: signals the row opens a panel rather than selecting in place.
-        cmds.push(ui_text(
-            "\u{203A}",
-            sx + sb.w - 1.0 - ucw - 10.0,
-            sy + (item_h - ch) * 0.5,
-            COL_FAINT,
-            COL_PANEL,
-        ));
+    // Label + its keybinding, shown right-aligned on hover so shortcuts are
+    // discoverable in place (Linear-style).
+    let tools: [(&str, &str); 3] = [
+        ("SSH manager", "Ctrl+H"),
+        ("key vault", ""),
+        ("agent runs", "Ctrl+A"),
+    ];
+    for (label, shortcut) in &tools {
+        let tool_hover = mouse_in(s, sx, sy, sb.w - 1.0, item_h);
+        let tool_bg = if tool_hover { BG_HOVER } else { BG_SURFACE };
+        if tool_hover {
+            cmds.push(UiCommand::FillRect {
+                x: sx, y: sy, w: sb.w - 1.0, h: item_h,
+                color: BG_HOVER,
+            });
+        }
+        let fg = if tool_hover { TEXT_PRIMARY } else { TEXT_MUTED };
+        cmds.push(circle(sx + 14.0, sy + item_h * 0.5, 2.5, fg, tool_bg));
+        cmds.push(ui_text(label, sx + text_pad, sy + (item_h - ch) * 0.5, fg, tool_bg));
+        if tool_hover && !shortcut.is_empty() {
+            let hint_w = shortcut.chars().count() as f32 * ucw;
+            cmds.push(ui_text(
+                shortcut,
+                sx + sb.w - 1.0 - hint_w - 10.0,
+                sy + (item_h - ch) * 0.5,
+                TEXT_FAINT,
+                tool_bg,
+            ));
+        } else {
+            cmds.push(ui_text(
+                "\u{203A}",
+                sx + sb.w - 1.0 - ucw - 10.0,
+                sy + (item_h - ch) * 0.5,
+                TEXT_FAINT,
+                tool_bg,
+            ));
+        }
         sy += item_h;
     }
 
-    // ── Agent block history (active agent tab only) ───────────────────────────
+    // ── Agent block history ──────────────────────────────────────────────────
     if !s.agent_blocks.is_empty() {
         sy += 4.0;
         cmds.push(div_line(sx + 12.0, sy, sb.w - 24.0));
@@ -166,8 +193,8 @@ pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
             x: sx + 12.0,
             y: sy,
             text: "RECENT BLOCKS".to_string(),
-            fg: hex(COL_PURPLE),
-            bg: hex(COL_PANEL),
+            fg: PURPLE,
+            bg: BG_SURFACE,
         });
         sy += item_h;
 
@@ -175,15 +202,23 @@ pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
             if sy + item_h > sb.y + sb.h - 4.0 {
                 break;
             }
+            let block_hover = mouse_in(s, sx, sy, sb.w - 1.0, item_h);
+            let block_bg = if block_hover { BG_HOVER } else { BG_SURFACE };
+            if block_hover {
+                cmds.push(UiCommand::FillRect {
+                    x: sx, y: sy, w: sb.w - 1.0, h: item_h,
+                    color: BG_HOVER,
+                });
+            }
             let (dot_col, badge_str) = match block.status {
-                BlockStatus::Running => (COL_PURPLE, "run"),
-                BlockStatus::Success => (COL_GREEN, "ok"),
-                BlockStatus::Error => (COL_RED, "err"),
-                BlockStatus::Cancelled => (COL_MUTED, "---"),
+                BlockStatus::Running => (PURPLE, "run"),
+                BlockStatus::Success => (GREEN, "ok"),
+                BlockStatus::Error => (RED, "err"),
+                BlockStatus::Cancelled => (TEXT_MUTED, "---"),
             };
-            cmds.push(circle(sx + 14.0, sy + item_h * 0.5, 3.0, dot_col, COL_PANEL));
+            cmds.push(circle(sx + 14.0, sy + item_h * 0.5, 3.0, dot_col, block_bg));
 
-            let max_chars = 16usize;
+            let max_chars = 15usize;
             let label: String = if block.command.chars().count() > max_chars {
                 let cut = block.command.char_indices()
                     .nth(max_chars - 1)
@@ -193,7 +228,7 @@ pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
             } else {
                 block.command.clone()
             };
-            cmds.push(ui_text(&label, sx + 24.0, sy + (item_h - ch) * 0.5, COL_TEXT, COL_PANEL));
+            cmds.push(ui_text(&label, sx + text_pad, sy + (item_h - ch) * 0.5, TEXT_PRIMARY, block_bg));
 
             let dur_str = block
                 .duration_ms()
@@ -207,7 +242,7 @@ pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
                 .unwrap_or_else(|| badge_str.to_string());
             let dur_w = dur_str.chars().count() as f32 * ucw;
             let dur_x = sx + sb.w - 1.0 - dur_w - 8.0;
-            cmds.push(ui_text(&dur_str, dur_x, sy + (item_h - ch) * 0.5, dot_col, COL_PANEL));
+            cmds.push(ui_text(&dur_str, dur_x, sy + (item_h - ch) * 0.5, dot_col, block_bg));
 
             sy += item_h;
         }
@@ -242,10 +277,8 @@ pub fn hit_test(
     let item_h = cell_h + 10.0;
     let mut sy = sb.y + 6.0;
 
-    // SESSIONS header (gap + header band)
     sy += 6.0 + item_h;
 
-    // Session rows
     for i in 0..session_count {
         if y >= sy && y < sy + item_h {
             return Some(SidebarHit::Session(i));
@@ -253,7 +286,6 @@ pub fn hit_test(
         sy += item_h;
     }
 
-    // Divider + WORKSPACES header + workspace rows
     sy += 4.0 + 6.0 + item_h;
     for i in 0..workspace_count {
         if y >= sy && y < sy + item_h {
@@ -262,13 +294,11 @@ pub fn hit_test(
         sy += item_h;
     }
 
-    // "New workspace" row
     if y >= sy && y < sy + item_h {
         return Some(SidebarHit::NewWorkspace);
     }
     sy += item_h;
 
-    // Divider + TOOLS header + tool rows
     sy += 4.0 + 6.0 + item_h;
     for &hit in &[SidebarHit::SshManager, SidebarHit::KeyVault, SidebarHit::AgentRuns] {
         if y >= sy && y < sy + item_h {
@@ -282,42 +312,47 @@ pub fn hit_test(
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-fn session_dot_info(s: &Session) -> (&'static str, &str) {
+fn session_dot_info(s: &Session) -> ([f32; 4], &str) {
     match &s.kind {
-        SessionKind::Local => (COL_GREEN, s.title.as_str()),
-        SessionKind::Ssh { .. } => (COL_BLUE, s.title.as_str()),
-        SessionKind::Agent { .. } => (COL_PURPLE, s.title.as_str()),
+        SessionKind::Local => (COLOR_LOCAL, s.title.as_str()),
+        SessionKind::Ssh { .. } => (COLOR_SSH, s.title.as_str()),
+        SessionKind::Agent { .. } => (COLOR_AGENT, s.title.as_str()),
     }
 }
 
-fn session_badge(s: &Session) -> (&'static str, &'static str, &'static str) {
+fn session_badge(s: &Session) -> (&str, [f32; 4], [f32; 4]) {
     match &s.kind {
-        SessionKind::Local => ("active", COL_GREEN, COL_BADGE_GREEN_BG),
-        SessionKind::Ssh { .. } => ("SSH", COL_BLUE, COL_BADGE_BLUE_BG),
-        SessionKind::Agent { .. } => ("agent", COL_PURPLE, COL_BADGE_PURPLE_BG),
+        SessionKind::Local => ("active", GREEN, BADGE_GREEN_BG),
+        SessionKind::Ssh { .. } => ("SSH", BLUE, BADGE_BLUE_BG),
+        SessionKind::Agent { .. } => ("agent", PURPLE, BADGE_PURPLE_BG),
     }
 }
 
-fn fill(r: Rect, color: &str) -> UiCommand {
-    UiCommand::FillRect { x: r.x, y: r.y, w: r.w, h: r.h, color: hex(color) }
+fn fill(r: Rect, color: [f32; 4]) -> UiCommand {
+    UiCommand::FillRect { x: r.x, y: r.y, w: r.w, h: r.h, color }
 }
 
-fn circle(cx: f32, cy: f32, r: f32, fg: &str, bg: &str) -> UiCommand {
-    UiCommand::DrawCircle { cx, cy, r, fg: hex(fg), bg: hex(bg) }
+fn circle(cx: f32, cy: f32, r: f32, fg: [f32; 4], bg: [f32; 4]) -> UiCommand {
+    UiCommand::DrawCircle { cx, cy, r, fg, bg }
 }
 
-fn round_rect(x: f32, y: f32, w: f32, h: f32, color: &str, bg: &str) -> UiCommand {
-    UiCommand::FillRoundRect { x, y, w, h, color: hex(color), bg: hex(bg) }
+fn round_rect(x: f32, y: f32, w: f32, h: f32, color: [f32; 4], bg: [f32; 4]) -> UiCommand {
+    UiCommand::FillRoundRect { x, y, w, h, radius: RADIUS_SM, color, bg }
 }
 
-fn ui_text(t: &str, x: f32, y: f32, fg: &str, bg: &str) -> UiCommand {
-    UiCommand::DrawUiText { x, y, text: t.to_string(), fg: hex(fg), bg: hex(bg) }
+fn ui_text(t: &str, x: f32, y: f32, fg: [f32; 4], bg: [f32; 4]) -> UiCommand {
+    UiCommand::DrawUiText { x, y, text: t.to_string(), fg, bg }
 }
 
 fn div_line(x: f32, y: f32, w: f32) -> UiCommand {
-    UiCommand::FillRect { x, y, w, h: 0.5, color: hex(COL_BORDER) }
+    UiCommand::FillRect { x, y, w, h: 1.0, color: BORDER_SUBTLE }
 }
 
 fn section_header(label: &str, x: f32, y: f32) -> UiCommand {
-    UiCommand::DrawUiText { x, y, text: label.to_string(), fg: hex(COL_FAINT), bg: hex(COL_PANEL) }
+    UiCommand::DrawUiText { x, y, text: label.to_string(), fg: TEXT_FAINT, bg: BG_SURFACE }
+}
+
+fn mouse_in(s: &ChromeState<'_>, x: f32, y: f32, w: f32, h: f32) -> bool {
+    let (mx, my) = s.mouse_pos;
+    mx >= 0.0 && my >= 0.0 && mx >= x && mx < x + w && my >= y && my < y + h
 }

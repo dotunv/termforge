@@ -9,7 +9,7 @@
 //!   PTY output:  channel → tokio task → output_tx → VtParser (main loop)
 //!   PTY input:   main loop → SshPty::write → cmd_tx → tokio task → channel
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::pty::Pty;
+use crate::ssh::known_hosts::{KeyCheck, KnownHosts};
 
 // ── Channel command sent from SshPty to the I/O task ─────────────────────────
 
@@ -38,20 +39,53 @@ pub enum SshAuth {
     Agent,
 }
 
-// ── russh handler — accept all host keys for Phase 4 ─────────────────────────
+// ── russh handler — TOFU host-key verification ────────────────────────────────
 
-struct TrustAllHandler;
+struct HostKeyVerifier {
+    host: String,
+    port: u16,
+}
 
 #[async_trait]
-impl russh::client::Handler for TrustAllHandler {
+impl russh::client::Handler for HostKeyVerifier {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh_keys::key::PublicKey,
+        server_public_key: &russh_keys::key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // TODO Phase 4+: verify against known_hosts file.
-        Ok(true)
+        let fingerprint = format!("SHA256:{}", server_public_key.fingerprint());
+        let mut store = match KnownHosts::load() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("known_hosts load failed: {e}");
+                return Ok(false);
+            }
+        };
+        match store.check(&self.host, self.port, &fingerprint) {
+            KeyCheck::Known => Ok(true),
+            KeyCheck::Unknown => {
+                // First connection: pin the key (trust-on-first-use).
+                tracing::info!(
+                    "pinning new host key for {}:{} ({fingerprint})",
+                    self.host, self.port
+                );
+                if let Err(e) = store.pin(&self.host, self.port, &fingerprint) {
+                    tracing::error!("known_hosts pin failed: {e}");
+                    return Ok(false);
+                }
+                Ok(true)
+            }
+            KeyCheck::Mismatch => {
+                tracing::error!(
+                    "HOST KEY MISMATCH for {}:{} — got {fingerprint}. \
+                     Possible man-in-the-middle attack. If the server key \
+                     legitimately changed, remove the entry from known_hosts.",
+                    self.host, self.port
+                );
+                Ok(false)
+            }
+        }
     }
 }
 
@@ -92,7 +126,10 @@ impl SshClient {
         output_tx: UnboundedSender<Vec<u8>>,
     ) -> Result<SshPty> {
         let config = Arc::new(russh::client::Config::default());
-        let handler = TrustAllHandler;
+        let handler = HostKeyVerifier {
+            host: host.to_string(),
+            port,
+        };
 
         let mut session = russh::client::connect(config, (host, port), handler)
             .await
@@ -227,7 +264,7 @@ fn dirs_home() -> PathBuf {
 }
 
 /// Returns paths to likely private key files in `dir`.
-fn ssh_private_keys(dir: &PathBuf) -> Vec<PathBuf> {
+fn ssh_private_keys(dir: &Path) -> Vec<PathBuf> {
     let candidates = ["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"];
     candidates
         .iter()

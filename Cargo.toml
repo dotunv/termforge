@@ -2,6 +2,7 @@
 members = [
     "crates/libterm",
     "crates/renderer-dx12",
+    "crates/renderer-windows",
     "platform/windows",
 ]
 resolver = "2"
@@ -61,4 +62,5 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_UI_HiDpi",
+    "Win32_UI_Input",
 ] }

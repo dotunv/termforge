@@ -5,12 +5,10 @@
 //! persisted to termforge.toml immediately.
 
 use libterm::config::Config;
-use renderer_dx12::ui_renderer::{
-    hex, UiCommand, COL_BG, COL_BLUE, COL_BORDER, COL_FAINT, COL_GREEN, COL_HOVER, COL_MUTED,
-    COL_PANEL, COL_TEXT,
-};
+use renderer_windows::ui_renderer::UiCommand;
+use renderer_windows::tokens::*;
 
-// ── Settings categories ──────────────────────────────────────────────────────
+use super::chrome;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SettingsCategory {
@@ -81,26 +79,64 @@ impl FieldValue {
 // ── State ────────────────────────────────────────────────────────────────────
 
 pub struct SettingsState {
-    pub open: bool,
     pub category: SettingsCategory,
     pub selected_field: usize,
     pub editing: bool,
     pub edit_buffer: String,
     pub config: Config,
-    pub dirty: bool, // config changed, needs save
+    pub dirty: bool,
+    pub scroll_offset: usize,
+    pub search_query: String,
+    pub searching: bool,
+    /// Rows that fit in the fields list at the current window size.  Updated
+    /// by the app each frame via [`SettingsState::compute_visible_rows`] so
+    /// keyboard scrolling and the renderer agree.
+    pub visible_rows: usize,
 }
 
 impl SettingsState {
     pub fn new(config: Config) -> Self {
         Self {
-            open: false,
             category: SettingsCategory::Appearance,
             selected_field: 0,
             editing: false,
             edit_buffer: String::new(),
             config,
             dirty: false,
+            scroll_offset: 0,
+            search_query: String::new(),
+            searching: false,
+            visible_rows: 6,
         }
+    }
+
+    /// Rows that fit in the settings fields list — mirrors the panel layout
+    /// in [`generate_settings_commands`] (panel height, header, footer, and
+    /// optional search bar).
+    pub fn compute_visible_rows(window_h: f32, cell_h: f32, searching: bool) -> usize {
+        let ch = cell_h;
+        let panel_h = (window_h * 0.80).clamp(500.0, 680.0);
+        let header_h = ch + 20.0;
+        let nav_h = panel_h - header_h - 2.0;
+        let search_h = if searching { (ch + 8.0) + 4.0 } else { 0.0 };
+        let list_avail = nav_h - 40.0 - ch - 16.0 - search_h;
+        let field_h = ch * 2.0 + 16.0;
+        ((list_avail / field_h) as usize).max(1)
+    }
+
+    /// Return fields matching the search query (case-insensitive).
+    /// If search_query is empty, returns all fields.
+    pub fn filtered_fields(&self) -> Vec<SettingsField> {
+        let all = self.fields_for_category();
+        if self.search_query.is_empty() {
+            return all;
+        }
+        let q = self.search_query.to_ascii_lowercase();
+        all.into_iter()
+            .filter(|f| f.label.to_ascii_lowercase().contains(&q)
+                || f.description.to_ascii_lowercase().contains(&q)
+                || f.value.display().to_ascii_lowercase().contains(&q))
+            .collect()
     }
 
     pub fn fields_for_category(&self) -> Vec<SettingsField> {
@@ -276,7 +312,7 @@ impl SettingsState {
 
     /// Apply the edit buffer to the current field and config.
     pub fn apply_edit(&mut self) {
-        let fields = self.fields_for_category();
+        let fields = self.filtered_fields();
         if let Some(field) = fields.get(self.selected_field) {
             match &field.value {
                 FieldValue::Text(_) => {
@@ -298,7 +334,7 @@ impl SettingsState {
 
     /// Toggle a bool field or cycle a choice field.
     pub fn toggle_current(&mut self) {
-        let fields = self.fields_for_category();
+        let fields = self.filtered_fields();
         if let Some(field) = fields.get(self.selected_field) {
             match &field.value {
                 FieldValue::Bool(b) => {
@@ -377,35 +413,64 @@ impl SettingsState {
         }
     }
 
-    /// Handle keyboard input while settings are open.
-    pub fn handle_key(&mut self, vk: u32) {
+    pub fn scroll_by(&mut self, delta: i32) {
+        let fields = self.filtered_fields();
+        let max = fields.len().saturating_sub(1);
+        let new = (self.selected_field as i32 + delta).clamp(0, max as i32) as usize;
+        self.selected_field = new;
+        // Keep selected field in view
+        let visible = self.visible_rows.max(1);
+        if self.selected_field < self.scroll_offset {
+            self.scroll_offset = self.selected_field;
+        } else if self.selected_field >= self.scroll_offset + visible {
+            self.scroll_offset = self.selected_field.saturating_sub(visible - 1);
+        }
+    }
+
+    /// Handle keyboard input while settings are open.  Returns `true` if the
+    /// modal should close.
+    pub fn handle_key(&mut self, vk: u32, ctrl: bool) -> bool {
         if self.editing {
             match vk {
                 0x1B => {
                     self.editing = false;
                     self.edit_buffer.clear();
-                } // Escape
-                0x0D => self.apply_edit(), // Enter
+                }
+                0x0D => self.apply_edit(),
                 _ => {}
             }
-            return;
+            return false;
+        }
+
+        if self.searching {
+            match vk {
+                0x1B => {
+                    self.searching = false;
+                    self.search_query.clear();
+                    self.scroll_offset = 0;
+                    self.selected_field = 0;
+                }
+                0x26 => self.scroll_by(-1),
+                0x28 => self.scroll_by(1),
+                0x0D | 0x20 => self.toggle_current(),
+                _ => {}
+            }
+            return false;
+        }
+
+        // Ctrl+F toggles search
+        if ctrl && vk == 0x46 {
+            self.searching = true;
+            self.search_query.clear();
+            self.selected_field = 0;
+            self.scroll_offset = 0;
+            return false;
         }
 
         match vk {
-            0x1B => self.open = false, // Escape — close
-            0x26 => {
-                // Up
-                if self.selected_field > 0 {
-                    self.selected_field -= 1;
-                }
-            }
-            0x28 => {
-                // Down
-                let count = self.fields_for_category().len();
-                if count > 0 && self.selected_field < count - 1 {
-                    self.selected_field += 1;
-                }
-            }
+            0x1B => return true, // Escape — close
+            0x26 => self.scroll_by(-1), // Up
+            0x28 => self.scroll_by(1),  // Down
             0x25 => {
                 // Left — prev category
                 let cats = SettingsCategory::all();
@@ -427,10 +492,25 @@ impl SettingsState {
             0x0D | 0x20 => self.toggle_current(), // Enter/Space — toggle or edit
             _ => {}
         }
+        false
     }
 
-    /// Handle a character input while editing a text/number field.
+    /// Handle a character input while editing a text/number field, or when searching.
     pub fn handle_char(&mut self, c: char) {
+        if self.searching {
+            match c {
+                '\x08' | '\x7f' => {
+                    self.search_query.pop();
+                }
+                _ if !c.is_control() => {
+                    self.search_query.push(c);
+                }
+                _ => {}
+            }
+            self.selected_field = 0;
+            self.scroll_offset = 0;
+            return;
+        }
         if !self.editing {
             return;
         }
@@ -457,6 +537,93 @@ impl SettingsState {
     }
 }
 
+/// Friendly names for colour hex values shown in settings.
+fn color_name(hex: &str) -> Option<&'static str> {
+    match hex.to_ascii_lowercase().as_str() {
+        "#0d1117" => Some("GitHub Dark"),
+        "#16161e" => Some("Warp Night"),
+        "#1e1f2b" => Some("Slate Violet"),
+        "#e6edf3" | "#e5e9f0" => Some("Snow"),
+        "#000000" => Some("Black"),
+        "#ffffff" => Some("White"),
+        "#282a36" => Some("Dracula"),
+        "#1a1b26" => Some("Tokyo Night"),
+        "#002b36" => Some("Solarized Dark"),
+        "#272822" => Some("Monokai"),
+        _ => None,
+    }
+}
+
+// ── Mouse hit-testing ────────────────────────────────────────────────────────
+
+/// What a click at (x, y) lands on inside the settings modal.
+/// Geometry must stay in sync with [`generate_settings_commands`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SettingsHit {
+    Category(usize),
+    /// Index into `filtered_fields()` (absolute, scroll already applied).
+    Field(usize),
+    /// Inside the panel but not on an interactive element.
+    Panel,
+    /// On the dim backdrop — close the modal.
+    Outside,
+}
+
+pub fn hit_test(
+    state: &SettingsState,
+    window_w: f32,
+    window_h: f32,
+    cell_h: f32,
+    x: f32,
+    y: f32,
+) -> SettingsHit {
+    let ch = cell_h;
+    let panel_w = (window_w * 0.75).clamp(700.0, 960.0);
+    let panel_h = (window_h * 0.80).clamp(500.0, 680.0);
+    let px = (window_w - panel_w) * 0.5;
+    let py = (window_h - panel_h) * 0.5;
+
+    if x < px || x >= px + panel_w || y < py || y >= py + panel_h {
+        return SettingsHit::Outside;
+    }
+
+    let header_h = ch + 20.0;
+    let nav_y = py + header_h + 1.0;
+    let nav_w: f32 = 160.0;
+    let nav_x = px + 1.0;
+
+    // Left nav categories
+    if x >= nav_x && x < nav_x + nav_w && y >= nav_y + 8.0 {
+        let item_h = ch + 12.0;
+        let idx = ((y - nav_y - 8.0) / item_h) as usize;
+        if idx < SettingsCategory::all().len() {
+            return SettingsHit::Category(idx);
+        }
+    }
+
+    // Field rows in the right panel
+    let content_x = nav_x + nav_w + 1.0;
+    let content_w = panel_w - nav_w - 3.0;
+    let content_y = nav_y;
+    let nav_h = panel_h - header_h - 2.0;
+    let search_h = if state.searching { (ch + 8.0) + 4.0 } else { 0.0 };
+    let list_top = content_y + 40.0 + search_h;
+    let list_avail = nav_h - 40.0 - ch - 16.0 - search_h;
+    let field_h = ch * 2.0 + 16.0;
+    if x >= content_x + 8.0
+        && x < content_x + content_w - 8.0
+        && y >= list_top
+        && y < list_top + list_avail
+    {
+        let idx = state.scroll_offset + ((y - list_top) / field_h) as usize;
+        if idx < state.filtered_fields().len() {
+            return SettingsHit::Field(idx);
+        }
+    }
+
+    SettingsHit::Panel
+}
+
 // ── Rendering ────────────────────────────────────────────────────────────────
 
 pub fn generate_settings_commands(
@@ -465,12 +632,10 @@ pub fn generate_settings_commands(
     window_h: f32,
     cell_w: u32,
     cell_h: u32,
+    ui_char_w: f32,
 ) -> Vec<UiCommand> {
-    if !state.open {
-        return vec![];
-    }
-
-    let cw = cell_w as f32;
+    let _ = cell_w;
+    let ucw = ui_char_w;
     let ch = cell_h as f32;
     let mut cmds = Vec::with_capacity(128);
 
@@ -480,37 +645,36 @@ pub fn generate_settings_commands(
         y: 0.0,
         w: window_w,
         h: window_h,
-        color: [0.04, 0.07, 0.09, 0.92],
+        color: OVERLAY_DIM,
     });
 
     // Main panel — centered, large
-    let panel_w = (window_w * 0.75).max(700.0).min(960.0);
-    let panel_h = (window_h * 0.80).max(500.0).min(680.0);
+    let panel_w = (window_w * 0.75).clamp(700.0, 960.0);
+    let panel_h = (window_h * 0.80).clamp(500.0, 680.0);
     let px = (window_w - panel_w) * 0.5;
     let py = (window_h - panel_h) * 0.5;
 
-    // Panel background
-    cmds.push(UiCommand::FillRect {
+    // Drop shadow behind panel
+    cmds.push(chrome::shadow(px, py, panel_w, panel_h, 8.0));
+
+    // Panel background (rounded)
+    cmds.push(UiCommand::FillRoundRect {
         x: px,
         y: py,
         w: panel_w,
         h: panel_h,
-        color: hex(COL_PANEL),
+        color: BG_SURFACE,
+        bg: BG_BASE,
     });
-
     // Border
-    for (ox, oy, bw, bh) in [
-        (px, py, panel_w, 1.0),
-        (px, py + panel_h - 1.0, panel_w, 1.0),
-        (px, py, 1.0, panel_h),
-        (px + panel_w - 1.0, py, 1.0, panel_h),
-    ] {
+    {
+        let (ox, oy, bw, bh) = (px, py + panel_h - 1.0, panel_w, 1.0);
         cmds.push(UiCommand::FillRect {
             x: ox,
             y: oy,
             w: bw,
             h: bh,
-            color: hex(COL_BORDER),
+            color: BORDER_DEFAULT,
         });
     }
 
@@ -521,21 +685,21 @@ pub fn generate_settings_commands(
         y: py + 1.0,
         w: panel_w - 2.0,
         h: header_h,
-        color: hex(COL_BG),
+        color: BG_BASE,
     });
-    cmds.push(UiCommand::DrawText {
+    cmds.push(UiCommand::DrawUiText {
         x: px + 16.0,
         y: py + 10.0,
         text: "Settings".to_string(),
-        fg: hex(COL_TEXT),
-        bg: hex(COL_BG),
+        fg: TEXT_PRIMARY,
+        bg: BG_BASE,
     });
-    cmds.push(UiCommand::DrawText {
-        x: px + panel_w - 16.0 - 14.0 * cw,
+    cmds.push(UiCommand::DrawUiText {
+        x: px + panel_w - 16.0 - 11.0 * ucw,
         y: py + 10.0,
         text: "[Esc] close".to_string(),
-        fg: hex(COL_MUTED),
-        bg: hex(COL_BG),
+        fg: TEXT_MUTED,
+        bg: BG_BASE,
     });
 
     // ── Left nav (categories) ────────────────────────────────────────────
@@ -550,7 +714,7 @@ pub fn generate_settings_commands(
         y: nav_y,
         w: nav_w,
         h: nav_h,
-        color: hex(COL_PANEL),
+        color: BG_SURFACE,
     });
     // Right border on nav
     cmds.push(UiCommand::FillRect {
@@ -558,22 +722,22 @@ pub fn generate_settings_commands(
         y: nav_y,
         w: 1.0,
         h: nav_h,
-        color: hex(COL_BORDER),
+        color: BORDER_DEFAULT,
     });
 
     let item_h = ch + 12.0;
     for (i, cat) in SettingsCategory::all().iter().enumerate() {
         let iy = nav_y + 8.0 + i as f32 * item_h;
         let is_active = *cat == state.category;
-        let bg = if is_active { COL_HOVER } else { COL_PANEL };
-        let fg = if is_active { COL_TEXT } else { COL_MUTED };
+        let bg = if is_active { BG_HOVER } else { BG_SURFACE };
+        let fg = if is_active { TEXT_PRIMARY } else { TEXT_MUTED };
 
         cmds.push(UiCommand::FillRect {
             x: nav_x,
             y: iy,
             w: nav_w,
             h: item_h,
-            color: hex(bg),
+            color: bg,
         });
         // Active indicator bar
         if is_active {
@@ -582,26 +746,26 @@ pub fn generate_settings_commands(
                 y: iy,
                 w: 3.0,
                 h: item_h,
-                color: hex(COL_GREEN),
+                color: ACCENT_GREEN,
             });
         }
-        cmds.push(UiCommand::DrawText {
+        cmds.push(UiCommand::DrawUiText {
             x: nav_x + 16.0,
             y: iy + (item_h - ch) * 0.5,
             text: cat.label().to_string(),
-            fg: hex(fg),
-            bg: hex(bg),
+            fg,
+            bg,
         });
     }
 
     // Navigation hint at bottom of nav
     let hint_y = nav_y + nav_h - ch - 8.0;
-    cmds.push(UiCommand::DrawText {
+    cmds.push(UiCommand::DrawUiText {
         x: nav_x + 8.0,
         y: hint_y,
         text: "<-/-> nav".to_string(),
-        fg: hex(COL_FAINT),
-        bg: hex(COL_PANEL),
+        fg: TEXT_FAINT,
+        bg: BG_SURFACE,
     });
 
     // ── Right panel (fields) ─────────────────────────────────────────────
@@ -615,16 +779,16 @@ pub fn generate_settings_commands(
         y: content_y,
         w: content_w,
         h: nav_h,
-        color: hex(COL_BG),
+        color: BG_BASE,
     });
 
     // Category title
-    cmds.push(UiCommand::DrawText {
+    cmds.push(UiCommand::DrawUiText {
         x: content_x + 16.0,
         y: content_y + 12.0,
         text: state.category.label().to_string(),
-        fg: hex(COL_TEXT),
-        bg: hex(COL_BG),
+        fg: TEXT_PRIMARY,
+        bg: BG_BASE,
     });
 
     // About page — special
@@ -641,29 +805,58 @@ pub fn generate_settings_commands(
             "Config: %APPDATA%/TermForge/termforge.toml",
         ];
         for (i, line) in about_lines.iter().enumerate() {
-            cmds.push(UiCommand::DrawText {
+            cmds.push(UiCommand::DrawUiText {
                 x: content_x + 16.0,
                 y: content_y + 40.0 + i as f32 * (ch + 4.0),
                 text: line.to_string(),
-                fg: hex(if line.is_empty() { COL_BG } else { COL_MUTED }),
-                bg: hex(COL_BG),
+                fg: if line.is_empty() { BG_BASE } else { TEXT_MUTED },
+                bg: BG_BASE,
             });
         }
         return cmds;
     }
 
+    // Search bar
+    let search_bar_h = ch + 8.0;
+    if state.searching {
+        cmds.push(UiCommand::FillRect {
+            x: content_x + 8.0,
+            y: content_y + 40.0,
+            w: content_w - 16.0,
+            h: search_bar_h,
+            color: BG_BASE,
+        });
+        // Search icon + query
+        let search_display = if state.search_query.is_empty() {
+            "Type to filter...".to_string()
+        } else {
+            format!("{}_", state.search_query)
+        };
+        let search_fg = if state.search_query.is_empty() { TEXT_FAINT } else { TEXT_PRIMARY };
+        cmds.push(UiCommand::DrawUiText {
+            x: content_x + 16.0,
+            y: content_y + 42.0 + (search_bar_h - ch) * 0.5,
+            text: format!("\u{2315} {search_display}"),
+            fg: search_fg,
+            bg: BG_BASE,
+        });
+    }
+
     // Fields list
-    let fields = state.fields_for_category();
+    let fields = state.filtered_fields();
     let field_h = ch * 2.0 + 16.0; // label + value + padding
+    let list_top = content_y + 40.0 + if state.searching { search_bar_h + 4.0 } else { 0.0 };
+    let list_avail = nav_h - 40.0 - ch - 16.0 - if state.searching { search_bar_h + 4.0 } else { 0.0 };
+    let total_field_h = fields.len() as f32 * field_h;
 
-    for (i, field) in fields.iter().enumerate() {
-        let fy = content_y + 40.0 + i as f32 * field_h;
-        if fy + field_h > content_y + nav_h {
+    for (field_idx, field) in fields.iter().enumerate().skip(state.scroll_offset) {
+        let fy = list_top + (field_idx - state.scroll_offset) as f32 * field_h;
+        if fy + field_h > list_top + list_avail {
             break;
-        } // clip
+        }
 
-        let is_selected = i == state.selected_field;
-        let row_bg = if is_selected { COL_HOVER } else { COL_BG };
+        let is_selected = field_idx == state.selected_field;
+        let row_bg = if is_selected { BG_HOVER } else { BG_BASE };
 
         // Row background
         cmds.push(UiCommand::FillRect {
@@ -671,7 +864,7 @@ pub fn generate_settings_commands(
             y: fy,
             w: content_w - 16.0,
             h: field_h - 4.0,
-            color: hex(row_bg),
+            color: row_bg,
         });
 
         // Selection indicator
@@ -681,63 +874,94 @@ pub fn generate_settings_commands(
                 y: fy,
                 w: 3.0,
                 h: field_h - 4.0,
-                color: hex(COL_GREEN),
+                color: ACCENT_GREEN,
             });
         }
 
         // Label
-        cmds.push(UiCommand::DrawText {
+        cmds.push(UiCommand::DrawUiText {
             x: content_x + 20.0,
             y: fy + 4.0,
             text: field.label.clone(),
-            fg: hex(COL_TEXT),
-            bg: hex(row_bg),
+            fg: TEXT_PRIMARY,
+            bg: row_bg,
         });
 
         // Description
-        cmds.push(UiCommand::DrawText {
+        cmds.push(UiCommand::DrawUiText {
             x: content_x + 20.0,
             y: fy + 4.0 + ch + 2.0,
             text: field.description.clone(),
-            fg: hex(COL_FAINT),
-            bg: hex(row_bg),
+            fg: TEXT_FAINT,
+            bg: row_bg,
         });
 
-        // Value (right-aligned)
+        // Value (right-aligned). Colour fields show a friendly name next to
+        // the raw hex so values read at a glance.
         let val_display = if is_selected && state.editing {
             format!("{}_", state.edit_buffer)
         } else {
-            field.value.display()
+            let raw = field.value.display();
+            if field.key.starts_with("colors.") {
+                match color_name(&raw) {
+                    Some(name) => format!("{name}  {raw}"),
+                    None => raw,
+                }
+            } else {
+                raw
+            }
         };
-        let val_w = val_display.chars().count() as f32 * cw;
+        let val_w = val_display.chars().count() as f32 * ucw;
         let val_x = content_x + content_w - 24.0 - val_w;
         let val_color = match &field.value {
-            FieldValue::Bool(true) => COL_GREEN,
-            FieldValue::Bool(false) => COL_MUTED,
-            FieldValue::Choice(..) => COL_BLUE,
-            _ => COL_TEXT,
+            FieldValue::Bool(true) => ACCENT_GREEN,
+            FieldValue::Bool(false) => TEXT_MUTED,
+            FieldValue::Choice(..) => ACCENT_BLUE,
+            _ => TEXT_PRIMARY,
         };
-        cmds.push(UiCommand::DrawText {
+        cmds.push(UiCommand::DrawUiText {
             x: val_x,
             y: fy + 4.0,
             text: val_display,
-            fg: hex(val_color),
-            bg: hex(row_bg),
+            fg: val_color,
+            bg: row_bg,
+        });
+    }
+
+    // Scrollbar for fields
+    if total_field_h > list_avail {
+        let sb_w = 6.0;
+        let sb_x = content_x + content_w - sb_w - 1.0;
+        cmds.push(UiCommand::FillRect {
+            x: sb_x, y: list_top, w: sb_w, h: list_avail,
+            color: BG_SURFACE,
+        });
+        let thumb_h = (list_avail / total_field_h * list_avail).max(field_h);
+        let max_thumb_y = list_avail - thumb_h;
+        let scroll_frac = state.scroll_offset as f32 / fields.len().saturating_sub(1).max(1) as f32;
+        let thumb_y = list_top + (scroll_frac * max_thumb_y).clamp(0.0, max_thumb_y);
+        cmds.push(UiCommand::FillRect {
+            x: sb_x, y: thumb_y, w: sb_w, h: thumb_h,
+            color: TEXT_MUTED,
         });
     }
 
     // Footer hint
     let footer_y = content_y + nav_h - ch - 8.0;
-    let hint = match state.category {
-        SettingsCategory::Keybindings => "Keybindings are read-only in this version",
-        _ => "Up/Down select  |  Enter/Space edit  |  Changes save automatically",
+    let hint = if state.searching {
+        "Type to filter  |  Esc to clear search"
+    } else {
+        match state.category {
+            SettingsCategory::Keybindings => "Keybindings are read-only in this version",
+            _ => "Ctrl+F search  |  Up/Down select  |  Enter/Space edit  |  Changes save automatically",
+        }
     };
-    cmds.push(UiCommand::DrawText {
+    cmds.push(UiCommand::DrawUiText {
         x: content_x + 16.0,
         y: footer_y,
         text: hint.to_string(),
-        fg: hex(COL_FAINT),
-        bg: hex(COL_BG),
+        fg: TEXT_FAINT,
+        bg: BG_BASE,
     });
 
     cmds

@@ -7,9 +7,10 @@
 //! All rendering is via [`UiCommand`]s fed into the existing DX12 pipeline.
 
 use libterm::ssh::host_store::HostConfig;
-use renderer_dx12::ui_renderer::{
-    hex, UiCommand, COL_BG, COL_BLUE, COL_BORDER, COL_MUTED, COL_PANEL, COL_TEXT,
-};
+use renderer_windows::ui_renderer::UiCommand;
+use renderer_windows::tokens::*;
+
+use super::chrome;
 
 // ── Text input ────────────────────────────────────────────────────────────────
 
@@ -51,7 +52,6 @@ pub enum ManagerMode {
 }
 
 pub struct SshManagerState {
-    pub open: bool,
     pub mode: ManagerMode,
     pub hosts: Vec<HostConfig>,
     pub selected: usize,
@@ -63,7 +63,6 @@ pub struct SshManagerState {
 impl SshManagerState {
     pub fn new(hosts: Vec<HostConfig>) -> Self {
         Self {
-            open: false,
             mode: ManagerMode::List,
             hosts,
             selected: 0,
@@ -112,15 +111,17 @@ impl SshManagerState {
         None
     }
 
+    pub fn scroll_by(&mut self, delta: i32) {
+        let max = self.hosts.len().saturating_sub(1);
+        let new = (self.selected as i32 + delta).clamp(0, max as i32) as usize;
+        self.selected = new;
+    }
+
     pub fn handle_key_up(&mut self) {
-        if self.selected > 0 {
-            self.selected -= 1;
-        }
+        self.scroll_by(-1);
     }
     pub fn handle_key_down(&mut self) {
-        if self.selected + 1 < self.hosts.len() {
-            self.selected += 1;
-        }
+        self.scroll_by(1);
     }
 
     /// Delete the currently selected host from the list.
@@ -135,13 +136,18 @@ impl SshManagerState {
         }
     }
 
-    pub fn handle_escape(&mut self) {
+    /// Returns true if the modal should close (List mode with Escape).
+    pub fn handle_escape(&mut self) -> bool {
         match self.mode {
             ManagerMode::NewHost => {
                 self.mode = ManagerMode::List;
                 self.focus = 0;
+                for f in &mut self.fields {
+                    f.clear();
+                }
+                false
             }
-            ManagerMode::List => self.open = false,
+            ManagerMode::List => true,
         }
     }
 
@@ -202,10 +208,6 @@ pub fn generate_ssh_manager_commands(
     cell_w: u32,
     cell_h: u32,
 ) -> Vec<UiCommand> {
-    if !state.open {
-        return vec![];
-    }
-
     let cw = cell_w as f32;
     let ch = cell_h as f32;
     let mut cmds = Vec::with_capacity(128);
@@ -216,56 +218,51 @@ pub fn generate_ssh_manager_commands(
         y: 0.0,
         w: window_w,
         h: window_h,
-        color: [0.04, 0.07, 0.09, 0.92], // #0d1117 ~92% opaque
+        color: OVERLAY_DIM,
     });
 
     // Modal panel
-    let modal_w = (window_w * 0.65).max(500.0).min(800.0);
-    let modal_h = (window_h * 0.72).max(300.0).min(560.0);
+    let modal_w = (window_w * 0.65).clamp(500.0, 800.0);
+    let modal_h = (window_h * 0.72).clamp(300.0, 560.0);
     let mx = (window_w - modal_w) * 0.5;
     let my = (window_h - modal_h) * 0.5;
 
-    cmds.push(UiCommand::FillRect {
+    // Drop shadow behind panel
+    cmds.push(chrome::shadow(mx, my, modal_w, modal_h, 8.0));
+
+    // Panel background (rounded)
+    cmds.push(UiCommand::FillRoundRect {
         x: mx,
         y: my,
         w: modal_w,
         h: modal_h,
-        color: hex(COL_PANEL),
+        color: BG_SURFACE,
+        bg: BG_BASE,
     });
-    // Border
-    for (ox, oy, bw, bh) in [
-        (mx, my, modal_w, 1.0),                 // top
-        (mx, my + modal_h - 1.0, modal_w, 1.0), // bottom
-        (mx, my, 1.0, modal_h),                 // left
-        (mx + modal_w - 1.0, my, 1.0, modal_h), // right
-    ] {
-        cmds.push(UiCommand::FillRect {
-            x: ox,
-            y: oy,
-            w: bw,
-            h: bh,
-            color: hex(COL_BORDER),
-        });
-    }
+    // Bottom border only (other edges blend into rounded corners)
+    cmds.push(UiCommand::FillRect {
+        x: mx, y: my + modal_h - 1.0, w: modal_w, h: 1.0,
+        color: BORDER_DEFAULT,
+    });
 
     // Title
     let title = match state.mode {
         ManagerMode::List => "SSH Manager",
         ManagerMode::NewHost => "New SSH Host",
     };
-    cmds.push(UiCommand::DrawText {
+    cmds.push(UiCommand::DrawUiText {
         x: mx + 20.0,
         y: my + 14.0,
         text: title.to_string(),
-        fg: hex(COL_TEXT),
-        bg: hex(COL_PANEL),
+        fg: TEXT_PRIMARY,
+        bg: BG_SURFACE,
     });
-    cmds.push(UiCommand::DrawText {
+    cmds.push(UiCommand::DrawUiText {
         x: mx + modal_w - 8.0 * cw - 20.0,
         y: my + 14.0,
-        text: "[Ctrl+H] close".to_string(),
-        fg: hex(COL_MUTED),
-        bg: hex(COL_PANEL),
+        text: "[Esc] close".to_string(),
+        fg: TEXT_MUTED,
+        bg: BG_SURFACE,
     });
     // Title underline
     cmds.push(UiCommand::FillRect {
@@ -273,7 +270,7 @@ pub fn generate_ssh_manager_commands(
         y: my + ch + 20.0,
         w: modal_w,
         h: 1.0,
-        color: hex(COL_BORDER),
+        color: BORDER_DEFAULT,
     });
 
     let body_y = my + ch + 26.0;
@@ -300,31 +297,36 @@ fn render_list(
     let pad_x = 20.0;
 
     if state.hosts.is_empty() {
-        cmds.push(UiCommand::DrawText {
+        cmds.push(UiCommand::DrawUiText {
             x: mx + pad_x,
             y: body_y + 10.0,
             text: "No saved hosts.  Press N to add one.".to_string(),
-            fg: hex(COL_MUTED),
-            bg: hex(COL_PANEL),
+            fg: TEXT_MUTED,
+            bg: BG_SURFACE,
         });
         return;
     }
 
-    // Max visible rows
-    let visible = ((modal_h - (body_y - (body_y - ch - 26.0)) - 40.0) / item_h) as usize;
+    // Max visible rows: modal height minus title area (body_y - my = ch + 26)
+    // minus 40px footer for hints, divided by row height.
+    let title_area_h = ch + 26.0;
+    let footer_h = 40.0;
+    let total_h = state.hosts.len() as f32 * item_h;
+    let visible_area = modal_h - title_area_h - footer_h;
+    let visible = (visible_area / item_h) as usize;
     let start = state.selected.saturating_sub(visible / 2);
 
     for (i, host) in state.hosts.iter().enumerate().skip(start).take(visible) {
         let iy = body_y + (i - start) as f32 * item_h;
         let selected = i == state.selected;
-        let item_bg = if selected { "#1c2128" } else { COL_PANEL };
+        let item_bg = if selected { BG_HOVER } else { BG_SURFACE };
 
         cmds.push(UiCommand::FillRect {
             x: mx + 1.0,
             y: iy,
             w: modal_w - 2.0,
             h: item_h,
-            color: hex(item_bg),
+            color: item_bg,
         });
         if selected {
             cmds.push(UiCommand::FillRect {
@@ -332,29 +334,48 @@ fn render_list(
                 y: iy,
                 w: 3.0,
                 h: item_h,
-                color: hex(COL_BLUE),
+                color: ACCENT_BLUE,
             });
         }
 
         // Name + address
         let label = format!("{}  —  {}", host.name, host.display_label());
-        cmds.push(UiCommand::DrawText {
+        cmds.push(UiCommand::DrawUiText {
             x: mx + pad_x + 6.0,
             y: iy + (item_h - ch) * 0.5,
             text: label,
-            fg: hex(if selected { COL_TEXT } else { COL_MUTED }),
-            bg: hex(item_bg),
+            fg: if selected { TEXT_PRIMARY } else { TEXT_MUTED },
+            bg: item_bg,
+        });
+    }
+
+    // Scrollbar
+    if total_h > visible_area {
+        let sb_w = 6.0;
+        let sb_x = mx + modal_w - sb_w - 1.0;
+        let sb_h = visible_area;
+        // Track
+        cmds.push(UiCommand::FillRect {
+            x: sb_x, y: body_y, w: sb_w, h: sb_h,
+            color: BG_SURFACE,
+        });
+        // Thumb
+        let thumb_h = (visible_area / total_h * visible_area).max(item_h);
+        let thumb_y = body_y + (start as f32 / state.hosts.len() as f32) * (sb_h - thumb_h);
+        cmds.push(UiCommand::FillRect {
+            x: sb_x, y: thumb_y, w: sb_w, h: thumb_h,
+            color: TEXT_MUTED,
         });
     }
 
     // Footer hints
     let footer_y = body_y + visible as f32 * item_h + 8.0;
-    cmds.push(UiCommand::DrawText {
+    cmds.push(UiCommand::DrawUiText {
         x: mx + pad_x,
         y: footer_y,
         text: "[↑↓] navigate   [Enter] connect   [N] new   [D] delete   [Esc] back".to_string(),
-        fg: hex(COL_MUTED),
-        bg: hex(COL_PANEL),
+        fg: TEXT_MUTED,
+        bg: BG_SURFACE,
     });
 }
 
@@ -374,15 +395,15 @@ fn render_new_host(
     for (i, field) in state.fields.iter().enumerate() {
         let fy = body_y + i as f32 * (field_h + 8.0);
         let active = i == state.focus;
-        let border_color = if active { COL_BLUE } else { COL_BORDER };
+        let border_color = if active { ACCENT_BLUE } else { BORDER_DEFAULT };
 
         // Label
-        cmds.push(UiCommand::DrawText {
+        cmds.push(UiCommand::DrawUiText {
             x: mx + pad_x,
             y: fy + (field_h - ch) * 0.5,
             text: format!("{:<22}", field.label),
-            fg: hex(COL_MUTED),
-            bg: hex(COL_PANEL),
+            fg: TEXT_MUTED,
+            bg: BG_SURFACE,
         });
 
         // Input box
@@ -394,7 +415,7 @@ fn render_new_host(
             y: fy,
             w: box_w,
             h: field_h,
-            color: hex(COL_BG),
+            color: BG_BASE,
         });
         // Border
         for (ox, oy, bw, bh) in [
@@ -408,7 +429,7 @@ fn render_new_host(
                 y: oy,
                 w: bw,
                 h: bh,
-                color: hex(border_color),
+                color: border_color,
             });
         }
 
@@ -418,21 +439,21 @@ fn render_new_host(
         } else {
             field.value.clone()
         };
-        cmds.push(UiCommand::DrawText {
+        cmds.push(UiCommand::DrawUiText {
             x: box_x + 8.0,
             y: fy + (field_h - ch) * 0.5,
             text: display,
-            fg: hex(COL_TEXT),
-            bg: hex(COL_BG),
+            fg: TEXT_PRIMARY,
+            bg: BG_BASE,
         });
     }
 
     let hint_y = body_y + state.fields.len() as f32 * (field_h + 8.0) + 12.0;
-    cmds.push(UiCommand::DrawText {
+    cmds.push(UiCommand::DrawUiText {
         x: mx + pad_x,
         y: hint_y,
         text: "[Tab] next field   [Enter] connect   [Esc] back".to_string(),
-        fg: hex(COL_MUTED),
-        bg: hex(COL_PANEL),
+        fg: TEXT_MUTED,
+        bg: BG_SURFACE,
     });
 }

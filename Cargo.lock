@@ -1184,6 +1184,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "renderer-windows"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libterm",
+ "thiserror",
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "rfc6979"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1616,7 +1627,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "libterm",
- "renderer-dx12",
+ "renderer-windows",
  "rstar",
  "serde",
  "serde_json",

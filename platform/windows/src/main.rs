@@ -8,7 +8,9 @@
 
 mod app;
 mod entry;
+mod fonts;
 mod input;
+mod integration;
 mod ipc;
 mod snapshot;
 mod ui;
@@ -18,7 +20,7 @@ mod workspace;
 use std::sync::mpsc;
 
 use anyhow::Result;
-use renderer_dx12::{compositor::Compositor, context::Dx12Context};
+use renderer_windows::compositor::Compositor;
 
 use app::AppState;
 use entry::PTY_WAKE_EVENT;
@@ -50,8 +52,13 @@ fn main() -> Result<()> {
     // ── Window + compositor ────────────────────────────────────────────────
     let (event_tx, event_rx) = mpsc::sync_channel::<window::WindowEvent>(512);
     let window = Window::new("TermForge", INIT_W, INIT_H, event_tx)?;
-    let ctx = Dx12Context::new(window.hwnd, INIT_W, INIT_H)?;
-    let compositor = Compositor::build(ctx, "Cascadia Code", 13.0, window.dpi as f32)?;
+    // Private fonts must be registered before the compositor resolves the
+    // configured family.
+    fonts::register_private_fonts();
+    let font_cfg = libterm::config::Config::load_or_default(
+        &libterm::config::Config::default_path(),
+    ).font;
+    let compositor = Compositor::build(window.hwnd, &font_cfg.family, font_cfg.size, window.dpi as f32)?;
     let (cw, ch) = compositor.cell_size();
 
     // ── Initial session size ───────────────────────────────────────────────
@@ -60,8 +67,17 @@ fn main() -> Result<()> {
     let init_rows = ((init_content.h - PANE_HEADER_H) / ch as f32) as u16;
     let init_rows = init_rows.max(5);
 
-    // ── Shell detection ────────────────────────────────────────────────────
-    let shell = detect_shell();
+    // ── Shell detection + integration ──────────────────────────────────────
+    // Wrap PowerShell in the OSC 133 / OSC 7 integration script so command
+    // blocks and the anchored input editor work without profile edits.
+    let app_config = libterm::config::Config::load_or_default(
+        &libterm::config::Config::default_path(),
+    );
+    let shell = if app_config.shell.auto_integration {
+        integration::shell_command_line(&detect_shell())
+    } else {
+        detect_shell()
+    };
 
     // ── Restore or create initial sessions ────────────────────────────────
     // spawn_blocking inside ConPty::spawn requires an active Tokio runtime

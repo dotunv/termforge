@@ -13,7 +13,7 @@ use libterm::{
     mux::{layout::PaneLayout, session::{Session, SessionKind}},
     ssh::host_store::HostStore,
 };
-use renderer_dx12::compositor::Compositor;
+use renderer_windows::compositor::Compositor;
 
 use crate::{
     entry::{ssh_auth_for, Entry},
@@ -22,9 +22,12 @@ use crate::{
     snapshot,
     ui::{
         agent_launcher::{generate_agent_launcher_commands, AgentLauncherState},
+        animation::{AnimationEngine, AnimationTarget, Easing},
         block_overlay::{build_block_rtree, generate_block_overlays, BlockHitTarget},
         chrome,
-        layout::{ChromeLayout, ChromeState, PANE_HEADER_H, SPLIT_HANDLE_W},
+        command_palette::{generate_command_palette_commands, CommandPaletteState, PaletteAction},
+        input_editor::{self, EditorEffect, InputEditor},
+        layout::{ChromeLayout, ChromeState, PANE_HEADER_H, SESSION_BAR_H, SIDEBAR_W, SPLIT_HANDLE_W},
         settings::{generate_settings_commands, SettingsState},
         sidebar::{hit_test as sidebar_hit_test, SidebarHit},
         ssh_manager::{generate_ssh_manager_commands, SshManagerState},
@@ -34,6 +37,48 @@ use crate::{
 };
 
 const HIBERNATE_SECS: u64 = 300;
+
+// ── Modal stack ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Modal {
+    Settings,
+    SshManager,
+    AgentLauncher,
+    /// Ctrl+K fuzzy action launcher.
+    CommandPalette,
+    /// Quit confirmation — shown when closing with busy sessions.
+    ConfirmClose,
+}
+
+// ── Render cache ──────────────────────────────────────────────────────────────
+
+/// Caches the most recent agent blocks so we don't clone them every frame.
+/// Keyed by the session's UUID — tab indices shift when tabs close, so an
+/// index would let a new tab inherit a stale cache.
+struct AgentBlockCache {
+    session_id: Option<libterm::block::store::SessionId>,
+    change_counter: u64,
+    blocks: Vec<CommandBlock>,
+}
+
+impl AgentBlockCache {
+    fn new() -> Self {
+        Self { session_id: None, change_counter: 0, blocks: Vec::new() }
+    }
+    fn get_or_update(
+        &mut self,
+        session_id: libterm::block::store::SessionId,
+        store: &libterm::block::store::BlockStore,
+    ) -> &[CommandBlock] {
+        if self.session_id != Some(session_id) || self.change_counter != store.change_counter() {
+            self.session_id = Some(session_id);
+            self.change_counter = store.change_counter();
+            self.blocks = store.clone_recent(20);
+        }
+        &self.blocks
+    }
+}
 
 // ── Drag state ────────────────────────────────────────────────────────────────
 
@@ -72,15 +117,44 @@ pub struct AppState {
     snapshot_dirty: bool,
     window_shown: bool,
 
+    // Mouse state for hover tracking
+    mouse_x: i32,
+    mouse_y: i32,
+
+    /// Set when handle_key consumes a Ctrl shortcut: the shortcut's WM_CHAR
+    /// control character still follows and must not reach the PTY (otherwise
+    /// e.g. Ctrl+T echoes ^T into the shell).
+    swallow_char: bool,
+
+    /// Worker → run-loop channel for completed font downloads
+    /// (Ok(family) to apply, Err logged).
+    font_tx: mpsc::Sender<anyhow::Result<String>>,
+    font_rx: mpsc::Receiver<anyhow::Result<String>>,
+
+    /// Cached pixel widths of the three sidebar badge labels
+    /// (active / SSH / agent) — avoids a GetDC + GetTextExtentPoint32W per
+    /// entry per frame. Cleared on DPI / font changes.
+    badge_width_cache: Option<(f32, f32, f32)>,
+
     // UI overlays
+    modals: Vec<Modal>,
+    palette: CommandPaletteState,
+    /// Per-session anchored input editors (Warp-style), keyed by session id.
+    editors: std::collections::HashMap<libterm::block::store::SessionId, InputEditor>,
     ssh_mgr: SshManagerState,
     agent_launcher: AgentLauncherState,
     settings: SettingsState,
     host_store: HostStore,
 
+    // Render cache: avoids cloning block history every frame when unchanged
+    agent_block_cache: AgentBlockCache,
+
     // IPC
     ipc_sessions: ipc::SessionList,
     ipc_rx: mpsc::Receiver<IpcCommand>,
+
+    // Animation engine
+    anim: AnimationEngine,
 
     // Hit testing
     block_rtree: rstar::RTree<BlockHitTarget>,
@@ -121,6 +195,13 @@ impl AppState {
         let app_config = Config::load_or_default(&Config::default_path());
         let settings = SettingsState::new(app_config);
 
+        let (font_tx, font_rx) = mpsc::channel();
+
+        // Sidebar starts visible: seed its animated offset at full width so
+        // the first frame doesn't render it collapsed (value() defaults to 0).
+        let mut anim = AnimationEngine::new();
+        anim.set_value(AnimationTarget::SidebarOffset, SIDEBAR_W);
+
         Self {
             window,
             compositor,
@@ -140,12 +221,23 @@ impl AppState {
             ui_dirty: true,
             snapshot_dirty: true,
             window_shown: false,
+            mouse_x: -1,
+            mouse_y: -1,
+            swallow_char: false,
+            font_tx,
+            font_rx,
+            badge_width_cache: None,
+            modals: Vec::new(),
+            palette: CommandPaletteState::new(),
+            editors: std::collections::HashMap::new(),
             ssh_mgr,
             agent_launcher,
             settings,
             host_store,
+            agent_block_cache: AgentBlockCache::new(),
             ipc_sessions,
             ipc_rx,
+            anim,
             block_rtree: build_block_rtree(Vec::new()),
             shell,
             init_cols,
@@ -161,7 +253,9 @@ impl AppState {
         while self.running {
             self.drain_pty();
             self.drain_ipc();
+            self.drain_font_downloads();
             self.tick_hibernation();
+            self.anim.tick();
             drain_win32_messages();
             self.handle_events()?;
 
@@ -173,7 +267,13 @@ impl AppState {
             self.render()?;
             self.wait();
         }
-        Ok(())
+
+        // Persist final state, then exit without unwinding: teardown
+        // deadlocks otherwise — ClosePseudoConsole blocks while the output
+        // pipe has unread data, and tokio's Runtime::drop waits forever on
+        // the spawn_blocking PTY readers stuck in ReadFile.
+        snapshot::persist(&self.entries, self.active_tab, &self.shell.clone());
+        std::process::exit(0);
     }
 
     // ── PTY drain ─────────────────────────────────────────────────────────────
@@ -239,7 +339,14 @@ impl AppState {
         while let Ok(event) = self.event_rx.try_recv() {
             self.ui_dirty = true;
             match event {
-                WindowEvent::Close => self.running = false,
+                WindowEvent::Close => self.request_close(),
+                WindowEvent::Paint => {
+                    // Cheap path: re-blit the last frame; fall back to a full
+                    // redraw if no frame has been rendered yet.
+                    if !self.compositor.present() {
+                        self.ui_dirty = true;
+                    }
+                }
                 WindowEvent::Char(cu) => self.handle_char(cu),
                 WindowEvent::KeyDown { vk, ctrl } => self.handle_key(vk, ctrl)?,
                 WindowEvent::Resize { width, height } => {
@@ -248,7 +355,10 @@ impl AppState {
                     self.compositor.resize(width, height)?;
                 }
                 WindowEvent::DpiChanged { dpi, w, h } => {
-                    self.compositor.rebuild_atlas("Cascadia Code", 13.0, dpi as f32)?;
+                    let fam = self.settings.config.font.family.clone();
+                    let size = self.settings.config.font.size;
+                    self.compositor.rebuild_atlas(&fam, size, dpi as f32)?;
+                    self.badge_width_cache = None;
                     self.window_w = w as u32;
                     self.window_h = h as u32;
                     self.compositor.resize(self.window_w, self.window_h)?;
@@ -264,7 +374,23 @@ impl AppState {
                     }
                 }
                 WindowEvent::LButtonDown { x, y } => self.handle_lbutton_down(x, y),
-                WindowEvent::MouseMove { x, .. } => {
+                WindowEvent::MouseMove { x, y } => {
+                    // Hover highlights live in the chrome; repaint only when
+                    // the cursor is over chrome (session bar / sidebar /
+                    // statusbar), not on every move across the terminal.
+                    let over_chrome = |px: i32, py: i32| {
+                        (py as f32) < SESSION_BAR_H
+                            || (py as f32) > self.window_h as f32 - crate::ui::layout::STATUSBAR_H
+                            || (self.sidebar_vis && (px as f32) < SIDEBAR_W)
+                    };
+                    let moved = self.mouse_x != x || self.mouse_y != y;
+                    // Also repaint on the move that *leaves* chrome so stale
+                    // hover highlights are cleared.
+                    if moved && (over_chrome(x, y) || over_chrome(self.mouse_x, self.mouse_y)) {
+                        self.ui_dirty = true;
+                    }
+                    self.mouse_x = x;
+                    self.mouse_y = y;
                     if let Some(ref ds) = self.drag {
                         let delta = x as f32 - ds.origin_x;
                         self.split_ratio = Some(
@@ -289,43 +415,137 @@ impl AppState {
     fn handle_char(&mut self, cu: u16) {
         let c = char::from_u32(cu as u32).unwrap_or('\0');
 
-        if self.settings.open {
-            self.settings.handle_char(c);
-            return;
+        // Drop the control char generated by a Ctrl shortcut handle_key just
+        // consumed (e.g. 0x14 after Ctrl+T).  Guarded on is_control so a
+        // shortcut that produces no WM_CHAR can't swallow a real keystroke.
+        if self.swallow_char {
+            self.swallow_char = false;
+            if c.is_control() {
+                return;
+            }
         }
-        if self.ssh_mgr.open {
-            if let Some(host) = self.ssh_mgr.handle_char(c) {
-                self.host_store.hosts = self.ssh_mgr.hosts.clone();
-                let _ = self.host_store.save();
-                let auth = ssh_auth_for(&host);
-                match self.rt.block_on(Entry::spawn_ssh(
-                    host.hostname.clone(),
-                    host.port,
-                    host.username.clone(),
-                    auth,
-                )) {
-                    Ok(e) => {
-                        self.entries.push(e);
-                        self.active_tab = self.entries.len() - 1;
-                        self.ssh_mgr.open = false;
+
+        match self.modals.last() {
+            Some(Modal::Settings) => {
+                self.settings.handle_char(c);
+                return;
+            }
+            Some(Modal::SshManager) => {
+                if let Some(host) = self.ssh_mgr.handle_char(c) {
+                    self.modals.pop();
+                    self.host_store.hosts = self.ssh_mgr.hosts.clone();
+                    let _ = self.host_store.save();
+                    let auth = ssh_auth_for(&host);
+                    match self.rt.block_on(Entry::spawn_ssh(
+                        host.hostname.clone(),
+                        host.port,
+                        host.username.clone(),
+                        auth,
+                    )) {
+                        Ok(e) => {
+                            self.entries.push(e);
+                            self.active_tab = self.entries.len() - 1;
+                        }
+                        Err(e) => tracing::error!("SSH connect: {e}"),
                     }
-                    Err(e) => tracing::error!("SSH connect: {e}"),
+                }
+                return;
+            }
+            Some(Modal::AgentLauncher) => {
+                if let Some((cmd, model)) = self.agent_launcher.handle_char(c) {
+                    self.modals.pop();
+                    match Entry::spawn_agent(&cmd, &model) {
+                        Ok(e) => {
+                            self.entries.push(e);
+                            self.active_tab = self.entries.len() - 1;
+                        }
+                        Err(e) => tracing::error!("agent spawn: {e}"),
+                    }
+                }
+                return;
+            }
+            Some(Modal::CommandPalette) => {
+                if let Some(action) = self.palette.handle_char(c) {
+                    self.modals.pop();
+                    self.palette.reset();
+                    self.run_palette_action(action);
+                }
+                return;
+            }
+            Some(Modal::ConfirmClose) => {
+                match c.to_ascii_lowercase() {
+                    'y' => self.running = false,
+                    'n' => { self.modals.pop(); }
+                    _ => {}
+                }
+                return;
+            }
+            None => {}
+        }
+
+        // Anchored input editor: at an idle integration-detected prompt the
+        // app owns the keystroke instead of the PTY.
+        if self.editor_active() {
+            let (id, block_count) = {
+                let e = &self.entries[self.active_tab];
+                (e.session.id, e.session.blocks.all().len())
+            };
+            let ed = self.editors.get_mut(&id).expect("editor_active inserted it");
+            let searching = matches!(ed.mode, crate::ui::input_editor::EditorMode::Search { .. });
+            let effect = if searching {
+                match c {
+                    '\r' | '\n' => {
+                        // Accept the match and run it (bash behaviour).
+                        ed.end_search(true);
+                        ed.submit()
+                    }
+                    '\t' => {
+                        // Accept into the buffer for further editing.
+                        ed.end_search(true);
+                        EditorEffect::None
+                    }
+                    '\x1b' => {
+                        ed.end_search(false);
+                        EditorEffect::None
+                    }
+                    '\x08' | '\x7f' => {
+                        ed.search_backspace();
+                        EditorEffect::None
+                    }
+                    _ if !c.is_control() => {
+                        ed.search_push(c);
+                        EditorEffect::None
+                    }
+                    _ => EditorEffect::None,
+                }
+            } else {
+                match c {
+                    '\r' | '\n' => ed.submit(),
+                    '\t' => ed.flush_for_completion(block_count),
+                    '\x03' => ed.interrupt(),
+                    '\x08' | '\x7f' => {
+                        ed.backspace();
+                        EditorEffect::None
+                    }
+                    _ if !c.is_control() => {
+                        ed.insert(c);
+                        EditorEffect::None
+                    }
+                    // Other control chars are swallowed at the prompt — the
+                    // shell hasn't seen the draft, so forwarding would desync.
+                    _ => EditorEffect::None,
+                }
+            };
+            self.ui_dirty = true;
+            if let EditorEffect::Send(bytes) = effect {
+                if let Some(e) = self.entries.get_mut(self.active_tab) {
+                    e.record_input();
+                    let _ = e.pty.write(&bytes);
                 }
             }
             return;
         }
-        if self.agent_launcher.open {
-            if let Some((cmd, model)) = self.agent_launcher.handle_char(c) {
-                match Entry::spawn_agent(&cmd, &model) {
-                    Ok(e) => {
-                        self.entries.push(e);
-                        self.active_tab = self.entries.len() - 1;
-                    }
-                    Err(e) => tracing::error!("agent spawn: {e}"),
-                }
-            }
-            return;
-        }
+
         if let Some(bytes) = char_to_pty_bytes(cu) {
             if let Some(e) = self.entries.get_mut(self.active_tab) {
                 e.record_input();
@@ -337,64 +557,192 @@ impl AppState {
     // ── Keyboard shortcuts ────────────────────────────────────────────────────
 
     fn handle_key(&mut self, vk: u32, ctrl: bool) -> Result<()> {
-        if self.settings.open {
-            self.settings.handle_key(vk);
-            if !self.settings.open {
-                self.settings.save_if_dirty();
-            }
-            return Ok(());
-        }
-        if self.agent_launcher.open {
-            if vk == 0x1B { self.agent_launcher.handle_escape(); }
-            return Ok(());
-        }
-        if self.ssh_mgr.open {
-            match vk {
-                0x26 => self.ssh_mgr.handle_key_up(),
-                0x28 => self.ssh_mgr.handle_key_down(),
-                0x1B => self.ssh_mgr.handle_escape(),
-                0x44 => {
-                    if self.ssh_mgr.handle_delete() {
-                        self.host_store.hosts = self.ssh_mgr.hosts.clone();
-                        let _ = self.host_store.save();
-                    }
+        match self.modals.last() {
+            Some(Modal::Settings) => {
+                // Ctrl+, toggles settings, so it also closes them.
+                if ctrl && vk == 0xBC {
+                    self.modals.pop();
+                    self.settings.save_if_dirty();
+                    return Ok(());
                 }
-                _ => {}
+                if self.settings.handle_key(vk, ctrl) {
+                    self.modals.pop();
+                    self.settings.save_if_dirty();
+                }
+                return Ok(());
             }
+            Some(Modal::AgentLauncher) => {
+                if ((ctrl && vk == 0x41) || vk == 0x1B)
+                    && self.agent_launcher.handle_escape() {
+                        self.modals.pop();
+                    }
+                return Ok(());
+            }
+            Some(Modal::SshManager) => {
+                match vk {
+                    // Ctrl+H toggles the manager, so it also closes it —
+                    // keeps the open/close key symmetric.
+                    0x48 if ctrl => {
+                        self.modals.pop();
+                        return Ok(());
+                    }
+                    0x26 => self.ssh_mgr.handle_key_up(),
+                    0x28 => self.ssh_mgr.handle_key_down(),
+                    0x1B => {
+                        if self.ssh_mgr.handle_escape() {
+                            self.modals.pop();
+                        }
+                    }
+                    0x44
+                        if self.ssh_mgr.handle_delete() => {
+                            self.host_store.hosts = self.ssh_mgr.hosts.clone();
+                            let _ = self.host_store.save();
+                        }
+                    _ => {}
+                }
+                return Ok(());
+            }
+            Some(Modal::CommandPalette) => {
+                match vk {
+                    0x26 => self.palette.move_selection(-1), // Up
+                    0x28 => self.palette.move_selection(1),  // Down
+                    0x1B => {
+                        self.modals.pop();
+                        self.palette.reset();
+                    }
+                    _ => {}
+                }
+                return Ok(());
+            }
+            Some(Modal::ConfirmClose) => {
+                match vk {
+                    0x0D => self.running = false, // Enter — quit
+                    0x1B => { self.modals.pop(); } // Esc — cancel
+                    _ => {}
+                }
+                return Ok(());
+            }
+            None => {}
+        }
+
+        // Ctrl+R at an idle prompt opens reverse history search in the input
+        // editor (and cycles to older matches when already searching).
+        if ctrl && vk == 0x52 && self.editor_active() {
+            let id = self.entries[self.active_tab].session.id;
+            if let Some(ed) = self.editors.get_mut(&id) {
+                ed.start_search();
+            }
+            self.swallow_char = true;
+            self.ui_dirty = true;
             return Ok(());
         }
 
         if ctrl {
             let shell = self.shell.clone();
+            // Assume an arm below consumes this as a shortcut, so its WM_CHAR
+            // control char gets swallowed; cleared after the match for keys
+            // that fall through to the PTY (Ctrl+C etc.).
+            self.swallow_char = true;
             match vk {
-                0xDC => { self.sidebar_vis = !self.sidebar_vis; return Ok(()); }
-                0x48 => { self.ssh_mgr.open = !self.ssh_mgr.open; return Ok(()); }
-                0x41 => { self.agent_launcher.open = !self.agent_launcher.open; return Ok(()); }
-                0xBC => { self.settings.open = !self.settings.open; return Ok(()); }
-                0x54 => {
-                    let (ic, ir) = (self.init_cols, self.init_rows);
-                    self.spawn_tab(&shell, ic, ir);
-                    self.active_tab = self.entries.len() - 1;
-                    return Ok(());
-                }
-                0x57 => { self.close_tab(); return Ok(()); }
-                0x09 => {
-                    self.active_tab = (self.active_tab + 1) % self.entries.len().max(1);
-                    if let Some(e) = self.entries.get_mut(self.active_tab) { e.wake(); }
-                    return Ok(());
-                }
-                0x50 => {
-                    self.split_ratio = match self.split_ratio { None => Some(0.5), Some(_) => None };
-                    return Ok(());
-                }
-                n @ 0x31..=0x39 => {
-                    let idx = (n - 0x31) as usize;
-                    if idx < self.entries.len() {
-                        self.active_tab = idx;
+                 0x42 => {
+                      self.sidebar_vis = !self.sidebar_vis;
+                      // Animate from the current offset so toggling mid-flight
+                      // reverses smoothly instead of jumping.
+                      let target = AnimationTarget::SidebarOffset;
+                      let from = self.anim.value(&target);
+                      let to = if self.sidebar_vis { SIDEBAR_W } else { 0.0 };
+                      self.anim.animate(target, from, to, 200, Easing::EaseOutQuad);
+                      return Ok(());
+                  }
+                 0x4B => {
+                      // Ctrl+K — command palette (universal search: actions
+                      // + open tabs + workspaces + saved SSH hosts)
+                      let items = self.build_palette_items();
+                      self.palette.set_items(items);
+                      self.push_modal(Modal::CommandPalette);
+                      return Ok(());
+                  }
+                 0x48 => {
+                      if self.modals.last() == Some(&Modal::SshManager) {
+                          self.modals.pop();
+                      } else {
+                          self.modals.push(Modal::SshManager);
+                      }
+                      return Ok(());
+                  }
+                 0x41 => {
+                      if self.modals.last() == Some(&Modal::AgentLauncher) {
+                          self.modals.pop();
+                      } else {
+                          self.modals.push(Modal::AgentLauncher);
+                      }
+                      return Ok(());
+                  }
+                 0xBC => {
+                      if self.modals.last() == Some(&Modal::Settings) {
+                          self.modals.pop();
+                          self.settings.save_if_dirty();
+                      } else {
+                          self.modals.push(Modal::Settings);
+                      }
+                      return Ok(());
+                  }
+                 0x54 => {
+                     let (ic, ir) = (self.init_cols, self.init_rows);
+                     self.spawn_tab(&shell, ic, ir);
+                     self.active_tab = self.entries.len() - 1;
+                     return Ok(());
+                 }
+                 0x57 => { self.close_tab(); return Ok(()); }
+                 0x09 => {
+                     self.active_tab = (self.active_tab + 1) % self.entries.len().max(1);
+                     if let Some(e) = self.entries.get_mut(self.active_tab) { e.wake(); }
+                     return Ok(());
+                 }
+                 0x50 => {
+                     self.split_ratio = match self.split_ratio { None => Some(0.5), Some(_) => None };
+                     return Ok(());
+                 }
+                 n @ 0x31..=0x39 => {
+                     let idx = (n - 0x31) as usize;
+                     if idx < self.entries.len() {
+                         self.active_tab = idx;
+                     }
+                     return Ok(());
+                 }
+                 _ => {}
+            }
+            // Fell through: not an app shortcut, so the key (and its WM_CHAR)
+            // belongs to the terminal.
+            self.swallow_char = false;
+        }
+
+        // Anchored input editor: navigation keys edit the app-owned buffer
+        // instead of emitting escape sequences at the shell.
+        if !ctrl && self.editor_active() {
+            let id = self.entries[self.active_tab].session.id;
+            if let Some(ed) = self.editors.get_mut(&id) {
+                // Reverse-search consumes navigation keys itself; Esc is
+                // handled via WM_CHAR. Just swallow arrows here so they don't
+                // emit escape sequences mid-search.
+                if matches!(ed.mode, crate::ui::input_editor::EditorMode::Search { .. })
+                    && matches!(vk, 0x25 | 0x26 | 0x27 | 0x28 | 0x23 | 0x24 | 0x2E) {
+                        return Ok(());
                     }
+                let handled = match vk {
+                    0x25 => { ed.move_left(); true }    // ←
+                    0x27 => { ed.move_right(); true }   // →
+                    0x26 => { ed.history_prev(); true } // ↑
+                    0x28 => { ed.history_next(); true } // ↓
+                    0x24 => { ed.home(); true }         // Home
+                    0x23 => { ed.end(); true }          // End
+                    0x2E => { ed.delete(); true }       // Delete
+                    _ => false,
+                };
+                if handled {
+                    self.ui_dirty = true;
                     return Ok(());
                 }
-                _ => {}
             }
         }
 
@@ -407,30 +755,268 @@ impl AppState {
         Ok(())
     }
 
+    /// Assemble the palette item list: fixed actions plus the current tabs,
+    /// workspaces, and saved SSH hosts.
+    fn build_palette_items(&self) -> Vec<crate::ui::command_palette::PaletteEntry> {
+        use crate::ui::command_palette::{base_entries, PaletteEntry};
+        let mut items = base_entries();
+        let labels = chrome::display_labels(self.entries.iter().map(|e| e.session.title.as_str()));
+        for (i, label) in labels.iter().enumerate() {
+            items.push(PaletteEntry {
+                label: format!("Go to tab: {label}"),
+                hint: "tab".into(),
+                action: PaletteAction::SwitchTab(i),
+            });
+        }
+        for (i, ws) in self.workspace_slots.iter().enumerate() {
+            items.push(PaletteEntry {
+                label: format!("Workspace: {}", ws.name),
+                hint: "workspace".into(),
+                action: PaletteAction::SwitchWorkspace(i),
+            });
+        }
+        for (i, host) in self.host_store.hosts.iter().enumerate() {
+            items.push(PaletteEntry {
+                label: format!("Connect: {}", host.display_label()),
+                hint: "ssh host".into(),
+                action: PaletteAction::ConnectSsh(i),
+            });
+        }
+        items.extend(crate::ui::command_palette::font_entries(crate::fonts::FONT_CATALOG));
+        items
+    }
+
+    /// Execute a command-palette action (palette modal already popped).
+    fn run_palette_action(&mut self, action: PaletteAction) {
+        match action {
+            PaletteAction::NewTab => {
+                let shell = self.shell.clone();
+                let (ic, ir) = (self.init_cols, self.init_rows);
+                self.spawn_tab(&shell, ic, ir);
+                self.active_tab = self.entries.len() - 1;
+            }
+            PaletteAction::CloseTab => self.close_tab(),
+            PaletteAction::NextTab => {
+                self.active_tab = (self.active_tab + 1) % self.entries.len().max(1);
+                if let Some(e) = self.entries.get_mut(self.active_tab) { e.wake(); }
+            }
+            PaletteAction::ToggleSidebar => {
+                self.sidebar_vis = !self.sidebar_vis;
+                let target = AnimationTarget::SidebarOffset;
+                let from = self.anim.value(&target);
+                let to = if self.sidebar_vis { SIDEBAR_W } else { 0.0 };
+                self.anim.animate(target, from, to, 200, Easing::EaseOutQuad);
+            }
+            PaletteAction::ToggleSplit => {
+                self.split_ratio =
+                    match self.split_ratio { None => Some(0.5), Some(_) => None };
+            }
+            PaletteAction::NewWorkspace => self.add_workspace(),
+            PaletteAction::SshManager => self.push_modal(Modal::SshManager),
+            PaletteAction::AgentLauncher => self.push_modal(Modal::AgentLauncher),
+            PaletteAction::Settings => self.push_modal(Modal::Settings),
+            PaletteAction::Quit => self.request_close(),
+            PaletteAction::SwitchTab(i) => {
+                if i < self.entries.len() {
+                    self.active_tab = i;
+                    if let Some(e) = self.entries.get_mut(i) { e.wake(); }
+                }
+            }
+            PaletteAction::SwitchWorkspace(i) => {
+                if i < self.workspace_slots.len() {
+                    self.switch_workspace(i);
+                }
+            }
+            PaletteAction::DownloadFont(i) => {
+                // Download on a worker thread; the run loop applies the
+                // family when the result arrives on the font channel.
+                let tx = self.font_tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::fonts::download_and_register(i));
+                });
+            }
+            PaletteAction::ConnectSsh(i) => {
+                let Some(host) = self.host_store.hosts.get(i).cloned() else { return };
+                let auth = ssh_auth_for(&host);
+                match self.rt.block_on(Entry::spawn_ssh(
+                    host.hostname.clone(),
+                    host.port,
+                    host.username.clone(),
+                    auth,
+                )) {
+                    Ok(e) => {
+                        self.entries.push(e);
+                        self.active_tab = self.entries.len() - 1;
+                    }
+                    Err(e) => tracing::error!("SSH connect (palette): {e}"),
+                }
+            }
+        }
+    }
+
+    /// Apply fonts downloaded by palette-triggered worker threads: persist
+    /// the family to config, rebuild the GDI fonts, and resize PTYs to the
+    /// new cell metrics.
+    fn drain_font_downloads(&mut self) {
+        while let Ok(res) = self.font_rx.try_recv() {
+            match res {
+                Ok(family) => {
+                    tracing::info!("font ready: {family}");
+                    self.settings.config.font.family = family.clone();
+                    self.settings.dirty = true;
+                    self.settings.save_if_dirty();
+                    let size = self.settings.config.font.size;
+                    let dpi = self.window.dpi as f32;
+                    if let Err(e) = self.compositor.rebuild_atlas(&family, size, dpi) {
+                        tracing::error!("font apply: {e}");
+                        continue;
+                    }
+                    self.badge_width_cache = None;
+                    let (cw, ch) = self.compositor.cell_size();
+                    let ct = ChromeLayout::compute(
+                        self.window_w as f32,
+                        self.window_h as f32,
+                        self.sidebar_vis,
+                    )
+                    .content;
+                    for e in &mut self.entries {
+                        e.resize_pty(ct.w, ct.h - PANE_HEADER_H, cw, ch);
+                    }
+                    self.ui_dirty = true;
+                }
+                Err(e) => tracing::error!("font download: {e}"),
+            }
+        }
+    }
+
+    /// True when the active session's shell is idle at an integration-
+    /// detected prompt, so the anchored input editor owns keystrokes.
+    /// Sessions without OSC 133 shell integration never produce blocks and
+    /// therefore keep classic raw-PTY behaviour.
+    fn editor_active(&mut self) -> bool {
+        let Some(e) = self.entries.get(self.active_tab) else { return false };
+        let blocks = e.session.blocks.all();
+        let Some(last) = blocks.last() else { return false };
+        if matches!(last.status, libterm::block::store::BlockStatus::Running) {
+            return false;
+        }
+        let count = blocks.len();
+        let id = e.session.id;
+        let ed = self.editors.entry(id).or_insert_with(InputEditor::new);
+        ed.maybe_rearm(count);
+        ed.passthrough_since.is_none()
+    }
+
+    /// Push a modal unless it is already on the stack.
+    fn push_modal(&mut self, m: Modal) {
+        if !self.modals.contains(&m) {
+            self.modals.push(m);
+        }
+    }
+
+    /// Sessions that would lose work if the app quit now: anything with a
+    /// running command, plus all SSH and agent sessions (across workspaces).
+    fn busy_session_count(&self) -> usize {
+        let busy = |e: &Entry| {
+            !matches!(e.session.kind, SessionKind::Local)
+                || e.session
+                    .blocks
+                    .all()
+                    .last()
+                    .is_some_and(|b| matches!(b.status, libterm::block::store::BlockStatus::Running))
+        };
+        self.entries.iter().filter(|e| busy(e)).count()
+            + self
+                .workspace_slots
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != self.active_workspace)
+                .flat_map(|(_, ws)| ws.entries.iter())
+                .filter(|e| busy(e))
+                .count()
+    }
+
+    /// Close the app, or ask first when sessions are busy or several tabs
+    /// are open (Windows Terminal convention).
+    fn request_close(&mut self) {
+        if self.busy_session_count() > 0 || self.entries.len() > 1 {
+            self.push_modal(Modal::ConfirmClose);
+        } else {
+            self.running = false;
+        }
+    }
+
     // ── Mouse clicks ──────────────────────────────────────────────────────────
 
     fn handle_lbutton_down(&mut self, x: i32, y: i32) {
-        // Traffic lights (left zone of session bar)
-        if y < 40 && x < 52 {
-            if x < 25 {
-                self.running = false;
-            } else if x < 41 {
-                unsafe {
-                    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_MINIMIZE};
-                    let _ = ShowWindow(self.window.hwnd, SW_MINIMIZE);
+        // While a modal is open it owns all input — don't let clicks reach
+        // the chrome / tabs / sidebar underneath the dim overlay.
+        if !self.modals.is_empty() {
+            // Settings is mouse-interactive: nav categories, field rows,
+            // and backdrop-to-close.
+            if self.modals.last() == Some(&Modal::Settings) {
+                let (_, ch) = self.compositor.cell_size();
+                use crate::ui::settings::{hit_test as settings_hit, SettingsHit};
+                match settings_hit(
+                    &self.settings,
+                    self.window_w as f32,
+                    self.window_h as f32,
+                    ch as f32,
+                    x as f32,
+                    y as f32,
+                ) {
+                    SettingsHit::Category(i) => {
+                        self.settings.category = crate::ui::settings::SettingsCategory::all()[i];
+                        self.settings.selected_field = 0;
+                        self.settings.scroll_offset = 0;
+                    }
+                    SettingsHit::Field(i) => {
+                        if self.settings.selected_field == i {
+                            // Second click on the selected row toggles/edits.
+                            self.settings.toggle_current();
+                        } else {
+                            self.settings.selected_field = i;
+                        }
+                    }
+                    SettingsHit::Outside => {
+                        self.modals.pop();
+                        self.settings.save_if_dirty();
+                    }
+                    SettingsHit::Panel => {}
                 }
-            } else {
-                unsafe {
-                    use windows::Win32::UI::WindowsAndMessaging::{
-                        IsZoomed, ShowWindow, SW_MAXIMIZE, SW_RESTORE,
-                    };
-                    let sw = if IsZoomed(self.window.hwnd).as_bool() {
-                        SW_RESTORE
-                    } else {
-                        SW_MAXIMIZE
-                    };
-                    let _ = ShowWindow(self.window.hwnd, sw);
+                self.ui_dirty = true;
+            }
+            return;
+        }
+
+        // Caption buttons (right zone of session bar, Windows convention:
+        // minimize · maximize · close, close rightmost). The zone is three
+        // equal full-bleed 46px backplates, so the index is a clean division.
+        let zone_x = self.window_w as f32 - crate::ui::layout::CAPTION_ZONE_W;
+        if (y as f32) < SESSION_BAR_H && (x as f32) >= zone_x {
+            let rel = x as f32 - zone_x;
+            let btn = ((rel / crate::ui::layout::CAPTION_BTN_W) as i32).clamp(0, 2);
+            match btn {
+                0 => {
+                    unsafe {
+                        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_MINIMIZE};
+                        let _ = ShowWindow(self.window.hwnd, SW_MINIMIZE);
+                    }
                 }
+                1 => {
+                    unsafe {
+                        use windows::Win32::UI::WindowsAndMessaging::{
+                            IsZoomed, ShowWindow, SW_MAXIMIZE, SW_RESTORE,
+                        };
+                        let sw = if IsZoomed(self.window.hwnd).as_bool() {
+                            SW_RESTORE
+                        } else {
+                            SW_MAXIMIZE
+                        };
+                        let _ = ShowWindow(self.window.hwnd, sw);
+                    }
+                }
+                _ => self.request_close(),
             }
             return;
         }
@@ -456,8 +1042,8 @@ impl AppState {
                     Some(SidebarHit::NewWorkspace) => {
                         self.add_workspace();
                     }
-                    Some(SidebarHit::SshManager) => { self.ssh_mgr.open = true; }
-                    Some(SidebarHit::AgentRuns) => { self.agent_launcher.open = true; }
+                    Some(SidebarHit::SshManager) => { self.push_modal(Modal::SshManager); }
+                    Some(SidebarHit::AgentRuns) => { self.push_modal(Modal::AgentLauncher); }
                     Some(SidebarHit::KeyVault) | None => {}
                 }
             }
@@ -472,23 +1058,74 @@ impl AppState {
                 .flat_map(|e| e.session.blocks.all())
                 .find(|b| b.id == target.block_id)
             {
-                copy_to_clipboard(&block.output_as_str().into_owned());
+                copy_to_clipboard(&block.output_as_str());
             }
         }
 
-        // Session bar click (tab area — right of traffic-light zone)
-        if layout.session_bar.contains(x as f32, y as f32) && x >= 52 {
+        // Session bar click (tabs from the left edge; gear left of the
+        // caption zone; empty space starts an OS window drag)
+        if layout.session_bar.contains(x as f32, y as f32) && (x as f32) < zone_x {
+            let xf = x as f32;
             let ucw = self.compositor.ui_char_w();
-            let mut tx = layout.session_bar.x + crate::ui::layout::TL_ZONE_W + 4.0;
-            for (i, e) in self.entries.iter().enumerate() {
-                let tw = chrome::tab_width(&e.session.title, ucw);
-                if (x as f32) >= tx && (x as f32) < tx + tw {
-                    self.active_tab = i;
+            let mut hit = false;
+
+            // Same disambiguated labels the renderer uses, so widths match.
+            let labels =
+                chrome::display_labels(self.entries.iter().map(|e| e.session.title.as_str()));
+            let mut tx = layout.session_bar.x + crate::ui::layout::TAB_PAD_LEFT;
+            for (i, label) in labels.iter().enumerate() {
+                let tw = chrome::tab_width(label, ucw);
+                if xf >= tx && xf < tx + tw {
+                    // The close × sits at the tab's right edge; clicks there
+                    // close the tab instead of selecting it.
+                    if xf >= tx + tw - ucw - 14.0 {
+                        self.close_tab_at(i);
+                    } else {
+                        self.active_tab = i;
+                        if let Some(e) = self.entries.get_mut(i) { e.wake(); }
+                    }
+                    hit = true;
                     break;
                 }
                 tx += tw + 1.0;
             }
-            if let Some(e) = self.entries.get_mut(self.active_tab) { e.wake(); }
+            if hit {
+                return;
+            }
+
+            // "+" new-tab button (right after the last tab)
+            if xf >= tx + 4.0 && xf < tx + 28.0 {
+                let shell = self.shell.clone();
+                let (ic, ir) = (self.init_cols, self.init_rows);
+                self.spawn_tab(&shell, ic, ir);
+                self.active_tab = self.entries.len() - 1;
+                return;
+            }
+
+            // Gear ⚙ — opens settings
+            let gear_x = zone_x - 32.0;
+            if xf >= gear_x && xf < gear_x + 28.0 {
+                self.push_modal(Modal::Settings);
+                return;
+            }
+
+            // Empty bar space: hand off to the OS caption drag loop so the
+            // frameless window can still be moved.
+            unsafe {
+                use windows::Win32::Foundation::{LPARAM, WPARAM};
+                use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    SendMessageW, HTCAPTION, WM_NCLBUTTONDOWN,
+                };
+                let _ = ReleaseCapture();
+                SendMessageW(
+                    self.window.hwnd,
+                    WM_NCLBUTTONDOWN,
+                    WPARAM(HTCAPTION as usize),
+                    LPARAM(0),
+                );
+            }
+            return;
         }
 
         // Split drag
@@ -544,10 +1181,14 @@ impl AppState {
     // ── Render ────────────────────────────────────────────────────────────────
 
     fn render(&mut self) -> Result<()> {
-        let layout = ChromeLayout::compute(
+        // The animated offset is the single source of truth for sidebar width:
+        // seeded to SIDEBAR_W at startup, animated to 0 / SIDEBAR_W on toggle.
+        let anim_sb_offset = self.anim.value(&AnimationTarget::SidebarOffset);
+        let layout = ChromeLayout::compute_animated(
             self.window_w as f32,
             self.window_h as f32,
             self.sidebar_vis,
+            anim_sb_offset,
         );
         let ct = layout.content;
         let term_h = ct.h - PANE_HEADER_H;
@@ -558,13 +1199,41 @@ impl AppState {
         let (pane_layout, render_idx, pane_rects) =
             self.compute_pane_layout(&layout, term_h, cw, ch);
 
+        // Early-out when nothing changed: everything below (session clones,
+        // GDI text measurement, chrome command building, RTree rebuild) is
+        // per-frame work that would otherwise run even on idle frames.
+        self.ui_dirty |= self.compositor.cursor_blink_due();
+        let any_dirty = render_idx.iter().any(|&i| self.entries[i].session.is_dirty())
+            || self.ui_dirty
+            || self.anim.is_busy()
+            || !self.modals.is_empty();
+        if !any_dirty {
+            return Ok(());
+        }
+
         let handle_xs = pane_layout.split_handle_xs(ct.x, ct.y, ct.w, ct.h);
         let chrome_sessions: Vec<Session> =
             self.entries.iter().map(|e| e.session.clone_for_render()).collect();
         let agent_blocks = self.agent_blocks();
-        let error_count = self.count_errors();
-        let awaiting_count = self.count_awaiting();
         let ui_char_w = self.compositor.ui_char_w();
+
+        // Sidebar badge widths from the proportional font — three fixed
+        // labels, measured once and cached.
+        if self.badge_width_cache.is_none() {
+            self.badge_width_cache = Some((
+                self.compositor.measure_ui_text("active") + 10.0,
+                self.compositor.measure_ui_text("SSH") + 10.0,
+                self.compositor.measure_ui_text("agent") + 10.0,
+            ));
+        }
+        let (w_active, w_ssh, w_agent) = self.badge_width_cache.unwrap();
+        let badge_widths: Vec<f32> = self.entries.iter().map(|e| {
+            match &e.session.kind {
+                SessionKind::Local => w_active,
+                SessionKind::Ssh { .. } => w_ssh,
+                SessionKind::Agent { .. } => w_agent,
+            }
+        }).collect();
 
         // Per-tab last command exit codes (read from live entries, not render clones).
         let tab_exit_codes: Vec<Option<i32>> = self.entries.iter()
@@ -574,7 +1243,14 @@ impl AppState {
         // Shell/session name shown in the command bar.
         let active_shell_name: String = if let Some(e) = self.entries.get(self.active_tab) {
             match &e.session.kind {
-                SessionKind::Local      => self.shell.clone(),
+                // self.shell may be a full command line (integration args);
+                // show just the executable name.
+                SessionKind::Local => self
+                    .shell
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or(&self.shell)
+                    .to_string(),
                 SessionKind::Ssh { .. } => e.session.title.clone(),
                 SessionKind::Agent { name, .. } => name.clone(),
             }
@@ -603,41 +1279,76 @@ impl AppState {
             active_cwd: active_cwd.as_deref(),
             workspace_names: &workspace_names,
             active_workspace: self.active_workspace,
-            sidebar_visible: self.sidebar_vis,
             split_handles: &handle_xs,
-            error_count,
-            awaiting_count,
-            cell_w: cw,
             cell_h: ch,
             agent_blocks: &agent_blocks,
             pane_rects: &pane_rects,
             ui_char_w,
+            badge_widths: &badge_widths,
+            mouse_pos: (self.mouse_x as f32, self.mouse_y as f32),
         });
 
-        // Overlay: SSH manager
-        chrome_cmds.extend(generate_ssh_manager_commands(
-            &self.ssh_mgr,
-            self.window_w as f32,
+        // Keep keyboard scrolling in sync with what the renderer can show.
+        self.settings.visible_rows = SettingsState::compute_visible_rows(
             self.window_h as f32,
-            cw,
-            ch,
-        ));
-        // Overlay: agent launcher
-        chrome_cmds.extend(generate_agent_launcher_commands(
-            &self.agent_launcher,
-            self.window_w as f32,
-            self.window_h as f32,
-            cw,
-            ch,
-        ));
-        // Overlay: settings
-        chrome_cmds.extend(generate_settings_commands(
-            &self.settings,
-            self.window_w as f32,
-            self.window_h as f32,
-            cw,
-            ch,
-        ));
+            ch as f32,
+            self.settings.searching,
+        );
+
+        // Overlay: modals (only visible when on the stack)
+        let busy_count = if self.modals.contains(&Modal::ConfirmClose) {
+            self.busy_session_count()
+        } else {
+            0
+        };
+        for m in &self.modals {
+            match m {
+                Modal::SshManager => {
+                    chrome_cmds.extend(generate_ssh_manager_commands(
+                        &self.ssh_mgr,
+                        self.window_w as f32,
+                        self.window_h as f32,
+                        cw,
+                        ch,
+                    ));
+                }
+                Modal::AgentLauncher => {
+                    chrome_cmds.extend(generate_agent_launcher_commands(
+                        &self.agent_launcher,
+                        self.window_w as f32,
+                        self.window_h as f32,
+                        cw,
+                        ch,
+                    ));
+                }
+                Modal::Settings => {
+                    chrome_cmds.extend(generate_settings_commands(
+                        &self.settings,
+                        self.window_w as f32,
+                        self.window_h as f32,
+                        cw,
+                        ch,
+                        ui_char_w,
+                    ));
+                }
+                Modal::CommandPalette => {
+                    chrome_cmds.extend(generate_command_palette_commands(
+                        &self.palette,
+                        self.window_w as f32,
+                        self.window_h as f32,
+                        ch as f32,
+                    ));
+                }
+                Modal::ConfirmClose => {
+                    chrome_cmds.extend(chrome::generate_confirm_close_commands(
+                        self.window_w as f32,
+                        self.window_h as f32,
+                        busy_count,
+                        ch as f32,
+                    ));
+                }
+            }
+        }
 
         // Welcome overlay: shown until the shell sends its first output byte.
         if let Some(entry) = self.entries.get(self.active_tab) {
@@ -677,6 +1388,34 @@ impl AppState {
         }
         self.block_rtree = build_block_rtree(all_hits);
 
+        // Anchored input editor bar — bottom of the active pane, only at an
+        // idle integration-detected prompt and with no modal on top.
+        if self.modals.is_empty() && self.editor_active() {
+            if let Some(&(px, py, pw, ph, _)) = pane_rects
+                .iter()
+                .find(|&&(_, _, _, _, si)| si == self.active_tab)
+            {
+                let e = &self.entries[self.active_tab];
+                let accent = match &e.session.kind {
+                    SessionKind::Local => renderer_windows::tokens::COLOR_LOCAL,
+                    SessionKind::Ssh { .. } => renderer_windows::tokens::COLOR_SSH,
+                    SessionKind::Agent { .. } => renderer_windows::tokens::COLOR_AGENT,
+                };
+                if let Some(ed) = self.editors.get(&e.session.id) {
+                    let bar_h = input_editor::bar_height(ch as f32);
+                    chrome_cmds.extend(input_editor::generate_input_bar(
+                        ed,
+                        px,
+                        py + ph - bar_h,
+                        pw,
+                        cw as f32,
+                        ch as f32,
+                        accent,
+                    ));
+                }
+            }
+        }
+
         // Update IPC session list.
         if let Ok(mut list) = self.ipc_sessions.lock() {
             *list = self.entries.iter().map(|e| SessionInfo {
@@ -691,30 +1430,20 @@ impl AppState {
             }).collect();
         }
 
-        // Only render when dirty.
-        self.ui_dirty |= self.compositor.cursor_blink_due();
-        let any_dirty = render_idx.iter().any(|&i| self.entries[i].session.is_dirty())
-            || self.ui_dirty
-            || self.ssh_mgr.open
-            || self.agent_launcher.open
-            || self.settings.open;
-
-        if any_dirty {
-            let render_sessions: Vec<Session> =
-                render_idx.iter().map(|&i| self.entries[i].session.clone_for_render()).collect();
-            self.compositor.render_frame_with_chrome(
-                &render_sessions,
-                &pane_layout,
-                &chrome_cmds,
-                self.window_w,
-                self.window_h,
-                Some((ct.x, term_y, ct.w, term_h)),
-            )?;
-            self.ui_dirty = false;
-            if !self.window_shown {
-                self.window.show();
-                self.window_shown = true;
-            }
+        let render_sessions: Vec<Session> =
+            render_idx.iter().map(|&i| self.entries[i].session.clone_for_render()).collect();
+        self.compositor.render_frame_with_chrome(
+            &render_sessions,
+            &pane_layout,
+            &chrome_cmds,
+            self.window_w,
+            self.window_h,
+            Some((ct.x, term_y, ct.w, term_h)),
+        )?;
+        self.ui_dirty = false;
+        if !self.window_shown {
+            self.window.show();
+            self.window_shown = true;
         }
         Ok(())
     }
@@ -795,43 +1524,31 @@ impl AppState {
     }
 
     fn close_tab(&mut self) {
-        if self.entries.len() > 1 {
-            self.entries.remove(self.active_tab);
-            self.active_tab = self.active_tab.min(self.entries.len() - 1);
+        self.close_tab_at(self.active_tab);
+    }
+
+    fn close_tab_at(&mut self, idx: usize) {
+        if self.entries.len() > 1 && idx < self.entries.len() {
+            self.entries.remove(idx);
+            if self.active_tab >= idx {
+                self.active_tab = self.active_tab.saturating_sub(1).min(self.entries.len() - 1);
+            }
+            self.snapshot_dirty = true;
+            self.ui_dirty = true;
         }
     }
 
-    fn agent_blocks(&self) -> Vec<CommandBlock> {
+    fn agent_blocks(&mut self) -> Vec<CommandBlock> {
         if let Some(e) = self.entries.get(self.active_tab) {
             if matches!(e.session.kind, SessionKind::Agent { .. }) {
-                return e.session.blocks.clone_recent(20);
+                return self.agent_block_cache
+                    .get_or_update(e.session.id, &e.session.blocks)
+                    .to_vec();
             }
         }
         Vec::new()
     }
 
-    fn count_errors(&self) -> usize {
-        self.entries
-            .iter()
-            .filter(|e| {
-                e.session.blocks.all().last()
-                    .and_then(|b| b.exit_code)
-                    .map(|code| code != 0)
-                    .unwrap_or(false)
-            })
-            .count()
-    }
-
-    fn count_awaiting(&self) -> usize {
-        use libterm::vt::sequences::OscNotification;
-        self.entries
-            .iter()
-            .flat_map(|e| e.session.blocks.all())
-            .filter(|b| {
-                matches!(b.notification, Some(OscNotification::StatusAwaiting))
-            })
-            .count()
-    }
 }
 
 // ── Process-level helpers ─────────────────────────────────────────────────────

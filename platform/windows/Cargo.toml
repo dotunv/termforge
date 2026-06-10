@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 libterm = { path = "../../crates/libterm" }
-renderer-dx12 = { path = "../../crates/renderer-dx12" }
+renderer-windows = { path = "../../crates/renderer-windows" }
 tokio.workspace = true
 uuid.workspace = true
 anyhow.workspace = true
