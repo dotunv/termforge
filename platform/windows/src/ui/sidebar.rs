@@ -1,9 +1,27 @@
+//! Sidebar: the workspace + tools navigator.  Sessions live in the top tab
+//! strip now (single home), so the sidebar is dedicated to workspaces, tools,
+//! and recent agent/command blocks — rendered as cmux/Warp-style cards with a
+//! real type hierarchy (Title / Body / Caption) and system icons.
+
 use libterm::block::store::BlockStatus;
-use libterm::mux::session::{Session, SessionKind};
-use renderer_windows::ui_renderer::UiCommand;
+use renderer_windows::icons;
+use renderer_windows::ui_renderer::{UiCommand, UiTextStyle};
 use renderer_windows::tokens::*;
 
 use super::layout::{ChromeState, Rect};
+
+// ── Shared vertical metrics (render + hit_test MUST agree) ─────────────────────
+
+const PAD_X: f32 = SPACE_3;
+
+#[inline]
+fn item_h(ch: f32) -> f32 {
+    ch + 14.0
+}
+#[inline]
+fn header_h(ch: f32) -> f32 {
+    ch + SPACE_2
+}
 
 /// Build all `UiCommand`s for the sidebar area.
 pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
@@ -14,237 +32,134 @@ pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
 
     let mut cmds = Vec::with_capacity(256);
     let ch = s.cell_h as f32;
-    let ucw = s.ui_char_w;
-    let item_h = ch + 10.0;
-    let text_pad = 32.0;
+    let item = item_h(ch);
+    let hdr = header_h(ch);
     let sx = sb.x;
+    let card_x = sx + SPACE_2;
+    let card_w = sb.w - SPACE_2 * 2.0 - 1.0;
 
-    // Background + right border
+    // Background + right divider.
     cmds.push(fill(sb, BG_SURFACE));
     cmds.push(UiCommand::FillRect {
         x: sb.x + sb.w - 1.0,
         y: sb.y,
         w: 1.0,
         h: sb.h,
-        color: BORDER_DEFAULT,
+        color: BORDER_SUBTLE,
     });
 
-    let mut sy = sb.y + 6.0;
+    let mut sy = sb.y + SPACE_3;
 
-    // ── SESSIONS section ──────────────────────────────────────────────────────
-    sy += 6.0;
-    cmds.push(section_header("SESSIONS", sx + 12.0, sy));
-    sy += item_h;
+    // ── Brand row ─────────────────────────────────────────────────────────────
+    cmds.push(icon(icons::TERMINAL, sx + PAD_X, sy + (item - ch) * 0.5, true, ACCENT_GREEN, BG_SURFACE));
+    cmds.push(styled("TermForge", sx + PAD_X + 24.0, sy + (item - ch) * 0.5, UiTextStyle::Title, TEXT_PRIMARY, BG_SURFACE));
+    sy += item + SPACE_2;
 
-        let labels =
-            super::chrome::display_labels(s.sessions.iter().map(|s| s.title.as_str()));
-        for (i, session) in s.sessions.iter().enumerate() {
-            let is_active = i == s.active_tab;
-            let is_hovered = mouse_in(s, sx, sy, sb.w - 1.0, item_h);
-            let item_bg = if is_active { BG_ACTIVE } else if is_hovered { BG_HOVER } else { BG_SURFACE };
-            let (dot_color, _) = session_dot_info(session);
-            let label = labels[i].as_str();
-            let (badge_text, badge_fg, badge_bg) = session_badge(session);
-
-            cmds.push(UiCommand::FillRect {
-                x: sx,
-                y: sy,
-                w: sb.w - 1.0,
-                h: item_h,
-                color: item_bg,
-            });
-
-            if is_active {
-                cmds.push(UiCommand::FillRect {
-                    x: sx,
-                    y: sy,
-                    w: 3.0,
-                    h: item_h,
-                    color: dot_color,
-                });
-            }
-
-            cmds.push(circle(sx + 20.0, sy + item_h * 0.5, 3.0, dot_color, item_bg));
-
-            let text_col = if is_active || is_hovered { TEXT_PRIMARY } else { TEXT_MUTED };
-            cmds.push(ui_text(label, sx + text_pad, sy + (item_h - ch) * 0.5, text_col, item_bg));
-
-            let badge_w = s.badge_widths.get(i).copied().unwrap_or(60.0);
-            let badge_x = sx + sb.w - 1.0 - badge_w - 8.0;
-            let badge_y = sy + (item_h - ch - 4.0) * 0.5;
-            cmds.push(round_rect(badge_x, badge_y, badge_w, ch + 4.0, badge_bg, item_bg));
-            cmds.push(ui_text(badge_text, badge_x + 5.0, badge_y + 2.0, badge_fg, badge_bg));
-
-            sy += item_h;
-        }
-
-    // ── WORKSPACES section ────────────────────────────────────────────────────
-    sy += 4.0;
-    cmds.push(div_line(sx + 12.0, sy, sb.w - 24.0));
-    sy += 6.0;
-    cmds.push(section_header("WORKSPACES", sx + 12.0, sy));
-    sy += item_h;
+    // ── WORKSPACES ────────────────────────────────────────────────────────────
+    cmds.push(section_header("WORKSPACES", sx + PAD_X, sy + 2.0));
+    sy += hdr;
 
     for (i, name) in s.workspace_names.iter().enumerate() {
-        let is_active_ws = i == s.active_workspace;
-        let is_hovered = mouse_in(s, sx, sy, sb.w - 1.0, item_h);
-        let item_bg = if is_active_ws { BG_ACTIVE } else if is_hovered { BG_HOVER } else { BG_SURFACE };
-        let dot_col = if is_active_ws || is_hovered { BLUE } else { TEXT_MUTED };
-        let text_col = if is_active_ws || is_hovered { TEXT_PRIMARY } else { TEXT_MUTED };
-        let dot_r = if is_active_ws { 3.0 } else { 2.5 };
+        let is_active = i == s.active_workspace;
+        let hovered = mouse_in(s, sx, sy, sb.w - 1.0, item);
+        card_background(&mut cmds, card_x, sy, card_w, item, is_active, hovered, BLUE);
 
-        if is_active_ws {
-            cmds.push(UiCommand::FillRect {
-                x: sx,
-                y: sy,
-                w: sb.w - 1.0,
-                h: item_h,
-                color: BG_ACTIVE,
-            });
-            cmds.push(UiCommand::FillRect {
-                x: sx,
-                y: sy,
-                w: 3.0,
-                h: item_h,
-                color: BLUE,
-            });
-        } else if is_hovered {
-            cmds.push(UiCommand::FillRect {
-                x: sx,
-                y: sy,
-                w: sb.w - 1.0,
-                h: item_h,
-                color: BG_HOVER,
-            });
+        let row_bg = card_bg(is_active, hovered);
+        let fg = if is_active || hovered { TEXT_PRIMARY } else { TEXT_MUTED };
+        let icon_fg = if is_active { BLUE } else { TEXT_MUTED };
+        cmds.push(icon(icons::FOLDER, card_x + 12.0, sy + (item - ch) * 0.5, false, icon_fg, row_bg));
+        let label_style = if is_active { UiTextStyle::Bold } else { UiTextStyle::Body };
+        cmds.push(styled(name, card_x + 36.0, sy + (item - ch) * 0.5, label_style, fg, row_bg));
+
+        // Session-count chip, right-aligned.
+        if let Some(&n) = s.workspace_counts.get(i) {
+            if n > 0 {
+                let txt = n.to_string();
+                let cw = txt.chars().count() as f32 * s.ui_char_w + 12.0;
+                let cx = card_x + card_w - cw - 10.0;
+                let cyy = sy + (item - ch - 2.0) * 0.5;
+                cmds.push(UiCommand::FillRoundRect {
+                    x: cx, y: cyy, w: cw, h: ch + 2.0, radius: RADIUS_SM,
+                    color: BG_ACTIVE, bg: row_bg,
+                });
+                cmds.push(styled(&txt, cx + 6.0, cyy + 1.0, UiTextStyle::Caption, TEXT_MUTED, BG_ACTIVE));
+            }
         }
-
-        cmds.push(circle(sx + 14.0, sy + item_h * 0.5, dot_r, dot_col, item_bg));
-        cmds.push(ui_text(name, sx + text_pad, sy + (item_h - ch) * 0.5, text_col, item_bg));
-        sy += item_h;
+        sy += item;
     }
 
-    // "New workspace" row
-    let plus_hover = mouse_in(s, sx, sy, sb.w - 1.0, item_h);
-    if plus_hover {
-        cmds.push(UiCommand::FillRect {
-            x: sx, y: sy, w: sb.w - 1.0, h: item_h,
-            color: BG_HOVER,
-        });
-    }
-    let plus_bg = if plus_hover { BG_HOVER } else { BG_SURFACE };
-    let plus_y = sy + (item_h - ch) * 0.5;
-    cmds.push(ui_text("+", sx + 13.0, plus_y, TEXT_FAINT, plus_bg));
-    cmds.push(ui_text("New workspace", sx + text_pad, plus_y, TEXT_FAINT, plus_bg));
-    sy += item_h;
+    // "New workspace" row.
+    let nw_hover = mouse_in(s, sx, sy, sb.w - 1.0, item);
+    card_background(&mut cmds, card_x, sy, card_w, item, false, nw_hover, BLUE);
+    let nw_bg = card_bg(false, nw_hover);
+    let nw_fg = if nw_hover { TEXT_MUTED } else { TEXT_FAINT };
+    cmds.push(icon(icons::ADD, card_x + 12.0, sy + (item - ch) * 0.5, false, nw_fg, nw_bg));
+    cmds.push(styled("New workspace", card_x + 36.0, sy + (item - ch) * 0.5, UiTextStyle::Body, nw_fg, nw_bg));
+    sy += item + SPACE_2;
 
-    // ── TOOLS section ─────────────────────────────────────────────────────────
-    sy += 4.0;
-    cmds.push(div_line(sx + 12.0, sy, sb.w - 24.0));
-    sy += 6.0;
-    cmds.push(section_header("TOOLS", sx + 12.0, sy));
-    sy += item_h;
+    // ── TOOLS ─────────────────────────────────────────────────────────────────
+    cmds.push(section_header("TOOLS", sx + PAD_X, sy + 2.0));
+    sy += hdr;
 
-    // Label + its keybinding, shown right-aligned on hover so shortcuts are
-    // discoverable in place (Linear-style).
-    let tools: [(&str, &str); 3] = [
-        ("SSH manager", "Ctrl+H"),
-        ("key vault", ""),
-        ("agent runs", "Ctrl+A"),
+    let tools: [(&str, &str, &str); 3] = [
+        (icons::GLOBE, "SSH manager", "Ctrl+H"),
+        (icons::LOCK, "Key vault", ""),
+        (icons::SYNC, "Agent runs", "Ctrl+A"),
     ];
-    for (label, shortcut) in &tools {
-        let tool_hover = mouse_in(s, sx, sy, sb.w - 1.0, item_h);
-        let tool_bg = if tool_hover { BG_HOVER } else { BG_SURFACE };
-        if tool_hover {
-            cmds.push(UiCommand::FillRect {
-                x: sx, y: sy, w: sb.w - 1.0, h: item_h,
-                color: BG_HOVER,
-            });
-        }
-        let fg = if tool_hover { TEXT_PRIMARY } else { TEXT_MUTED };
-        cmds.push(circle(sx + 14.0, sy + item_h * 0.5, 2.5, fg, tool_bg));
-        cmds.push(ui_text(label, sx + text_pad, sy + (item_h - ch) * 0.5, fg, tool_bg));
-        if tool_hover && !shortcut.is_empty() {
-            let hint_w = shortcut.chars().count() as f32 * ucw;
-            cmds.push(ui_text(
-                shortcut,
-                sx + sb.w - 1.0 - hint_w - 10.0,
-                sy + (item_h - ch) * 0.5,
-                TEXT_FAINT,
-                tool_bg,
-            ));
+    for (gly, label, shortcut) in &tools {
+        let hovered = mouse_in(s, sx, sy, sb.w - 1.0, item);
+        card_background(&mut cmds, card_x, sy, card_w, item, false, hovered, BLUE);
+        let row_bg = card_bg(false, hovered);
+        let fg = if hovered { TEXT_PRIMARY } else { TEXT_MUTED };
+        cmds.push(icon(gly, card_x + 12.0, sy + (item - ch) * 0.5, false, fg, row_bg));
+        cmds.push(styled(label, card_x + 36.0, sy + (item - ch) * 0.5, UiTextStyle::Body, fg, row_bg));
+        if hovered && !shortcut.is_empty() {
+            let hint_w = shortcut.chars().count() as f32 * s.ui_char_w;
+            cmds.push(styled(shortcut, card_x + card_w - hint_w - 12.0, sy + (item - ch) * 0.5, UiTextStyle::Caption, TEXT_FAINT, row_bg));
         } else {
-            cmds.push(ui_text(
-                "\u{203A}",
-                sx + sb.w - 1.0 - ucw - 10.0,
-                sy + (item_h - ch) * 0.5,
-                TEXT_FAINT,
-                tool_bg,
-            ));
+            cmds.push(icon(icons::CHEVRON_RIGHT, card_x + card_w - 22.0, sy + (item - ch) * 0.5, false, TEXT_FAINT, row_bg));
         }
-        sy += item_h;
+        sy += item;
     }
+    sy += SPACE_2;
 
-    // ── Agent block history ──────────────────────────────────────────────────
+    // ── RECENT BLOCKS ─────────────────────────────────────────────────────────
     if !s.agent_blocks.is_empty() {
-        sy += 4.0;
-        cmds.push(div_line(sx + 12.0, sy, sb.w - 24.0));
-        sy += 6.0;
-        cmds.push(UiCommand::DrawUiText {
-            x: sx + 12.0,
-            y: sy,
-            text: "RECENT BLOCKS".to_string(),
-            fg: PURPLE,
-            bg: BG_SURFACE,
-        });
-        sy += item_h;
+        cmds.push(section_header("RECENT BLOCKS", sx + PAD_X, sy + 2.0));
+        sy += hdr;
 
         for block in s.agent_blocks.iter().rev().take(8) {
-            if sy + item_h > sb.y + sb.h - 4.0 {
+            if sy + item > sb.y + sb.h - SPACE_1 {
                 break;
             }
-            let block_hover = mouse_in(s, sx, sy, sb.w - 1.0, item_h);
-            let block_bg = if block_hover { BG_HOVER } else { BG_SURFACE };
-            if block_hover {
-                cmds.push(UiCommand::FillRect {
-                    x: sx, y: sy, w: sb.w - 1.0, h: item_h,
-                    color: BG_HOVER,
-                });
-            }
-            let (dot_col, badge_str) = match block.status {
+            let hovered = mouse_in(s, sx, sy, sb.w - 1.0, item);
+            card_background(&mut cmds, card_x, sy, card_w, item, false, hovered, PURPLE);
+            let row_bg = card_bg(false, hovered);
+
+            let (dot_col, dur_fallback) = match block.status {
                 BlockStatus::Running => (PURPLE, "run"),
                 BlockStatus::Success => (GREEN, "ok"),
                 BlockStatus::Error => (RED, "err"),
                 BlockStatus::Cancelled => (TEXT_MUTED, "---"),
             };
-            cmds.push(circle(sx + 14.0, sy + item_h * 0.5, 3.0, dot_col, block_bg));
+            cmds.push(circle(card_x + 14.0, sy + item * 0.5, 3.0, dot_col, row_bg));
 
             let max_chars = 15usize;
             let label: String = if block.command.chars().count() > max_chars {
-                let cut = block.command.char_indices()
-                    .nth(max_chars - 1)
-                    .map(|(i, _)| i)
-                    .unwrap_or(block.command.len());
+                let cut = block.command.char_indices().nth(max_chars - 1).map(|(i, _)| i).unwrap_or(block.command.len());
                 format!("{}\u{2026}", &block.command[..cut])
             } else {
                 block.command.clone()
             };
-            cmds.push(ui_text(&label, sx + text_pad, sy + (item_h - ch) * 0.5, TEXT_PRIMARY, block_bg));
+            cmds.push(styled(&label, card_x + 30.0, sy + (item - ch) * 0.5, UiTextStyle::Body, TEXT_PRIMARY, row_bg));
 
-            let dur_str = block
+            let dur = block
                 .duration_ms()
-                .map(|ms| {
-                    if ms >= 1000 {
-                        format!("{:.1}s", ms as f32 / 1000.0)
-                    } else {
-                        format!("{ms}ms")
-                    }
-                })
-                .unwrap_or_else(|| badge_str.to_string());
-            let dur_w = dur_str.chars().count() as f32 * ucw;
-            let dur_x = sx + sb.w - 1.0 - dur_w - 8.0;
-            cmds.push(ui_text(&dur_str, dur_x, sy + (item_h - ch) * 0.5, dot_col, block_bg));
-
-            sy += item_h;
+                .map(|ms| if ms >= 1000 { format!("{:.1}s", ms as f32 / 1000.0) } else { format!("{ms}ms") })
+                .unwrap_or_else(|| dur_fallback.to_string());
+            let dur_w = dur.chars().count() as f32 * s.ui_char_w;
+            cmds.push(styled(&dur, card_x + card_w - dur_w - 10.0, sy + (item - ch) * 0.5, UiTextStyle::Caption, dot_col, row_bg));
+            sy += item;
         }
     }
 
@@ -255,7 +170,6 @@ pub fn render(s: &ChromeState<'_>) -> Vec<UiCommand> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarHit {
-    Session(usize),
     Workspace(usize),
     NewWorkspace,
     SshManager,
@@ -263,68 +177,69 @@ pub enum SidebarHit {
     AgentRuns,
 }
 
-pub fn hit_test(
-    sb: Rect,
-    _x: f32,
-    y: f32,
-    session_count: usize,
-    cell_h: f32,
-    workspace_count: usize,
-) -> Option<SidebarHit> {
+/// Mirror of the vertical walk in [`render`].  `workspace_count` must match the
+/// number of workspace rows drawn.
+pub fn hit_test(sb: Rect, _x: f32, y: f32, cell_h: f32, workspace_count: usize) -> Option<SidebarHit> {
     if y < sb.y || y >= sb.y + sb.h {
         return None;
     }
-    let item_h = cell_h + 10.0;
-    let mut sy = sb.y + 6.0;
+    let ch = cell_h;
+    let item = item_h(ch);
+    let hdr = header_h(ch);
 
-    sy += 6.0 + item_h;
-
-    for i in 0..session_count {
-        if y >= sy && y < sy + item_h {
-            return Some(SidebarHit::Session(i));
-        }
-        sy += item_h;
-    }
-
-    sy += 4.0 + 6.0 + item_h;
+    let mut sy = sb.y + SPACE_3;
+    // Brand row.
+    sy += item + SPACE_2;
+    // WORKSPACES header.
+    sy += hdr;
     for i in 0..workspace_count {
-        if y >= sy && y < sy + item_h {
+        if y >= sy && y < sy + item {
             return Some(SidebarHit::Workspace(i));
         }
-        sy += item_h;
+        sy += item;
     }
-
-    if y >= sy && y < sy + item_h {
+    // New workspace.
+    if y >= sy && y < sy + item {
         return Some(SidebarHit::NewWorkspace);
     }
-    sy += item_h;
-
-    sy += 4.0 + 6.0 + item_h;
+    sy += item + SPACE_2;
+    // TOOLS header.
+    sy += hdr;
     for &hit in &[SidebarHit::SshManager, SidebarHit::KeyVault, SidebarHit::AgentRuns] {
-        if y >= sy && y < sy + item_h {
+        if y >= sy && y < sy + item {
             return Some(hit);
         }
-        sy += item_h;
+        sy += item;
     }
-
     None
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-fn session_dot_info(s: &Session) -> ([f32; 4], &str) {
-    match &s.kind {
-        SessionKind::Local => (COLOR_LOCAL, s.title.as_str()),
-        SessionKind::Ssh { .. } => (COLOR_SSH, s.title.as_str()),
-        SessionKind::Agent { .. } => (COLOR_AGENT, s.title.as_str()),
+#[inline]
+fn card_bg(active: bool, hovered: bool) -> [f32; 4] {
+    if active {
+        BG_ACTIVE
+    } else if hovered {
+        BG_HOVER
+    } else {
+        BG_SURFACE
     }
 }
 
-fn session_badge(s: &Session) -> (&str, [f32; 4], [f32; 4]) {
-    match &s.kind {
-        SessionKind::Local => ("active", GREEN, BADGE_GREEN_BG),
-        SessionKind::Ssh { .. } => ("SSH", BLUE, BADGE_BLUE_BG),
-        SessionKind::Agent { .. } => ("agent", PURPLE, BADGE_PURPLE_BG),
+/// Paint a row's rounded card background + active accent edge.
+fn card_background(cmds: &mut Vec<UiCommand>, x: f32, y: f32, w: f32, h: f32, active: bool, hovered: bool, accent: [f32; 4]) {
+    if active || hovered {
+        cmds.push(UiCommand::FillRoundRect {
+            x, y: y + 2.0, w, h: h - 4.0, radius: RADIUS_SM,
+            color: card_bg(active, hovered), bg: BG_SURFACE,
+        });
+    }
+    if active {
+        cmds.push(UiCommand::FillRoundRect {
+            x, y: y + 6.0, w: 3.0, h: h - 12.0, radius: 1.5,
+            color: accent, bg: BG_SURFACE,
+        });
     }
 }
 
@@ -336,20 +251,16 @@ fn circle(cx: f32, cy: f32, r: f32, fg: [f32; 4], bg: [f32; 4]) -> UiCommand {
     UiCommand::DrawCircle { cx, cy, r, fg, bg }
 }
 
-fn round_rect(x: f32, y: f32, w: f32, h: f32, color: [f32; 4], bg: [f32; 4]) -> UiCommand {
-    UiCommand::FillRoundRect { x, y, w, h, radius: RADIUS_SM, color, bg }
+fn styled(t: &str, x: f32, y: f32, style: UiTextStyle, fg: [f32; 4], bg: [f32; 4]) -> UiCommand {
+    UiCommand::DrawStyledText { x, y, text: t.to_string(), fg, bg, style }
 }
 
-fn ui_text(t: &str, x: f32, y: f32, fg: [f32; 4], bg: [f32; 4]) -> UiCommand {
-    UiCommand::DrawUiText { x, y, text: t.to_string(), fg, bg }
-}
-
-fn div_line(x: f32, y: f32, w: f32) -> UiCommand {
-    UiCommand::FillRect { x, y, w, h: 1.0, color: BORDER_SUBTLE }
+fn icon(glyph: &str, x: f32, y: f32, large: bool, fg: [f32; 4], bg: [f32; 4]) -> UiCommand {
+    UiCommand::DrawIcon { x, y, text: glyph.to_string(), fg, bg, large }
 }
 
 fn section_header(label: &str, x: f32, y: f32) -> UiCommand {
-    UiCommand::DrawUiText { x, y, text: label.to_string(), fg: TEXT_FAINT, bg: BG_SURFACE }
+    UiCommand::DrawStyledText { x, y, text: label.to_string(), fg: TEXT_FAINT, bg: BG_SURFACE, style: UiTextStyle::Caption }
 }
 
 fn mouse_in(s: &ChromeState<'_>, x: f32, y: f32, w: f32, h: f32) -> bool {

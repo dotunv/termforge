@@ -75,6 +75,13 @@ impl Perform for VtPerformer {
         self.grid.write_char(c);
         let mut buf = [0; 4];
         self.append_to_running_block(c.encode_utf8(&mut buf).as_bytes());
+        // Capture the glyph with its pen colour for the block view.
+        let (fg, bg) = (self.grid.current_fg(), self.grid.current_bg());
+        if let Some(block) = self.blocks.last_mut() {
+            if block.status == crate::block::store::BlockStatus::Running {
+                block.push_styled(c, fg, bg);
+            }
+        }
     }
 
     fn execute(&mut self, byte: u8) {
@@ -82,10 +89,20 @@ impl Perform for VtPerformer {
             b'\r' => {
                 self.grid.carriage_return();
                 self.append_to_running_block(b"\r");
+                if let Some(b) = self.blocks.last_mut() {
+                    if b.status == crate::block::store::BlockStatus::Running {
+                        b.styled_carriage_return();
+                    }
+                }
             }
             b'\n' => {
                 self.grid.line_feed();
                 self.append_to_running_block(b"\n");
+                if let Some(b) = self.blocks.last_mut() {
+                    if b.status == crate::block::store::BlockStatus::Running {
+                        b.styled_newline();
+                    }
+                }
             }
             b'\x08' => {
                 self.grid.backspace();
@@ -230,7 +247,14 @@ impl Perform for VtPerformer {
                 self.cwd = Some(path);
             } else if let Some(marker) = Osc133::parse(s) {
                 let action = self.detector.handle(marker);
+                let is_start = matches!(action, crate::block::detector::BlockAction::StartBlock);
                 self.detector.apply(action, &mut self.blocks);
+                if is_start {
+                    let cwd = self.cwd.clone();
+                    if let Some(b) = self.blocks.last_mut() {
+                        b.cwd = cwd;
+                    }
+                }
             } else if let Some(notif) = OscNotification::parse(s) {
                 self.detector.apply(
                     crate::block::detector::BlockAction::Notification(notif),

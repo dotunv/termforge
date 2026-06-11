@@ -61,7 +61,7 @@ pub fn generate_agent_launcher_commands(
     cmds.push(chrome::shadow(px, py, panel_w, panel_h, 8.0));
 
     cmds.push(UiCommand::FillRoundRect {
-        x: px, y: py, w: panel_w, h: panel_h,
+        x: px, y: py, w: panel_w, h: panel_h, radius: RADIUS_LG,
         color: BG_SURFACE,
         bg: BG_BASE,
     });

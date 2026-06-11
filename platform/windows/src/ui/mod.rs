@@ -1,6 +1,7 @@
 pub mod agent_launcher;
 pub mod animation;
 pub mod block_overlay;
+pub mod block_view;
 pub mod chrome;
 pub mod command_palette;
 pub mod input_editor;

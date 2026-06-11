@@ -47,9 +47,12 @@ static ANSI_256: [[u8; 3]; 256] = {
 
 // ── Colour resolution ─────────────────────────────────────────────────────────
 
-fn resolve_fg(color: &Color) -> [f32; 4] {
+/// Resolve a terminal [`Color`] to linear RGBA, using `default` for
+/// `Color::Default`.  Public so the block view can render captured pen colours
+/// with the same ANSI 256 palette the grid uses.
+pub fn resolve_color(color: &Color, default: [f32; 4]) -> [f32; 4] {
     match color {
-        Color::Default => tokens::TEXT_PRIMARY,
+        Color::Default => default,
         Color::Rgb(r, g, b) => [*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0, 1.0],
         Color::Indexed(i) => {
             let [r, g, b] = ANSI_256[*i as usize];
@@ -58,15 +61,12 @@ fn resolve_fg(color: &Color) -> [f32; 4] {
     }
 }
 
+fn resolve_fg(color: &Color) -> [f32; 4] {
+    resolve_color(color, tokens::TEXT_PRIMARY)
+}
+
 fn resolve_bg(color: &Color) -> [f32; 4] {
-    match color {
-        Color::Default => BG_BASE,
-        Color::Rgb(r, g, b) => [*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0, 1.0],
-        Color::Indexed(i) => {
-            let [r, g, b] = ANSI_256[*i as usize];
-            [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
-        }
-    }
+    resolve_color(color, BG_BASE)
 }
 
 // ── Font helpers ──────────────────────────────────────────────────────────────

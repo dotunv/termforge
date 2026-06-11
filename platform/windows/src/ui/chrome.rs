@@ -2,7 +2,7 @@
 //! flat `Vec<UiCommand>` that the compositor draws each frame.
 
 use libterm::mux::session::SessionKind;
-use renderer_windows::ui_renderer::UiCommand;
+use renderer_windows::ui_renderer::{UiCommand, UiTextStyle};
 use renderer_windows::tokens::*;
 
 use super::layout::{ChromeState, Rect, CAPTION_BTN_W, CAPTION_ZONE_W};
@@ -49,9 +49,28 @@ pub fn display_labels<'a>(titles: impl Iterator<Item = &'a str> + Clone) -> Vec<
 }
 
 /// Compute the pixel width of one tab given its label and UI char width.
+/// Geometry: left-pad(12) + type-icon(18) + label + health-gap(8) +
+/// close(ucw) + right-pad(12).  The session bar renderer and the app's tab
+/// hit-test both call this so widths stay in lockstep.
 pub fn tab_width(label: &str, ucw: f32) -> f32 {
-    // left-pad(10) + dot-gap(6) + label + health-dot(6) + close-gap(ucw+8)
-    10.0 + 6.0 + label.chars().count() as f32 * ucw + 6.0 + ucw + 8.0
+    12.0 + 18.0 + label.chars().count() as f32 * ucw + 8.0 + ucw + 12.0
+}
+
+/// Icon glyph for a session kind (top tabs + pane headers).
+fn kind_icon(kind: &SessionKind) -> &'static str {
+    match kind {
+        SessionKind::Local => renderer_windows::icons::TERMINAL,
+        SessionKind::Ssh { .. } => renderer_windows::icons::GLOBE,
+        SessionKind::Agent { .. } => renderer_windows::icons::SYNC,
+    }
+}
+
+fn kind_color(kind: &SessionKind) -> [f32; 4] {
+    match kind {
+        SessionKind::Local => COLOR_LOCAL,
+        SessionKind::Ssh { .. } => COLOR_SSH,
+        SessionKind::Agent { .. } => COLOR_AGENT,
+    }
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -78,16 +97,16 @@ fn render_session_bar(s: &ChromeState<'_>, cmds: &mut Vec<UiCommand>) {
 
     // Background + bottom separator
     cmds.push(fill(sb, BG_SURFACE));
-    cmds.push(bottom_border(sb, BORDER_DEFAULT));
+    cmds.push(bottom_border(sb, BORDER_SUBTLE));
 
     // ── Caption buttons (Windows 11 spec: full-bleed backplates, top-right,
-    // min · max · close with close rightmost; neutral glyphs at rest, close
+    // min · max · close with close rightmost; neutral icons at rest, close
     // hover = system red with a white glyph) ──────────────────────────────────
     let zone_x = sb.x + sb.w - CAPTION_ZONE_W;
     let btn_fns: &[(&str, usize)] = &[
-        ("\u{2212}", 0), // − minimize
-        ("\u{25A1}", 1), // □ maximize
-        ("\u{2715}", 2), // ✕ close
+        (renderer_windows::icons::MINIMIZE, 0),
+        (renderer_windows::icons::MAXIMIZE, 1),
+        (renderer_windows::icons::CLOSE, 2),
     ];
     for (glyph, idx) in btn_fns {
         let bx = zone_x + *idx as f32 * CAPTION_BTN_W;
@@ -104,13 +123,14 @@ fn render_session_bar(s: &ChromeState<'_>, cmds: &mut Vec<UiCommand>) {
                 color: btn_bg,
             });
         }
-        // Centre the glyph in the backplate (glyphs are ~1 UI char wide).
-        cmds.push(UiCommand::DrawUiText {
-            x: bx + (CAPTION_BTN_W - ucw) * 0.5,
+        // Caption icons sit slightly small; centre the icon cell in the plate.
+        cmds.push(UiCommand::DrawIcon {
+            x: bx + (CAPTION_BTN_W - 12.0) * 0.5,
             y: sb.y + (sb.h - ch) * 0.5,
             text: glyph.to_string(),
             fg: glyph_fg,
             bg: btn_bg,
+            large: false,
         });
     }
 
@@ -127,78 +147,67 @@ fn render_session_bar(s: &ChromeState<'_>, cmds: &mut Vec<UiCommand>) {
         let exit_code  = s.tab_exit_codes.get(i).copied().flatten();
 
         let label = labels[i].as_str();
-        let type_color = match &session.kind {
-            SessionKind::Local       => COLOR_LOCAL,
-            SessionKind::Ssh { .. }  => COLOR_SSH,
-            SessionKind::Agent { .. } => COLOR_AGENT,
-        };
+        let type_color = kind_color(&session.kind);
 
         let tab_w  = tab_width(label, ucw);
+        let tab_hovered = hit_test(s, tab_x, sb.y, tab_w, sb.h);
         let tab_bg = if is_active { BG_BASE } else { BG_SURFACE };
-        let text_fg = if is_active { TEXT_PRIMARY } else { TEXT_FAINT };
 
         if is_active {
-            // Full-height BG_BASE fill — connects the tab visually to the terminal pane
+            // Full-height BG_BASE fill — connects the tab to the terminal pane,
+            // with a 2px type-colour accent edge along the bottom.
             cmds.push(UiCommand::FillRect {
                 x: tab_x, y: sb.y, w: tab_w, h: sb.h,
                 color: BG_BASE,
             });
-            // 3px bottom accent gradient (two overlapped rects for subtle fade)
-            let accent = type_color;
             cmds.push(UiCommand::FillRect {
-                x: tab_x + 2.0, y: sb.y + sb.h - 3.0, w: tab_w - 4.0, h: 3.0,
-                color: accent,
+                x: tab_x, y: sb.y + sb.h - 2.0, w: tab_w, h: 2.0,
+                color: type_color,
             });
-            cmds.push(UiCommand::FillRect {
-                x: tab_x + 2.0, y: sb.y + sb.h - 1.0, w: tab_w - 4.0, h: 1.0,
-                color: [accent[0] * 0.6, accent[1] * 0.6, accent[2] * 0.6, 0.5],
+        } else if tab_hovered {
+            // Soft rounded hover pill for inactive tabs.
+            cmds.push(UiCommand::FillRoundRect {
+                x: tab_x + 2.0, y: sb.y + 5.0, w: tab_w - 4.0, h: sb.h - 10.0,
+                radius: RADIUS_SM, color: BG_HOVER, bg: BG_SURFACE,
             });
-            // Left/right 1px BORDER_DEFAULT separators
-            cmds.push(UiCommand::FillRect {
-                x: tab_x, y: sb.y + 4.0, w: 1.0, h: sb.h - 4.0,
-                color: BORDER_DEFAULT,
-            });
-            cmds.push(UiCommand::FillRect {
-                x: tab_x + tab_w, y: sb.y + 4.0, w: 1.0, h: sb.h - 4.0,
-                color: BORDER_DEFAULT,
-            });
-        } else {
-            // Hover background for inactive tabs
-            let h_bg = hover_or(s, tab_x, sb.y, tab_w, sb.h, BG_SURFACE);
-            if h_bg != BG_SURFACE {
-                cmds.push(UiCommand::FillRect {
-                    x: tab_x + 1.0, y: sb.y + 4.0, w: tab_w - 2.0, h: sb.h - 8.0,
-                    color: BG_HOVER,
-                });
-            }
         }
 
-        // Session-type dot (larger on active)
-        cmds.push(UiCommand::DrawCircle {
-            cx: tab_x + 14.0,
-            cy: tab_dot_cy,
-            r: if is_active { 3.0 } else { 2.5 },
-            fg: type_color,
+        // Session-type icon.
+        let icon_fg = if is_active { type_color } else { TEXT_MUTED };
+        cmds.push(UiCommand::DrawIcon {
+            x: tab_x + 12.0,
+            y: tab_text_y,
+            text: kind_icon(&session.kind).to_string(),
+            fg: icon_fg,
             bg: tab_bg,
+            large: false,
         });
 
-        // Session label
-        cmds.push(UiCommand::DrawUiText {
-            x: tab_x + 24.0,
+        // Session label (semibold when active).
+        let text_fg = if is_active { TEXT_PRIMARY } else { TEXT_MUTED };
+        let label_style = if is_active { UiTextStyle::Bold } else { UiTextStyle::Body };
+        cmds.push(UiCommand::DrawStyledText {
+            x: tab_x + 30.0,
             y: tab_text_y,
             text: label.to_string(),
             fg: text_fg,
             bg: tab_bg,
+            style: label_style,
         });
 
-        // Health dot: grey = no commands, green = last exit 0, red = non-zero
-        let health_col = match exit_code {
-            None    => TEXT_FAINT,
-            Some(0) => GREEN,
-            Some(_) => RED,
+        // Health dot: amber when the session is awaiting input, else grey = no
+        // commands, green = last exit 0, red = non-zero.
+        let health_col = if s.awaiting.get(i).copied().unwrap_or(false) {
+            AMBER
+        } else {
+            match exit_code {
+                None    => TEXT_FAINT,
+                Some(0) => GREEN,
+                Some(_) => RED,
+            }
         };
-        let label_w     = label.chars().count() as f32 * ucw;
-        let health_cx   = tab_x + 24.0 + label_w + 8.0;
+        let label_w   = label.chars().count() as f32 * ucw;
+        let health_cx = tab_x + 30.0 + label_w + 8.0;
         cmds.push(UiCommand::DrawCircle {
             cx: health_cx, cy: tab_dot_cy,
             r: 2.0,
@@ -206,61 +215,56 @@ fn render_session_bar(s: &ChromeState<'_>, cmds: &mut Vec<UiCommand>) {
             bg: tab_bg,
         });
 
-        // Close × — on active tab always, on inactive tabs only when hovered
-        let tab_hovered = hit_test(s, tab_x, sb.y, tab_w, sb.h);
+        // Close icon — on active tab always, on inactive only when hovered.
         if is_active || tab_hovered {
             let close_fg = if tab_hovered && !is_active { TEXT_MUTED } else { TEXT_FAINT };
-            cmds.push(UiCommand::DrawUiText {
-                x: tab_x + tab_w - ucw - 8.0,
+            cmds.push(UiCommand::DrawIcon {
+                x: tab_x + tab_w - ucw - 12.0,
                 y: tab_text_y,
-                text: "\u{00D7}".to_string(),
+                text: renderer_windows::icons::CLOSE.to_string(),
                 fg: close_fg,
                 bg: tab_bg,
-            });
-        }
-
-        // Inactive tab hover: subtle left accent bar
-        if tab_hovered && !is_active {
-            let accent = type_color;
-            cmds.push(UiCommand::FillRect {
-                x: tab_x, y: sb.y + 8.0, w: 2.0, h: sb.h - 16.0,
-                color: [accent[0] * 0.5, accent[1] * 0.5, accent[2] * 0.5, 0.4],
+                large: false,
             });
         }
 
         tab_x += tab_w + 1.0;
     }
 
-    // "+" new-tab button with hover
-    if hover_or(s, tab_x + 4.0, sb.y, 24.0, sb.h, BG_SURFACE) == BG_HOVER {
-        cmds.push(UiCommand::FillRect {
-            x: tab_x + 4.0, y: sb.y + 4.0, w: 24.0, h: sb.h - 8.0,
-            color: BG_HOVER,
+    // "+" new-tab button with hover.
+    let plus_hovered = hover_or(s, tab_x + 4.0, sb.y, 28.0, sb.h, BG_SURFACE) == BG_HOVER;
+    if plus_hovered {
+        cmds.push(UiCommand::FillRoundRect {
+            x: tab_x + 4.0, y: sb.y + 5.0, w: 28.0, h: sb.h - 10.0,
+            radius: RADIUS_SM, color: BG_HOVER, bg: BG_SURFACE,
         });
     }
-    cmds.push(UiCommand::DrawUiText {
-        x: tab_x + 4.0 + (24.0 - ucw) * 0.5,
-        y: tab_text_y,
-        text: "+".to_string(),
-        fg: TEXT_MUTED,
+    cmds.push(UiCommand::DrawIcon {
+        x: tab_x + 4.0 + (28.0 - 12.0) * 0.5,
+        y: sb.y + (sb.h - ch) * 0.5,
+        text: renderer_windows::icons::ADD.to_string(),
+        fg: if plus_hovered { TEXT_PRIMARY } else { TEXT_MUTED },
         bg: BG_SURFACE,
+        large: false,
     });
 
-    // Gear ⚙ — right-aligned, left of the caption-button zone
-    let gear_x = sb.x + sb.w - CAPTION_ZONE_W - 32.0;
-    let gear_w = 28.0;
-    if hover_or(s, gear_x, sb.y, gear_w, sb.h, BG_SURFACE) == BG_HOVER {
-        cmds.push(UiCommand::FillRect {
-            x: gear_x, y: sb.y + 4.0, w: gear_w, h: sb.h - 8.0,
-            color: BG_HOVER,
+    // Settings gear — right-aligned, left of the caption-button zone.
+    let gear_x = sb.x + sb.w - CAPTION_ZONE_W - 36.0;
+    let gear_w = 32.0;
+    let gear_hovered = hover_or(s, gear_x, sb.y, gear_w, sb.h, BG_SURFACE) == BG_HOVER;
+    if gear_hovered {
+        cmds.push(UiCommand::FillRoundRect {
+            x: gear_x, y: sb.y + 5.0, w: gear_w, h: sb.h - 10.0,
+            radius: RADIUS_SM, color: BG_HOVER, bg: BG_SURFACE,
         });
     }
-    cmds.push(UiCommand::DrawUiText {
-        x: gear_x + (gear_w - ucw) * 0.5,
+    cmds.push(UiCommand::DrawIcon {
+        x: gear_x + (gear_w - 12.0) * 0.5,
         y: sb.y + (sb.h - ch) * 0.5,
-        text: "\u{2699}".to_string(),
-        fg: TEXT_MUTED,
+        text: renderer_windows::icons::SETTINGS.to_string(),
+        fg: if gear_hovered { TEXT_PRIMARY } else { TEXT_MUTED },
         bg: BG_SURFACE,
+        large: false,
     });
 }
 
@@ -274,148 +278,125 @@ fn render_pane_headers(s: &ChromeState<'_>, cmds: &mut Vec<UiCommand>) {
         if let Some(session) = s.sessions.get(session_idx) {
             let is_active = session_idx == s.active_pane_session_idx;
             let hdr = Rect { x: px, y: py, w: pw, h: PANE_HEADER_H };
+            let accent = kind_color(&session.kind);
 
-            cmds.push(fill(hdr, BG_SURFACE));
-            cmds.push(bottom_border(hdr, BORDER_DEFAULT));
-
-            let dot_col = match &session.kind {
-                SessionKind::Local      => COLOR_LOCAL,
-                SessionKind::Ssh { .. } => COLOR_SSH,
-                SessionKind::Agent { .. }=> COLOR_AGENT,
-            };
-
-            // Active pane: 3px left accent bar with gradient
-            if is_active {
-                let ac = dot_col;
-                cmds.push(UiCommand::FillRect {
-                    x: px,
-                    y: py + 2.0,
-                    w: 3.0,
-                    h: PANE_HEADER_H - 4.0,
-                    color: ac,
-                });
-                cmds.push(UiCommand::FillRect {
-                    x: px + 2.0,
-                    y: py + 2.0,
-                    w: 1.0,
-                    h: PANE_HEADER_H - 4.0,
-                    color: [ac[0] * 0.5, ac[1] * 0.5, ac[2] * 0.5, 0.4],
-                });
-            }
-
-            // Dot — nudged right by 2px on active to clear the accent bar
-            let dot_x = if is_active { px + 12.0 } else { px + 10.0 };
-            cmds.push(UiCommand::DrawCircle {
-                cx: dot_x,
-                cy: py + hdr.h * 0.5,
-                r: 2.5,
-                fg: dot_col,
-                bg: BG_SURFACE,
+            // Header backplate: rounded top corners (to match the card border),
+            // squared bottom so it meets the terminal body cleanly.
+            cmds.push(UiCommand::FillRoundRect {
+                x: px, y: py, w: pw, h: PANE_HEADER_H, radius: RADIUS_MD,
+                color: BG_SURFACE, bg: BG_BASE,
+            });
+            cmds.push(UiCommand::FillRect {
+                x: px, y: py + RADIUS_MD, w: pw, h: PANE_HEADER_H - RADIUS_MD,
+                color: BG_SURFACE,
+            });
+            // Hairline under the header.
+            cmds.push(UiCommand::FillRect {
+                x: px + RADIUS_MD, y: py + PANE_HEADER_H - 1.0, w: pw - RADIUS_MD * 2.0, h: 1.0,
+                color: BORDER_SUBTLE,
             });
 
-            // Primary label: the working directory (what's *happening*) when the
-            // shell reports it via OSC 7, falling back to the static session
-            // title.  CWD is the thing that changes with the user's work, so it
-            // carries more information than the title.
-            let label_fg = if is_active { TEXT_PRIMARY } else { TEXT_FAINT };
-            let label_x = dot_x + 8.0;
+            // Session-type icon (neutral).
+            let _ = accent;
             let label_y = py + (hdr.h - ch) * 0.5;
-            match session.cwd.as_deref() {
-                Some(cwd) => {
-                    cmds.push(UiCommand::DrawUiText {
-                        x: label_x,
-                        y: label_y,
-                        text: format!("{}  ", session.title),
-                        fg: TEXT_FAINT,
-                        bg: BG_SURFACE,
-                    });
-                    let title_w = (session.title.chars().count() as f32 + 2.0) * ucw;
-                    let avail = (pw - (label_x - px) - title_w - 64.0).max(0.0);
-                    let max_chars = (avail / ucw) as usize;
-                    if max_chars >= 5 {
-                        cmds.push(UiCommand::DrawUiText {
-                            x: label_x + title_w,
-                            y: label_y,
-                            text: shorten_path(cwd, max_chars),
-                            fg: label_fg,
-                            bg: BG_SURFACE,
-                        });
-                    }
-                }
-                None => {
-                    cmds.push(UiCommand::DrawUiText {
-                        x: label_x,
-                        y: label_y,
-                        text: session.title.clone(),
-                        fg: label_fg,
-                        bg: BG_SURFACE,
-                    });
-                }
-            }
-
-            // Right-aligned pane actions: split · close (with hover)
-            let act_x = px + pw - 8.0;
-            let act_y = py + (hdr.h - ch) * 0.5;
-            let act_h = ch;
-            // Close button hover
-            let close_x = act_x - ucw - 4.0;
-            let close_w = ucw + 8.0;
-            if hover_or(s, close_x, act_y, close_w, act_h, BG_SURFACE) == BG_HOVER {
-                cmds.push(UiCommand::FillRect {
-                    x: close_x, y: act_y, w: close_w, h: act_h,
-                    color: BG_HOVER,
-                });
-            }
-            cmds.push(UiCommand::DrawUiText {
-                x: act_x - ucw,
-                y: act_y,
-                text: "\u{00D7}".to_string(),
-                fg: TEXT_FAINT,
-                bg: BG_SURFACE,
+            cmds.push(UiCommand::DrawIcon {
+                x: px + 12.0, y: label_y,
+                text: kind_icon(&session.kind).to_string(),
+                fg: TEXT_MUTED, bg: BG_SURFACE, large: false,
             });
-            // Split button hover
-            let split_x = act_x - ucw * 3.0 - 4.0;
-            let split_w = ucw * 2.0 + 8.0;
-            if hover_or(s, split_x, act_y, split_w, act_h, BG_SURFACE) == BG_HOVER {
-                cmds.push(UiCommand::FillRect {
-                    x: split_x, y: act_y, w: split_w, h: act_h,
-                    color: BG_HOVER,
+
+            // Single clean label: the working directory (OSC 7) when known,
+            // else the session title — in body weight, no oversized title.
+            let label_fg = if is_active { TEXT_PRIMARY } else { TEXT_MUTED };
+            let label_x = px + 34.0;
+            let avail = (pw - (label_x - px) - 72.0).max(0.0);
+            let max_chars = (avail / ucw) as usize;
+            let label = match session.cwd.as_deref() {
+                Some(cwd) if max_chars >= 5 => shorten_path(cwd, max_chars),
+                _ => session.title.clone(),
+            };
+            cmds.push(UiCommand::DrawStyledText {
+                x: label_x, y: label_y, text: label,
+                fg: label_fg, bg: BG_SURFACE, style: UiTextStyle::Body,
+            });
+
+            // Right-aligned pane actions: split · close (icons, hover plates).
+            let act_y = py + (hdr.h - ch) * 0.5;
+            let close_x = px + pw - 28.0;
+            if hover_or(s, close_x - 4.0, py + 4.0, 26.0, PANE_HEADER_H - 8.0, BG_SURFACE) == BG_HOVER {
+                cmds.push(UiCommand::FillRoundRect {
+                    x: close_x - 4.0, y: py + 5.0, w: 26.0, h: PANE_HEADER_H - 10.0,
+                    radius: RADIUS_SM, color: BG_HOVER, bg: BG_SURFACE,
                 });
             }
-            cmds.push(UiCommand::DrawUiText {
-                x: act_x - ucw * 3.0,
-                y: act_y,
-                text: "\u{2B1C}".to_string(),
-                fg: TEXT_FAINT,
-                bg: BG_SURFACE,
+            cmds.push(UiCommand::DrawIcon {
+                x: close_x, y: act_y, text: renderer_windows::icons::CLOSE.to_string(),
+                fg: TEXT_MUTED, bg: BG_SURFACE, large: false,
+            });
+            let split_x = px + pw - 54.0;
+            if hover_or(s, split_x - 4.0, py + 4.0, 26.0, PANE_HEADER_H - 8.0, BG_SURFACE) == BG_HOVER {
+                cmds.push(UiCommand::FillRoundRect {
+                    x: split_x - 4.0, y: py + 5.0, w: 26.0, h: PANE_HEADER_H - 10.0,
+                    radius: RADIUS_SM, color: BG_HOVER, bg: BG_SURFACE,
+                });
+            }
+            cmds.push(UiCommand::DrawIcon {
+                x: split_x, y: act_y, text: renderer_windows::icons::MORE.to_string(),
+                fg: TEXT_MUTED, bg: BG_SURFACE, large: false,
             });
         }
     }
 }
 
-// ── Pane inset borders ────────────────────────────────────────────────────────
+// ── Pane card borders + notification ring ──────────────────────────────────────
 
 fn render_pane_borders(s: &ChromeState<'_>, cmds: &mut Vec<UiCommand>) {
-    for &(px, py, pw, ph, _) in s.pane_rects {
-        let iy = py + PANE_HEADER_H;
-        let ih = ph - PANE_HEADER_H;
-        cmds.push(UiCommand::FillRect { x: px,          y: iy,          w: pw,  h: 1.0, color: BORDER_SUBTLE });
-        cmds.push(UiCommand::FillRect { x: px,          y: iy + ih - 1.0, w: pw, h: 1.0, color: BORDER_SUBTLE });
-        cmds.push(UiCommand::FillRect { x: px,          y: iy,          w: 1.0, h: ih,  color: BORDER_SUBTLE });
-        cmds.push(UiCommand::FillRect { x: px + pw - 1.0, y: iy,        w: 1.0, h: ih,  color: BORDER_SUBTLE });
+    for &(px, py, pw, ph, session_idx) in s.pane_rects {
+        let is_active = session_idx == s.active_pane_session_idx;
+        let awaiting = s.awaiting.get(session_idx).copied().unwrap_or(false);
+        let accent = s.sessions.get(session_idx).map(|sn| kind_color(&sn.kind)).unwrap_or(BORDER_DEFAULT);
+
+        // Awaiting-input glow: expanding translucent rings (cmux signature).
+        if awaiting {
+            for i in 0..RING_GLOW_LAYERS {
+                let g = (i + 1) as f32 * 2.0;
+                let a = RING_GLOW_ALPHA * (1.0 - i as f32 / RING_GLOW_LAYERS as f32);
+                cmds.push(UiCommand::StrokeRoundRect {
+                    x: px - g, y: py - g, w: pw + g * 2.0, h: ph + g * 2.0,
+                    radius: RADIUS_MD + g, thickness: 2.0,
+                    color: [AMBER[0], AMBER[1], AMBER[2], a],
+                });
+            }
+        }
+
+        // Card border: type-colour ring when active (or awaiting), else subtle.
+        let (color, thickness) = if awaiting {
+            (AMBER, RING_W + 0.5)
+        } else if is_active {
+            (accent, RING_W)
+        } else {
+            (BORDER_DEFAULT, 1.0)
+        };
+        cmds.push(UiCommand::StrokeRoundRect {
+            x: px, y: py, w: pw, h: ph, radius: RADIUS_MD, thickness, color,
+        });
     }
 }
 
 // ── Split handles ─────────────────────────────────────────────────────────────
 
 fn render_split_handles(s: &ChromeState<'_>, cmds: &mut Vec<UiCommand>) {
+    // Panes are inset by PANE_GUTTER into floating cards; align the divider grip
+    // to that inset height so it sits in the gap between the two cards.
+    let y = s.layout.content.y + PANE_GUTTER;
+    let h = (s.layout.content.h - PANE_GUTTER * 2.0).max(0.0);
     for &hx in s.split_handles {
         cmds.push(UiCommand::FillRect {
             x: hx + SPLIT_HANDLE_W * 0.5 - 0.5,
-            y: s.layout.content.y,
-            w: 1.0,
-            h: s.layout.content.h,
-            color: BORDER_DEFAULT,
+            y: y + h * 0.5 - 14.0,
+            w: 1.5,
+            h: 28.0,
+            color: BORDER_STRONG,
         });
     }
 }
@@ -504,7 +485,7 @@ pub fn generate_confirm_close_commands(
 
     cmds.push(shadow(px, py, panel_w, panel_h, 8.0));
     cmds.push(UiCommand::FillRoundRect {
-        x: px, y: py, w: panel_w, h: panel_h,
+        x: px, y: py, w: panel_w, h: panel_h, radius: RADIUS_LG,
         color: BG_SURFACE,
         bg: BG_BASE,
     });
@@ -600,7 +581,7 @@ pub fn generate_init_overlay(
 
     // ── Card background ───────────────────────────────────────────────────────
     cmds.push(UiCommand::FillRoundRect {
-        x: card_x, y: card_y, w: card_w, h: card_h,
+        x: card_x, y: card_y, w: card_w, h: card_h, radius: RADIUS_LG,
         color: BG_HOVER,
         bg: BG_BASE,
     });
@@ -641,6 +622,7 @@ pub fn generate_init_overlay(
     let mut row_y = sep_y + 8.0;
     for (key, desc) in shortcuts {
         cmds.push(UiCommand::FillRoundRect {
+            radius: RADIUS_SM,
             x: card_x + h_pad,
             y: row_y - 2.0,
             w: badge_col_w,

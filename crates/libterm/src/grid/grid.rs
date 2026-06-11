@@ -61,6 +61,15 @@ impl TerminalGrid {
         (self.cursor_col, self.cursor_row)
     }
 
+    /// Current pen foreground / background (the SGR state new glyphs inherit).
+    /// Used to capture coloured output into command blocks.
+    pub fn current_fg(&self) -> Color {
+        self.current_fg
+    }
+    pub fn current_bg(&self) -> Color {
+        self.current_bg
+    }
+
     pub fn cell(&self, col: u16, row: u16) -> Option<&Cell> {
         self.cells.get(row as usize)?.get(col as usize)
     }
@@ -434,6 +443,12 @@ impl TerminalGrid {
         } else if self.cursor_row > 0 {
             self.cursor_row -= 1;
         }
+    }
+
+    /// True while the alternate screen buffer is active (vim, htop, less, …).
+    /// The block view falls back to raw grid rendering in this mode.
+    pub fn is_alt_screen(&self) -> bool {
+        self.alt_cells.is_some()
     }
 
     /// Enter the alternate screen buffer (?1049h).

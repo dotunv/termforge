@@ -19,7 +19,10 @@ function global:prompt {
     $e = [char]27; $b = [char]7
     $p = $executionContext.SessionState.Path.CurrentLocation.ProviderPath -replace '\\', '/'
     [Console]::Write("$e]133;D;$__tf_exit$b$e]133;A$b$e]7;file://localhost/$p$b")
-    "PS $($executionContext.SessionState.Path.CurrentLocation)> $e]133;B$b"
+    # Visible prompt suppressed: TermForge renders command blocks (cwd/exit live
+    # in the block header + bottom input bar), so the shell emits only the OSC
+    # 133 B prompt-end mark and no "PS C:\...>" text.
+    "$e]133;B$b"
 }
 if (Get-Module -ListAvailable -Name PSReadLine) {
     Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {

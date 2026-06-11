@@ -146,10 +146,10 @@ impl GlyphAtlas {
             // ── Atlas layout ──────────────────────────────────────────────────
             let term_cps = terminal_codepoints();
             let term_count = term_cps.len() as u32;
-            let term_rows = (term_count + ATLAS_COLS - 1) / ATLAS_COLS;
+            let term_rows = term_count.div_ceil(ATLAS_COLS);
 
             let ui_count = UI_CP_END - UI_CP_START + 1; // 95 chars
-            let ui_rows = (ui_count + ATLAS_COLS - 1) / ATLAS_COLS; // 6 rows
+            let ui_rows = ui_count.div_ceil(ATLAS_COLS); // 6 rows
 
             let shape_rows = 1u32; // circle (col 0) + 4 corners (cols 1-4)
 

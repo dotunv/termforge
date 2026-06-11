@@ -23,11 +23,12 @@ use crate::{
     ui::{
         agent_launcher::{generate_agent_launcher_commands, AgentLauncherState},
         animation::{AnimationEngine, AnimationTarget, Easing},
-        block_overlay::{build_block_rtree, generate_block_overlays, BlockHitTarget},
+        block_overlay::{build_block_rtree, BlockHitTarget},
+        block_view,
         chrome,
         command_palette::{generate_command_palette_commands, CommandPaletteState, PaletteAction},
         input_editor::{self, EditorEffect, InputEditor},
-        layout::{ChromeLayout, ChromeState, PANE_HEADER_H, SESSION_BAR_H, SIDEBAR_W, SPLIT_HANDLE_W},
+        layout::{ChromeLayout, ChromeState, Rect, PANE_HEADER_H, SESSION_BAR_H, SIDEBAR_W, SPLIT_HANDLE_W},
         settings::{generate_settings_commands, SettingsState},
         sidebar::{hit_test as sidebar_hit_test, SidebarHit},
         ssh_manager::{generate_ssh_manager_commands, SshManagerState},
@@ -120,6 +121,9 @@ pub struct AppState {
     // Mouse state for hover tracking
     mouse_x: i32,
     mouse_y: i32,
+    /// Block-view scroll-back offset in pixels for the active session (0 =
+    /// pinned to the newest block). Reset on tab switch / new command.
+    block_scroll: f32,
 
     /// Set when handle_key consumes a Ctrl shortcut: the shortcut's WM_CHAR
     /// control character still follows and must not reach the PTY (otherwise
@@ -130,11 +134,6 @@ pub struct AppState {
     /// (Ok(family) to apply, Err logged).
     font_tx: mpsc::Sender<anyhow::Result<String>>,
     font_rx: mpsc::Receiver<anyhow::Result<String>>,
-
-    /// Cached pixel widths of the three sidebar badge labels
-    /// (active / SSH / agent) — avoids a GetDC + GetTextExtentPoint32W per
-    /// entry per frame. Cleared on DPI / font changes.
-    badge_width_cache: Option<(f32, f32, f32)>,
 
     // UI overlays
     modals: Vec<Modal>,
@@ -223,10 +222,10 @@ impl AppState {
             window_shown: false,
             mouse_x: -1,
             mouse_y: -1,
+            block_scroll: 0.0,
             swallow_char: false,
             font_tx,
             font_rx,
-            badge_width_cache: None,
             modals: Vec::new(),
             palette: CommandPaletteState::new(),
             editors: std::collections::HashMap::new(),
@@ -358,7 +357,6 @@ impl AppState {
                     let fam = self.settings.config.font.family.clone();
                     let size = self.settings.config.font.size;
                     self.compositor.rebuild_atlas(&fam, size, dpi as f32)?;
-                    self.badge_width_cache = None;
                     self.window_w = w as u32;
                     self.window_h = h as u32;
                     self.compositor.resize(self.window_w, self.window_h)?;
@@ -400,6 +398,13 @@ impl AppState {
                 }
                 WindowEvent::LButtonUp => {
                     self.drag = None;
+                }
+                WindowEvent::MouseWheel { delta } => {
+                    // Scroll back through the block-view history of the active
+                    // session (positive delta = wheel up = older blocks).
+                    let (_, ch) = self.compositor.cell_size();
+                    self.block_scroll = (self.block_scroll + delta as f32 * ch as f32 * 3.0).max(0.0);
+                    self.ui_dirty = true;
                 }
             }
         }
@@ -871,7 +876,6 @@ impl AppState {
                         tracing::error!("font apply: {e}");
                         continue;
                     }
-                    self.badge_width_cache = None;
                     let (cw, ch) = self.compositor.cell_size();
                     let ct = ChromeLayout::compute(
                         self.window_w as f32,
@@ -1031,11 +1035,7 @@ impl AppState {
         // Sidebar
         if let Some(sb) = layout.sidebar {
             if sb.contains(x as f32, y as f32) {
-                match sidebar_hit_test(sb, x as f32, y as f32, self.entries.len(), ch as f32, self.workspace_slots.len()) {
-                    Some(SidebarHit::Session(i)) => {
-                        self.active_tab = i;
-                        if let Some(e) = self.entries.get_mut(i) { e.wake(); }
-                    }
+                match sidebar_hit_test(sb, x as f32, y as f32, ch as f32, self.workspace_slots.len()) {
                     Some(SidebarHit::Workspace(ws_idx)) => {
                         self.switch_workspace(ws_idx);
                     }
@@ -1190,14 +1190,16 @@ impl AppState {
             self.sidebar_vis,
             anim_sb_offset,
         );
-        let ct = layout.content;
+        // Inset the content area so each pane reads as a floating rounded card
+        // (cmux/Warp style) with a gutter of terminal-background around it.
+        let ct = layout.content.inset(renderer_windows::tokens::PANE_GUTTER);
         let term_h = ct.h - PANE_HEADER_H;
         let term_y = ct.y + PANE_HEADER_H;
         let (cw, ch) = self.compositor.cell_size();
 
         // Compute pane layout and resize PTYs as needed.
         let (pane_layout, render_idx, pane_rects) =
-            self.compute_pane_layout(&layout, term_h, cw, ch);
+            self.compute_pane_layout(ct, term_h, cw, ch);
 
         // Early-out when nothing changed: everything below (session clones,
         // GDI text measurement, chrome command building, RTree rebuild) is
@@ -1217,27 +1219,17 @@ impl AppState {
         let agent_blocks = self.agent_blocks();
         let ui_char_w = self.compositor.ui_char_w();
 
-        // Sidebar badge widths from the proportional font — three fixed
-        // labels, measured once and cached.
-        if self.badge_width_cache.is_none() {
-            self.badge_width_cache = Some((
-                self.compositor.measure_ui_text("active") + 10.0,
-                self.compositor.measure_ui_text("SSH") + 10.0,
-                self.compositor.measure_ui_text("agent") + 10.0,
-            ));
-        }
-        let (w_active, w_ssh, w_agent) = self.badge_width_cache.unwrap();
-        let badge_widths: Vec<f32> = self.entries.iter().map(|e| {
-            match &e.session.kind {
-                SessionKind::Local => w_active,
-                SessionKind::Ssh { .. } => w_ssh,
-                SessionKind::Agent { .. } => w_agent,
-            }
-        }).collect();
-
         // Per-tab last command exit codes (read from live entries, not render clones).
         let tab_exit_codes: Vec<Option<i32>> = self.entries.iter()
             .map(|e| e.session.blocks.all().last().and_then(|b| b.exit_code))
+            .collect();
+
+        // Per-session "agent awaiting input" flag — latest block carries an
+        // OSC awaiting-status notification.  Drives the pane notification ring.
+        let awaiting: Vec<bool> = self.entries.iter()
+            .map(|e| e.session.blocks.all().last().is_some_and(|b| {
+                matches!(b.notification, Some(libterm::vt::sequences::OscNotification::StatusAwaiting))
+            }))
             .collect();
 
         // Shell/session name shown in the command bar.
@@ -1261,6 +1253,14 @@ impl AppState {
         // Workspace names for the sidebar (dynamic; created on demand).
         let workspace_names: Vec<String> =
             self.workspace_slots.iter().map(|w| w.name.clone()).collect();
+        // Session count per workspace: the active workspace's sessions live in
+        // `self.entries`; inactive ones are parked in their slot.
+        let workspace_counts: Vec<usize> = self
+            .workspace_slots
+            .iter()
+            .enumerate()
+            .map(|(i, w)| if i == self.active_workspace { self.entries.len() } else { w.entries.len() })
+            .collect();
 
         // Working directory of the active session (OSC 7), shown in command bar.
         let active_cwd: Option<String> = self
@@ -1275,16 +1275,17 @@ impl AppState {
             active_tab: self.active_tab,
             active_pane_session_idx: self.active_tab,
             tab_exit_codes: &tab_exit_codes,
+            awaiting: &awaiting,
             active_shell_name: &active_shell_name,
             active_cwd: active_cwd.as_deref(),
             workspace_names: &workspace_names,
+            workspace_counts: &workspace_counts,
             active_workspace: self.active_workspace,
             split_handles: &handle_xs,
             cell_h: ch,
             agent_blocks: &agent_blocks,
             pane_rects: &pane_rects,
             ui_char_w,
-            badge_widths: &badge_widths,
             mouse_pos: (self.mouse_x as f32, self.mouse_y as f32),
         });
 
@@ -1337,6 +1338,7 @@ impl AppState {
                         self.window_w as f32,
                         self.window_h as f32,
                         ch as f32,
+                        ui_char_w,
                     ));
                 }
                 Modal::ConfirmClose => {
@@ -1365,28 +1367,43 @@ impl AppState {
             }
         }
 
-        // Block overlays + RTree
-        let mut all_hits: Vec<BlockHitTarget> = Vec::new();
-        for &(px, py, pw, _ph, session_idx) in &pane_rects {
-            if let Some(entry) = self.entries.get(session_idx) {
-                let blocks = entry.session.blocks.all();
-                if !blocks.is_empty() {
-                    let grid_rows = entry.session.grid.rows();
-                    let (overlay_cmds, hits) = generate_block_overlays(
-                        blocks,
-                        px,
-                        py + PANE_HEADER_H,
-                        pw,
-                        cw as f32,
-                        ch as f32,
-                        grid_rows,
-                    );
-                    chrome_cmds.extend(overlay_cmds);
-                    all_hits.extend(hits);
-                }
+        // Command blocks are first-class *data* (they drive the sidebar's
+        // RECENT BLOCKS list and the tab/pane status), but we deliberately do
+        // NOT draw them as floating cards over the pane: the live terminal grid
+        // already renders every command and its output, so an overlay just
+        // duplicated that content inside a heavy border.  No pane overlay → no
+        // block hit targets.
+        self.block_rtree = build_block_rtree(Vec::new());
+
+        // ── Block view ────────────────────────────────────────────────────────
+        // Render the captured command blocks as a scrollable history *instead*
+        // of the raw grid, whenever a session has integration-produced blocks
+        // and is not on the alternate screen.  Interactive full-screen apps
+        // (vim, htop, less, ssh TUIs) switch to the alt screen, so they fall
+        // back to the raw terminal automatically.
+        let editor_on = self.modals.is_empty() && self.editor_active();
+        let bar_h = input_editor::bar_height(ch as f32);
+        for &(px, py, pw, ph, session_idx) in &pane_rects {
+            let Some(entry) = self.entries.get(session_idx) else { continue };
+            if entry.session.grid.is_alt_screen() || entry.session.blocks.is_empty() {
+                continue; // raw grid shows through
             }
+            let is_active = session_idx == self.active_tab;
+            let reserve = if is_active && editor_on { bar_h } else { 0.0 };
+            let bx = px + 1.0;
+            let by = py + PANE_HEADER_H;
+            let bw = pw - 2.0;
+            let bh = (ph - PANE_HEADER_H - 1.0 - reserve).max(0.0);
+            let blocks = entry.session.blocks.all();
+            if is_active {
+                let ms = block_view::max_scroll(blocks, bh, ch as f32);
+                self.block_scroll = self.block_scroll.clamp(0.0, ms);
+            }
+            let scroll = if is_active { self.block_scroll } else { 0.0 };
+            chrome_cmds.extend(block_view::generate_block_view(
+                blocks, bx, by, bw, bh, cw as f32, ch as f32, ui_char_w, scroll,
+            ));
         }
-        self.block_rtree = build_block_rtree(all_hits);
 
         // Anchored input editor bar — bottom of the active pane, only at an
         // idle integration-detected prompt and with no modal on top.
@@ -1452,13 +1469,11 @@ impl AppState {
 
     fn compute_pane_layout(
         &mut self,
-        layout: &ChromeLayout,
+        ct: Rect,
         term_h: f32,
         cw: u32,
         ch: u32,
     ) -> (PaneLayout, Vec<usize>, Vec<(f32, f32, f32, f32, usize)>) {
-        let ct = layout.content;
-
         match self.split_ratio {
             None => {
                 if let Some(e) = self.entries.get_mut(self.active_tab) {

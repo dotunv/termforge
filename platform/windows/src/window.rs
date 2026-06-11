@@ -40,6 +40,8 @@ pub enum WindowEvent {
         y: i32,
     },
     LButtonUp,
+    /// Vertical wheel notches (positive = scroll up / back in history).
+    MouseWheel { delta: i32 },
     Close,
     /// Sent when the window moves to a monitor with a different DPI.
     /// `w` and `h` are the new physical pixel dimensions at the new DPI
@@ -305,6 +307,13 @@ unsafe extern "system" fn wnd_proc(
         WM_LBUTTONUP => {
             windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture().ok();
             send_event(hwnd, WindowEvent::LButtonUp);
+            LRESULT(0)
+        }
+
+        WM_MOUSEWHEEL => {
+            // High word of wparam is the signed wheel delta (120 per notch).
+            let raw = ((wparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            send_event(hwnd, WindowEvent::MouseWheel { delta: raw / 120 });
             LRESULT(0)
         }
 

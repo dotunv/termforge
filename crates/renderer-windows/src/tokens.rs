@@ -29,7 +29,9 @@ pub const TEXT_FAINT: [f32; 4] = [0.369, 0.369, 0.416, 1.0];   // #5E5E6A
 
 // ── Accent / status colours (reserved for status + rings) ──────────────────────
 
-pub const COLOR_LOCAL: [f32; 4] = [0.247, 0.725, 0.498, 1.0]; // #3FB97F green
+// "Local" is intentionally a neutral cool-grey, not green — chrome stays
+// monochrome and saturated colour is reserved for real status (error/await).
+pub const COLOR_LOCAL: [f32; 4] = [0.70, 0.73, 0.80, 1.0]; // neutral cool grey
 pub const COLOR_SSH: [f32; 4] = [0.357, 0.616, 0.961, 1.0];   // #5B9DF5 blue
 pub const COLOR_AGENT: [f32; 4] = [0.725, 0.545, 0.910, 1.0]; // #B98BE8 purple
 pub const COLOR_ERROR: [f32; 4] = [0.941, 0.384, 0.353, 1.0]; // #F0625A red

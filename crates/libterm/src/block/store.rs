@@ -2,10 +2,56 @@ use std::cell::Cell;
 use std::time::Instant;
 use uuid::Uuid;
 
+use crate::grid::cell::Color;
 use crate::vt::sequences::OscNotification;
 
 pub type BlockId = Uuid;
 pub type SessionId = Uuid;
+
+/// A run of same-coloured characters within a styled output line.
+#[derive(Debug, Clone)]
+pub struct StyledRun {
+    pub text: String,
+    pub fg: Color,
+    pub bg: Color,
+}
+
+/// One line of styled output (a sequence of coloured runs).
+pub type StyledLine = Vec<StyledRun>;
+
+/// A single styled cell in the in-progress line (column-addressable so that
+/// carriage returns overwrite rather than erase — needed for CRLF line endings
+/// and progress bars).
+#[derive(Debug, Clone, Copy)]
+struct StyledCell {
+    ch: char,
+    fg: Color,
+    bg: Color,
+}
+
+/// Collapse a row of cells into merged colour runs, trimming trailing blanks.
+fn cells_to_runs(cells: &[StyledCell]) -> StyledLine {
+    let mut end = cells.len();
+    while end > 0 {
+        let c = &cells[end - 1];
+        if c.ch == ' ' && c.fg == Color::Default && c.bg == Color::Default {
+            end -= 1;
+        } else {
+            break;
+        }
+    }
+    let mut runs: StyledLine = Vec::new();
+    for cell in &cells[..end] {
+        if let Some(last) = runs.last_mut() {
+            if last.fg == cell.fg && last.bg == cell.bg {
+                last.text.push(cell.ch);
+                continue;
+            }
+        }
+        runs.push(StyledRun { text: cell.ch.to_string(), fg: cell.fg, bg: cell.bg });
+    }
+    runs
+}
 
 #[derive(Debug, Clone)]
 pub struct CommandBlock {
@@ -13,6 +59,16 @@ pub struct CommandBlock {
     pub session_id: SessionId,
     pub command: String,
     pub output: Vec<u8>,
+    /// Coloured output, captured line-by-line from the grid pen state.  This is
+    /// what the block view renders; `output` is kept as the plain-text form for
+    /// heuristics / copy.
+    pub styled: Vec<StyledLine>,
+    /// In-progress (not yet newline-terminated) line, addressed by column so a
+    /// carriage return overwrites instead of erasing.
+    cur_cells: Vec<StyledCell>,
+    cur_col: usize,
+    /// Working directory (OSC 7) captured when the command started.
+    pub cwd: Option<String>,
     pub exit_code: Option<i32>,
     pub started_at: Instant,
     pub finished_at: Option<Instant>,
@@ -87,6 +143,10 @@ impl CommandBlock {
             session_id,
             command: command.into(),
             output: Vec::new(),
+            styled: Vec::new(),
+            cur_cells: Vec::new(),
+            cur_col: 0,
+            cwd: None,
             exit_code: None,
             started_at: Instant::now(),
             finished_at: None,
@@ -113,6 +173,42 @@ impl CommandBlock {
 
     pub fn append_output(&mut self, bytes: &[u8]) {
         self.output.extend_from_slice(bytes);
+    }
+
+    /// Write one printable character at the current column with its pen colour
+    /// (overwriting any cell already there), then advance the column.
+    pub fn push_styled(&mut self, c: char, fg: Color, bg: Color) {
+        let cell = StyledCell { ch: c, fg, bg };
+        if self.cur_col < self.cur_cells.len() {
+            self.cur_cells[self.cur_col] = cell;
+        } else {
+            while self.cur_cells.len() < self.cur_col {
+                self.cur_cells.push(StyledCell { ch: ' ', fg: Color::Default, bg: Color::Default });
+            }
+            self.cur_cells.push(cell);
+        }
+        self.cur_col += 1;
+    }
+
+    /// Newline — commit the in-progress line as merged colour runs.
+    pub fn styled_newline(&mut self) {
+        let line = cells_to_runs(&self.cur_cells);
+        self.styled.push(line);
+        self.cur_cells.clear();
+        self.cur_col = 0;
+    }
+
+    /// Carriage return — move the write column to 0 *without* erasing, so the
+    /// existing text stays unless subsequent output overwrites it (correct for
+    /// CRLF endings and progress bars).
+    pub fn styled_carriage_return(&mut self) {
+        self.cur_col = 0;
+    }
+
+    /// The in-progress line as runs (empty when nothing has been written since
+    /// the last newline).
+    pub fn current_runs(&self) -> StyledLine {
+        cells_to_runs(&self.cur_cells)
     }
 
     pub fn output_as_str(&self) -> std::borrow::Cow<'_, str> {

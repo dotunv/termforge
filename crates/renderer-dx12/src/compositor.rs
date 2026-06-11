@@ -275,7 +275,7 @@ impl Compositor {
                     if self
                         .chrome_buffer
                         .as_ref()
-                        .map_or(true, |b| b.capacity < needed)
+                        .is_none_or(|b| b.capacity < needed)
                     {
                         self.chrome_buffer =
                             Some(allocate_vertex_buffer(&self.ctx.device, needed * 2)?);

@@ -33,6 +33,16 @@ impl Rect {
     pub fn contains(&self, px: f32, py: f32) -> bool {
         px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
     }
+
+    /// Shrink the rect by `d` on every side (used for the pane gutter).
+    pub fn inset(&self, d: f32) -> Rect {
+        Rect {
+            x: self.x + d,
+            y: self.y + d,
+            w: (self.w - d * 2.0).max(0.0),
+            h: (self.h - d * 2.0).max(0.0),
+        }
+    }
 }
 
 // ── ChromeLayout ─────────────────────────────────────────────────────────────
@@ -84,15 +94,19 @@ pub struct ChromeState<'a> {
     pub active_tab: usize,
     pub active_pane_session_idx: usize,
     pub tab_exit_codes: &'a [Option<i32>],
+    /// Per-session "agent awaiting input" flag (index-aligned with `sessions`),
+    /// drives the notification ring + lit tab.
+    pub awaiting: &'a [bool],
     pub active_shell_name: &'a str,
     pub active_cwd: Option<&'a str>,
     pub workspace_names: &'a [String],
+    /// Session count per workspace, index-aligned with `workspace_names`.
+    pub workspace_counts: &'a [usize],
     pub active_workspace: usize,
     pub split_handles: &'a [f32],
     pub cell_h: u32,
     pub agent_blocks: &'a [CommandBlock],
     pub pane_rects: &'a [(f32, f32, f32, f32, usize)],
     pub ui_char_w: f32,
-    pub badge_widths: &'a [f32],
     pub mouse_pos: (f32, f32),
 }

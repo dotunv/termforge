@@ -663,6 +663,7 @@ pub fn generate_settings_commands(
         y: py,
         w: panel_w,
         h: panel_h,
+        radius: RADIUS_LG,
         color: BG_SURFACE,
         bg: BG_BASE,
     });

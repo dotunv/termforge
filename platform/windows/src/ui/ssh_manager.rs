@@ -236,6 +236,7 @@ pub fn generate_ssh_manager_commands(
         y: my,
         w: modal_w,
         h: modal_h,
+        radius: RADIUS_LG,
         color: BG_SURFACE,
         bg: BG_BASE,
     });

@@ -5,8 +5,9 @@
 //! tabs, workspaces, and saved SSH hosts.  The app rebuilds the item list
 //! each time the palette opens, so dynamic entries are always current.
 
+use renderer_windows::icons;
 use renderer_windows::tokens::*;
-use renderer_windows::ui_renderer::UiCommand;
+use renderer_windows::ui_renderer::{UiCommand, UiTextStyle};
 
 use super::chrome;
 
@@ -155,6 +156,7 @@ pub fn generate_command_palette_commands(
     window_w: f32,
     window_h: f32,
     ch: f32,
+    ucw: f32,
 ) -> Vec<UiCommand> {
     let mut cmds = Vec::with_capacity(64);
 
@@ -164,82 +166,77 @@ pub fn generate_command_palette_commands(
     });
 
     let items = state.filtered();
-    let row_h = ch + 12.0;
-    let input_h = ch + 18.0;
-    let panel_w = (window_w * 0.45).clamp(420.0, 560.0);
-    let panel_h = input_h + items.len().max(1) as f32 * row_h + 16.0;
+    let row_h = ch + 14.0;
+    let input_h = ch + 22.0;
+    let panel_w = (window_w * 0.45).clamp(440.0, 600.0);
+    let panel_h = input_h + items.len().max(1) as f32 * row_h + SPACE_3;
     let px = (window_w - panel_w) * 0.5;
-    let py = window_h * 0.22;
+    let py = window_h * 0.20;
 
-    cmds.push(chrome::shadow(px, py, panel_w, panel_h, 8.0));
+    cmds.push(chrome::shadow(px, py, panel_w, panel_h, 16.0));
     cmds.push(UiCommand::FillRoundRect {
-        x: px, y: py, w: panel_w, h: panel_h,
-        color: BG_RAISED,
-        bg: BG_BASE,
+        x: px, y: py, w: panel_w, h: panel_h, radius: RADIUS_LG,
+        color: BG_RAISED, bg: BG_BASE,
+    });
+    cmds.push(UiCommand::StrokeRoundRect {
+        x: px, y: py, w: panel_w, h: panel_h, radius: RADIUS_LG,
+        thickness: 1.0, color: BORDER_STRONG,
     });
 
-    // Query input row
-    let q_display = if state.query.is_empty() {
-        "Search commands, tabs, workspaces, hosts...".to_string()
+    // Query input row: search icon + text.
+    cmds.push(UiCommand::DrawIcon {
+        x: px + SPACE_4, y: py + (input_h - ch) * 0.5,
+        text: icons::SEARCH.to_string(), fg: TEXT_MUTED, bg: BG_RAISED, large: false,
+    });
+    let (q_text, q_fg) = if state.query.is_empty() {
+        ("Search commands, tabs, workspaces, hosts…".to_string(), TEXT_FAINT)
     } else {
-        format!("{}_", state.query)
+        (format!("{}_", state.query), TEXT_PRIMARY)
     };
-    let q_fg = if state.query.is_empty() { TEXT_FAINT } else { TEXT_PRIMARY };
-    cmds.push(UiCommand::DrawUiText {
-        x: px + 16.0,
-        y: py + 9.0,
-        text: format!("\u{276F} {q_display}"),
-        fg: q_fg,
-        bg: BG_RAISED,
+    cmds.push(UiCommand::DrawStyledText {
+        x: px + SPACE_4 + 26.0, y: py + (input_h - ch) * 0.5,
+        text: q_text, fg: q_fg, bg: BG_RAISED, style: UiTextStyle::Body,
     });
     cmds.push(UiCommand::FillRect {
-        x: px + 8.0, y: py + input_h, w: panel_w - 16.0, h: 1.0,
+        x: px + SPACE_3, y: py + input_h, w: panel_w - SPACE_3 * 2.0, h: 1.0,
         color: BORDER_DEFAULT,
     });
 
-    // Result rows
     if items.is_empty() {
-        cmds.push(UiCommand::DrawUiText {
-            x: px + 16.0,
-            y: py + input_h + 8.0,
-            text: "No matches".to_string(),
-            fg: TEXT_FAINT,
-            bg: BG_RAISED,
+        cmds.push(UiCommand::DrawStyledText {
+            x: px + SPACE_4, y: py + input_h + SPACE_2,
+            text: "No matches".to_string(), fg: TEXT_FAINT, bg: BG_RAISED, style: UiTextStyle::Body,
         });
         return cmds;
     }
 
     for (i, item) in items.iter().enumerate() {
-        let ry = py + input_h + 6.0 + i as f32 * row_h;
+        let ry = py + input_h + SPACE_1 + i as f32 * row_h;
         let is_sel = i == state.selected;
+        let row_bg = if is_sel { BG_HOVER } else { BG_RAISED };
         if is_sel {
-            cmds.push(UiCommand::FillRect {
-                x: px + 6.0, y: ry, w: panel_w - 12.0, h: row_h - 2.0,
-                color: BG_HOVER,
+            cmds.push(UiCommand::FillRoundRect {
+                x: px + SPACE_1, y: ry, w: panel_w - SPACE_1 * 2.0, h: row_h - 2.0,
+                radius: RADIUS_SM, color: BG_HOVER, bg: BG_RAISED,
             });
-            cmds.push(UiCommand::FillRect {
-                x: px + 6.0, y: ry, w: 3.0, h: row_h - 2.0,
-                color: ACCENT_BLUE,
+            cmds.push(UiCommand::FillRoundRect {
+                x: px + SPACE_1, y: ry + 4.0, w: 3.0, h: row_h - 10.0,
+                radius: 1.5, color: ACCENT_BLUE, bg: BG_HOVER,
             });
         }
-        let row_bg = if is_sel { BG_HOVER } else { BG_RAISED };
-        cmds.push(UiCommand::DrawUiText {
-            x: px + 20.0,
-            y: ry + (row_h - ch) * 0.5 - 1.0,
+        let label_style = if is_sel { UiTextStyle::Bold } else { UiTextStyle::Body };
+        cmds.push(UiCommand::DrawStyledText {
+            x: px + SPACE_4, y: ry + (row_h - ch) * 0.5,
             text: item.label.clone(),
             fg: if is_sel { TEXT_PRIMARY } else { TEXT_MUTED },
-            bg: row_bg,
+            bg: row_bg, style: label_style,
         });
         if !item.hint.is_empty() {
-            // Right-aligned hint (~7px per UI char is close enough for a
-            // right-edge gutter).
-            let hint_w = item.hint.chars().count() as f32 * 7.0;
-            cmds.push(UiCommand::DrawUiText {
-                x: px + panel_w - hint_w - 18.0,
-                y: ry + (row_h - ch) * 0.5 - 1.0,
-                text: item.hint.clone(),
-                fg: TEXT_FAINT,
-                bg: row_bg,
+            let hint_w = item.hint.chars().count() as f32 * ucw * 0.92;
+            cmds.push(UiCommand::DrawStyledText {
+                x: px + panel_w - hint_w - SPACE_4,
+                y: ry + (row_h - ch) * 0.5 + 1.0,
+                text: item.hint.clone(), fg: TEXT_FAINT, bg: row_bg, style: UiTextStyle::Caption,
             });
         }
     }
