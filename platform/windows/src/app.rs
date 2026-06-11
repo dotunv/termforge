@@ -545,6 +545,17 @@ impl AppState {
             if let EditorEffect::Send(bytes) = effect {
                 if let Some(e) = self.entries.get_mut(self.active_tab) {
                     e.record_input();
+                    // A submitted command ends in CR — hand the exact text to the
+                    // detector so the block shows what the user typed, not the
+                    // PSReadLine-repainted echo.
+                    if bytes.last() == Some(&b'\r') {
+                        if let Ok(s) = std::str::from_utf8(&bytes[..bytes.len() - 1]) {
+                            let cmd = s.trim();
+                            if !cmd.is_empty() {
+                                e.vt_parser.detector_mut().set_next_command(cmd);
+                            }
+                        }
+                    }
                     let _ = e.pty.write(&bytes);
                 }
             }

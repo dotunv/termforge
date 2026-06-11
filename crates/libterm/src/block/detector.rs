@@ -23,6 +23,11 @@ pub struct BlockDetector {
     /// Text captured between PromptEnd (B) and CommandStart (C) = the typed command.
     capture_command: bool,
     captured_chars: String,
+    /// Authoritative command text supplied by the input editor.  When set it
+    /// overrides the captured echo, which PSReadLine pollutes by repainting the
+    /// line (syntax highlight / prediction) — that repaint would otherwise show
+    /// up as a doubled command like "lsls".
+    next_command: Option<String>,
 }
 
 impl BlockDetector {
@@ -31,7 +36,14 @@ impl BlockDetector {
             session_id,
             capture_command: false,
             captured_chars: String::new(),
+            next_command: None,
         }
+    }
+
+    /// Set the exact command the user submitted via the input editor; consumed
+    /// by the next block that starts.
+    pub fn set_next_command(&mut self, cmd: impl Into<String>) {
+        self.next_command = Some(cmd.into());
     }
 
     /// Call from the VT performer whenever an OSC 133 marker is parsed.
@@ -66,9 +78,15 @@ impl BlockDetector {
         }
     }
 
-    /// Return the captured command text and clear it.
+    /// Return the command text for the starting block: the editor-supplied one
+    /// when present (authoritative), otherwise the captured echo.
     pub fn take_command(&mut self) -> String {
-        std::mem::take(&mut self.captured_chars)
+        self.captured_chars.clear();
+        if let Some(cmd) = self.next_command.take() {
+            cmd
+        } else {
+            std::mem::take(&mut self.captured_chars)
+        }
     }
 
     /// Apply a BlockAction to a BlockStore. Convenience method.

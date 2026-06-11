@@ -58,6 +58,11 @@ fn build_lines(blocks: &[CommandBlock]) -> Vec<Line> {
     let mut lines = Vec::new();
     let start = blocks.len().saturating_sub(MAX_BLOCKS);
     for block in &blocks[start..] {
+        // Skip empty prompts (a bare Enter with the prompt suppressed still
+        // marks a block) — nothing to show.
+        if block.command.trim().is_empty() && block.styled.is_empty() {
+            continue;
+        }
         let dur = block.duration_ms().map(|ms| {
             if ms >= 1000 { format!("{:.1}s", ms as f32 / 1000.0) } else { format!("{ms}ms") }
         });
@@ -65,16 +70,23 @@ fn build_lines(blocks: &[CommandBlock]) -> Vec<Line> {
         lines.push(Line::Divider { cwd, status: block.status.clone(), dur });
         lines.push(Line::Command(block.command.clone()));
 
-        for (n, sline) in block.styled_lines().enumerate() {
+        let to_out = |sline: &[libterm::block::store::StyledRun]| -> Vec<(String, [f32; 4])> {
+            sline.iter().map(|r| (r.text.clone(), resolve_color(&r.fg, TEXT_PRIMARY))).collect()
+        };
+        let mut n = 0usize;
+        for sline in &block.styled {
             if n >= MAX_OUTPUT_LINES {
                 lines.push(Line::Output(vec![("…".to_string(), TEXT_FAINT)]));
                 break;
             }
-            let runs = sline
-                .iter()
-                .map(|r| (r.text.clone(), resolve_color(&r.fg, TEXT_PRIMARY)))
-                .collect();
-            lines.push(Line::Output(runs));
+            lines.push(Line::Output(to_out(sline)));
+            n += 1;
+        }
+        if n < MAX_OUTPUT_LINES {
+            let cur = block.current_runs();
+            if !cur.is_empty() {
+                lines.push(Line::Output(to_out(&cur)));
+            }
         }
         lines.push(Line::Gap);
     }
