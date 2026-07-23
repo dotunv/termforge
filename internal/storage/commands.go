@@ -18,15 +18,6 @@ type CommandRow struct {
 	StartedAt    time.Time
 }
 
-type SessionRow struct {
-	ID        string
-	ProjectID string
-	Name      string
-	CWD       string
-	IsActive  bool
-	CreatedAt time.Time
-}
-
 func LogCommand(db *DB, sessionID, taskID, input string, durationMs int, exitCode int) error {
 	id := event.MakeEvent("", "", nil).ID
 	_, err := db.conn.Exec(
@@ -69,43 +60,6 @@ func GetRecentCommands(db *DB, projectID string, limit int) ([]CommandRow, error
 		commands = append(commands, cmd)
 	}
 	return commands, nil
-}
-
-func UpdateSessionCWD(db *DB, sessionID, cwd string) error {
-	_, err := db.conn.Exec(
-		`UPDATE sessions SET current_working_dir = ? WHERE id = ?`,
-		cwd, sessionID,
-	)
-	if err != nil {
-		return fmt.Errorf("update session cwd: %w", err)
-	}
-	return nil
-}
-
-func GetActiveSessions(db *DB, projectID string) ([]SessionRow, error) {
-	rows, err := db.conn.Query(
-		`SELECT id, project_id, name, current_working_dir, is_active, created_at
-		 FROM sessions
-		 WHERE project_id = ? AND is_active = 1
-		 ORDER BY created_at DESC`,
-		projectID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("get active sessions: %w", err)
-	}
-	defer rows.Close()
-
-	var sessions []SessionRow
-	for rows.Next() {
-		var s SessionRow
-		var isActive int
-		if err := rows.Scan(&s.ID, &s.ProjectID, &s.Name, &s.CWD, &isActive, &s.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan session row: %w", err)
-		}
-		s.IsActive = isActive == 1
-		sessions = append(sessions, s)
-	}
-	return sessions, nil
 }
 
 func MarkSessionInactive(db *DB, sessionID string) error {

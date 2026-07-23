@@ -62,22 +62,14 @@ func (m *Manager) Get(id string) (*Session, bool) {
 	return s, ok
 }
 
-func (m *Manager) WriteTo(id string, w io.Writer) error {
-	s, ok := m.Get(id)
-	if !ok {
-		return fmt.Errorf("session %s not found", id)
+func (m *Manager) List() []*Session {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var sessions []*Session
+	for _, s := range m.sessions {
+		sessions = append(sessions, s)
 	}
-	_, err := io.Copy(w, s.Pty)
-	return err
-}
-
-func (m *Manager) WriteFrom(id string, r io.Reader) error {
-	s, ok := m.Get(id)
-	if !ok {
-		return fmt.Errorf("session %s not found", id)
-	}
-	_, err := io.Copy(s.Pty, r)
-	return err
+	return sessions
 }
 
 func (m *Manager) WriteBytes(id string, data []byte) error {

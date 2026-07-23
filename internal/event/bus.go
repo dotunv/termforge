@@ -2,6 +2,7 @@ package event
 
 import (
 	"encoding/json"
+	"log"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ const (
 	EventTaskCompleted   EventType = "task.completed"
 	EventProjectOpened   EventType = "project.opened"
 	EventNoteCreated     EventType = "note.created"
+	EventFileChanged     EventType = "file.changed"
 )
 
 type Event struct {
@@ -34,9 +36,8 @@ type Event struct {
 type Handler func(Event)
 
 type Bus struct {
-	mu       sync.RWMutex
+	mu       sync.Mutex
 	handlers map[EventType][]Handler
-	all      []Handler
 }
 
 func NewBus() *Bus {
@@ -48,7 +49,7 @@ func NewBus() *Bus {
 func (b *Bus) Subscribe(fn Handler) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.all = append(b.all, fn)
+	b.handlers["*"] = append(b.handlers["*"], fn)
 }
 
 func (b *Bus) SubscribeType(t EventType, fn Handler) {
@@ -65,14 +66,25 @@ func (b *Bus) Emit(e Event) {
 		e.CreatedAt = time.Now()
 	}
 
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	for _, fn := range b.handlers[e.Type] {
-		go fn(e)
+	b.mu.Lock()
+	selected := make([]Handler, 0)
+	if specific, ok := b.handlers[e.Type]; ok {
+		selected = append(selected, specific...)
 	}
-	for _, fn := range b.all {
-		go fn(e)
+	if all, ok := b.handlers["*"]; ok {
+		selected = append(selected, all...)
+	}
+	b.mu.Unlock()
+
+	for _, fn := range selected {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[event] handler panic for %s: %v", e.Type, r)
+				}
+			}()
+			fn(e)
+		}()
 	}
 }
 

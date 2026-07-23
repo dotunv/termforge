@@ -1,16 +1,40 @@
 package storage
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/termforge/forge/internal/event"
 
 	_ "modernc.org/sqlite"
 )
+
+func DBPath(projectDir string) string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share", "termforge", Slugify(projectDir))
+}
+
+func Slugify(s string) string {
+	s = strings.ReplaceAll(s, "\\", "/")
+	s = strings.TrimRight(s, "/")
+	s = strings.ToLower(s)
+	s = strings.ReplaceAll(s, " ", "-")
+	s = strings.ReplaceAll(s, ":", "-")
+	s = strings.ReplaceAll(s, ".", "-")
+
+	// For Windows paths like C:/Users/... we want "c-users-..."
+	if len(s) > 2 && s[1] == ':' {
+		s = s[:1] + s[2:]
+	}
+
+	h := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("%x", h[:8])
+}
 
 type DB struct {
 	conn *sql.DB
@@ -34,7 +58,17 @@ func NewSQLite(dataDir string) (*DB, error) {
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
-	return &DB{conn: conn}, nil
+	db := &DB{conn: conn}
+	if err := db.RunMigrations(); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("run migrations: %w", err)
+	}
+
+	return db, nil
+}
+
+func Open(dataDir string) (*DB, error) {
+	return NewSQLite(dataDir)
 }
 
 func (db *DB) Close() error {
@@ -169,19 +203,18 @@ func (db *DB) GetRecentEvents(projectID string, limit int) ([]event.Event, error
 	return events, nil
 }
 
-func (db *DB) InsertCommand(sessionID, taskID, input string, durationMs int) error {
-	_, err := db.conn.Exec(
-		`INSERT INTO commands (id, session_id, task_id, input_command, execution_duration_ms, started_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		event.MakeEvent("", "", nil).ID, sessionID, taskID, input, durationMs, time.Now(),
-	)
-	return err
-}
-
 func (db *DB) UpsertProject(id, name, rootDir string) error {
 	_, err := db.conn.Exec(
 		`INSERT OR REPLACE INTO projects (id, name, root_directory) VALUES (?, ?, ?)`,
 		id, name, rootDir,
+	)
+	return err
+}
+
+func (db *DB) EnsureProject(id, rootDir string) error {
+	_, err := db.conn.Exec(
+		`INSERT OR IGNORE INTO projects (id, name, root_directory) VALUES (?, ?, ?)`,
+		id, id, rootDir,
 	)
 	return err
 }
