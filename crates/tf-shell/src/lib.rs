@@ -111,10 +111,14 @@ mod tests {
             program: "pwsh.exe".into(),
             args: vec![],
         };
-        let out = inject(&p, Path::new("C:/Users/O'Neil/tf")).unwrap();
-        assert_eq!(
-            out.args.last().unwrap(),
-            ". 'C:/Users/O''Neil/tf/termforge.ps1'"
-        );
+        let dir = Path::new("C:/Users/O'Neil/tf");
+        let out = inject(&p, dir).unwrap();
+        // Separator differs by platform; the quoting is what matters.
+        let expected = dir
+            .join("termforge.ps1")
+            .to_string_lossy()
+            .replace('\'', "''");
+        assert!(expected.contains("O''Neil"));
+        assert_eq!(out.args.last().unwrap(), &format!(". '{expected}'"));
     }
 }
