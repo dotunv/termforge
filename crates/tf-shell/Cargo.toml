@@ -1,0 +1,17 @@
+[package]
+name = "tf-shell"
+description = "Shell integration scripts (OSC 133 / OSC 7) and launch-time injection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tf-pty.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

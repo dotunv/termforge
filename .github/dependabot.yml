@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # gpui is pinned on purpose (docs/adr/0001-ui-framework.md).
+      - dependency-name: gpui
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

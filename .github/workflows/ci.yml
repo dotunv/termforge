@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  core:
+    name: core (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: core
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: clippy
+        run: cargo clippy --workspace --exclude termforge --all-targets --locked -- -D warnings
+      - name: test
+        run: cargo nextest run --workspace --exclude termforge --locked --no-fail-fast
+      - name: doctests
+        run: cargo test --workspace --exclude termforge --doc --locked
+      - name: forged doctor
+        run: cargo run -p forged --locked -- --data-dir target/tf-data doctor
+
+  conpty:
+    name: conpty bundle (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: xtask
+      - run: cargo xtask conpty
+      - name: verify files
+        shell: pwsh
+        run: |
+          foreach ($f in 'conpty.dll', 'OpenConsole.exe') {
+            if (-not (Test-Path "assets/conpty/$f" -PathType Leaf)) { throw "missing $f" }
+          }
+
+  app:
+    name: app (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libfontconfig-dev libfreetype-dev libwayland-dev libvulkan-dev libx11-xcb-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: app
+      - name: clippy
+        run: cargo clippy -p termforge --locked -- -D warnings
+      - name: build
+        if: runner.os == 'Windows'
+        run: cargo build -p termforge --release --locked
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+
+  msrv:
+    name: msrv (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - run: cargo check --workspace --exclude termforge --exclude xtask --locked

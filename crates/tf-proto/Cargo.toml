@@ -1,0 +1,17 @@
+[package]
+name = "tf-proto"
+description = "Versioned IPC protocol between the TermForge UI, CLI and session host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true
