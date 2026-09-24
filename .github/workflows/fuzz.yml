@@ -24,7 +24,7 @@ jobs:
       - name: fuzz ${{ matrix.target }} (10 min)
         working-directory: fuzz
         run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=600 -max_len=65536
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: fuzz-artifacts-${{ matrix.target }}
