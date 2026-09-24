@@ -1,0 +1,15 @@
+/target
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/dist
+/assets/conpty/*.dll
+/assets/conpty/*.exe
+*.db
+*.db-wal
+*.db-shm
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

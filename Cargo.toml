@@ -1,0 +1,81 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/*",
+    "bins/*",
+    "xtask",
+]
+default-members = [
+    "crates/*",
+    "bins/forged",
+    "bins/tf",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dotunv/termforge"
+authors = ["The TermForge Authors"]
+publish = false
+
+[workspace.dependencies]
+# internal
+tf-proto = { path = "crates/tf-proto" }
+tf-tap = { path = "crates/tf-tap" }
+tf-engine = { path = "crates/tf-engine" }
+tf-pty = { path = "crates/tf-pty" }
+tf-session = { path = "crates/tf-session" }
+tf-store = { path = "crates/tf-store" }
+tf-shell = { path = "crates/tf-shell" }
+tf-ui = { path = "crates/tf-ui" }
+
+# terminal
+alacritty_terminal = "0.26"
+portable-pty = "0.9"
+
+# ui (pinned: upgrade deliberately, see docs/adr/0001-ui-framework.md)
+gpui = "=0.2.2"
+
+# data
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+toml = "0.9"
+uuid = { version = "1", features = ["v4", "serde"] }
+dunce = "1"
+
+# infra
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }
+directories = "6"
+
+# test
+insta = "1"
+proptest = "1"
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+print_stdout = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+strip = false
+
+[profile.dev.package."*"]
+opt-level = 2

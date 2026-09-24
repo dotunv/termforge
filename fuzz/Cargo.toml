@@ -1,0 +1,30 @@
+[package]
+name = "termforge-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tf-tap = { path = "../crates/tf-tap" }
+tf-proto = { path = "../crates/tf-proto" }
+
+# Keep the fuzz crate out of the main workspace.
+[workspace]
+
+[[bin]]
+name = "tap"
+path = "fuzz_targets/tap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proto_frame"
+path = "fuzz_targets/proto_frame.rs"
+test = false
+doc = false
+bench = false

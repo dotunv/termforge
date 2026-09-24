@@ -1,0 +1,16 @@
+[package]
+name = "tf-tap"
+description = "Streaming tap that extracts shell-integration OSC sequences from PTY output"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

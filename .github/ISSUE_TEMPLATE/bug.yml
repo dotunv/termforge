@@ -1,0 +1,37 @@
+name: Bug report
+description: Something is broken
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Include what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: TermForge version
+      placeholder: output of `tf version`
+  - type: input
+    id: os
+    attributes:
+      label: Windows version
+      placeholder: e.g. Windows 11 24H2 (26100.4061)
+  - type: dropdown
+    id: shell
+    attributes:
+      label: Shell
+      options: [PowerShell 7, Windows PowerShell 5.1, Git Bash, WSL, cmd, Other]
+  - type: textarea
+    id: doctor
+    attributes:
+      label: forged doctor output
+      render: text
