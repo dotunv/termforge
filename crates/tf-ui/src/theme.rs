@@ -152,6 +152,25 @@ impl Theme {
     }
 }
 
+impl Theme {
+    /// Resolve an xterm 256-colour index: 0..=15 from the theme, 16..=231
+    /// the 6x6x6 cube, 232..=255 the grey ramp.
+    pub fn indexed(&self, i: u8) -> Rgb {
+        match i {
+            0..=15 => self.ansi[i as usize],
+            16..=231 => {
+                let i = i - 16;
+                let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+                Rgb::new(level(i / 36), level((i / 6) % 6), level(i % 6))
+            }
+            232..=255 => {
+                let v = 8 + (i - 232) * 10;
+                Rgb::new(v, v, v)
+            }
+        }
+    }
+}
+
 /// Step lightness away from `bg` until `target` contrast is reached.
 fn ensure_contrast(mut c: Oklch, bg: Rgb, target: f64, is_dark: bool) -> Rgb {
     let dir = if is_dark { 0.01 } else { -0.01 };
@@ -220,6 +239,17 @@ mod tests {
                 assert!(l(w[1]) <= l(w[0]));
             }
         }
+    }
+
+    #[test]
+    fn indexed_palette_matches_xterm() {
+        let t = Theme::generate(ThemeInput::DARK);
+        assert_eq!(t.indexed(3), t.ansi[3]);
+        assert_eq!(t.indexed(16), Rgb::new(0, 0, 0));
+        assert_eq!(t.indexed(196), Rgb::new(255, 0, 0));
+        assert_eq!(t.indexed(231), Rgb::new(255, 255, 255));
+        assert_eq!(t.indexed(232), Rgb::new(8, 8, 8));
+        assert_eq!(t.indexed(255), Rgb::new(238, 238, 238));
     }
 
     #[test]

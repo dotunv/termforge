@@ -11,11 +11,11 @@ publish.workspace = true
 tf-tap.workspace = true
 tf-engine.workspace = true
 tf-pty.workspace = true
+tf-shell.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-tf-shell.workspace = true
 tempfile.workspace = true
 
 [lints]

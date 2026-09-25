@@ -30,6 +30,7 @@ tf-session = { path = "crates/tf-session" }
 tf-store = { path = "crates/tf-store" }
 tf-shell = { path = "crates/tf-shell" }
 tf-ui = { path = "crates/tf-ui" }
+tf-input = { path = "crates/tf-input" }
 
 # terminal
 alacritty_terminal = "0.26"
@@ -37,6 +38,7 @@ portable-pty = "0.9"
 
 # ui (pinned: upgrade deliberately, see docs/adr/0001-ui-framework.md)
 gpui = "=0.2.2"
+futures = "0.3"
 
 # data
 rusqlite = { version = "0.40", features = ["bundled"] }

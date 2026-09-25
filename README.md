@@ -2,7 +2,7 @@
 
 A Windows-first, GPU-rendered terminal workspace where every repo is a workspace: shells, services, agents and history, organised per project.
 
-> Status: Phase 0 (foundation). Not usable as a daily terminal yet. The previous Go/Electron and native prototypes are preserved under the `archive/go-electron` and `archive/native-v0` tags.
+> Status: Phase 1 (terminal core). One GPU-rendered terminal per window with shell integration and command blocks. Not yet a daily driver: no tabs, splits, selection or `forged` IPC. The previous Go/Electron and native prototypes are preserved under the `archive/go-electron` and `archive/native-v0` tags.
 
 ## Architecture
 
@@ -14,9 +14,10 @@ bins/
 crates/
   tf-proto    versioned IPC messages + length-prefixed postcard framing
   tf-tap      streaming OSC tap (133 marks, 7 / 9;9 cwd, 9 / 777 / 99 notifications)
-  tf-engine   TerminalEngine trait + alacritty_terminal implementation
+  tf-engine   TerminalEngine trait + alacritty_terminal implementation (cells, colours, modes, scrollback)
+  tf-input    key and paste encoding (xterm conventions, safe bracketed paste)
   tf-pty      portable-pty wrapper, ConPTY sideloading, shell discovery
-  tf-session  PTY + tap + engine + virtual block index
+  tf-session  PTY + tap + engine + virtual block index; LiveSession runs it on background threads
   tf-store    SQLite (WAL) with versioned migrations
   tf-shell    shell integration scripts (pwsh, bash, zsh, fish) + injection
   tf-ui       framework-free design tokens and OKLCH theme generator
@@ -53,6 +54,18 @@ cargo xtask conpty               # writes assets/conpty/{conpty.dll,OpenConsole.
 ```
 
 Linux builds of the app need `libxkbcommon-dev libxcb1-dev libfontconfig-dev libfreetype-dev libwayland-dev libvulkan-dev`.
+
+## Using the app
+
+| Action | Shortcut |
+|---|---|
+| Paste | `Ctrl+Shift+V`, `Shift+Insert`, right-click |
+| Copy visible screen | `Ctrl+Shift+C` (selection comes in Phase 2) |
+| Scroll back | mouse wheel, `Shift+PageUp` / `Shift+PageDown` |
+| Font size | `Ctrl+=`, `Ctrl+-`, `Ctrl+0` |
+| Restart after exit | `Enter` |
+
+The left gutter marks each command block: accent while running, red on a non-zero exit, neutral on success. Blocks need shell integration, which is injected automatically for PowerShell, Windows PowerShell, bash and Git Bash. For zsh and fish, add `source (tf shell-integration fish | psub)` or the zsh equivalent to your rc file.
 
 ## Quality bar
 

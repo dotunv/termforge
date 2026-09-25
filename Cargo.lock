@@ -5902,8 +5902,16 @@ name = "termforge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "directories",
+ "futures",
  "gpui",
+ "tf-engine",
+ "tf-input",
+ "tf-pty",
+ "tf-session",
  "tf-ui",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5923,6 +5931,13 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "insta",
+]
+
+[[package]]
+name = "tf-input"
+version = "0.1.0"
+dependencies = [
+ "proptest",
 ]
 
 [[package]]
