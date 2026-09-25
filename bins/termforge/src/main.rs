@@ -1,75 +1,97 @@
 //! TermForge desktop app.
 //!
-//! Phase 0: a themed window that proves the GPUI toolchain, the design
-//! tokens and the Windows build. The terminal view arrives in Phase 1.
+//! Phase 1: one terminal per window, rendered with GPUI. The session runs
+//! in-process; Phase 2 moves it behind `forged` (docs/adr/0005).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod fonts;
+mod terminal_view;
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use gpui::{
-    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, Rgba, Window, WindowBounds,
-    WindowOptions,
+    px, size, App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions,
 };
-use tf_ui::{tokens, Rgb, Theme, ThemeInput};
+use tf_engine::GridSize;
+use tf_session::SpawnOptions;
+use tf_ui::{Theme, ThemeInput};
 
-fn color(c: Rgb) -> Rgba {
-    rgb(u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b))
+use crate::fonts::MonoFont;
+use crate::terminal_view::TerminalView;
+
+fn data_dir() -> Option<PathBuf> {
+    std::env::var_os("TERMFORGE_DATA_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            directories::ProjectDirs::from("dev", "TermForge", "TermForge")
+                .map(|d| d.data_local_dir().to_path_buf())
+        })
 }
 
-struct Root {
-    theme: Theme,
-}
-
-impl Render for Root {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let t = &self.theme;
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(color(t.bg_app))
-            .text_color(color(t.text))
-            .text_size(px(tokens::text::MD))
-            .child(
-                div()
-                    .h(px(tokens::layout::TITLEBAR_H))
-                    .px(px(tokens::space::LG))
-                    .flex()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(color(t.border))
-                    .child("TermForge"),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(color(t.text_muted))
-                    .child("Phase 0 foundation. Terminal view lands in Phase 1."),
-            )
-    }
+fn spawn_options() -> anyhow::Result<SpawnOptions> {
+    let profile = tf_pty::discover_shells()
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no shell found"))?;
+    let cwd = std::env::current_dir()
+        .ok()
+        .filter(|d| d.parent().is_some())
+        .or_else(|| directories::UserDirs::new().map(|u| u.home_dir().to_path_buf()));
+    Ok(SpawnOptions {
+        profile,
+        cwd,
+        size: GridSize::new(120, 30),
+        env: Vec::new(),
+        integration_dir: data_dir().map(|d| d.join("shell")),
+    })
 }
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("TERMFORGE_LOG")
+                .unwrap_or_else(|_| "info".into()),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
+    let spawn = match spawn_options() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("{e:#}");
+            std::process::exit(1);
+        }
+    };
+
+    Application::new().run(move |cx: &mut App| {
+        let theme = Arc::new(Theme::generate(ThemeInput::DARK));
+        let font = MonoFont::detect(cx);
         let bounds = Bounds::centered(None, size(px(1100.0), px(720.0)), cx);
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("TermForge".into()),
+                    ..Default::default()
+                }),
+                window_min_size: Some(size(px(360.0), px(220.0))),
                 ..Default::default()
             },
-            |_, cx| {
-                cx.new(|_| Root {
-                    theme: Theme::generate(ThemeInput::DARK),
-                })
-            },
+            |window, cx| cx.new(|cx| TerminalView::new(spawn, theme, font, window, cx)),
         );
         if let Err(e) = opened {
-            eprintln!("failed to open window: {e:#}");
+            tracing::error!("failed to open window: {e:#}");
             cx.quit();
             return;
         }
+        cx.on_window_closed(|cx| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
         cx.activate(true);
     });
 }

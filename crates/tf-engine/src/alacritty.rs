@@ -1,13 +1,14 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll as AScroll};
 use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::cell::{Cell as ACell, Flags};
 use alacritty_terminal::term::{Config, TermMode};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{Color as AColor, NamedColor, Processor};
 use alacritty_terminal::Term;
 
-use crate::{Cursor, GridSize, Snapshot, TerminalEngine};
+use crate::{Cell, CellFlags, Color, Cursor, GridSize, Modes, Scroll, Snapshot, TerminalEngine};
 
 const DEFAULT_SCROLLBACK: usize = 10_000;
 
@@ -101,43 +102,41 @@ impl TerminalEngine for AlacrittyEngine {
     fn snapshot(&self) -> Snapshot {
         let grid = self.term.grid();
         let cols = grid.columns();
-        let rows = (0..grid.screen_lines())
+        let offset = grid.display_offset();
+        let lines = (0..grid.screen_lines())
             .map(|l| {
-                let row = &grid[Line(l as i32)];
-                let mut s = String::with_capacity(cols);
-                for c in 0..cols {
-                    let cell = &row[Column(c)];
-                    // Skip the spacer that follows a wide character.
-                    if cell
-                        .flags
-                        .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER)
-                    {
-                        continue;
-                    }
-                    s.push(cell.c);
-                    if let Some(zw) = cell.zerowidth() {
-                        s.extend(zw);
-                    }
-                }
-                s
+                let row = &grid[Line(l as i32 - offset as i32)];
+                (0..cols).map(|c| convert_cell(&row[Column(c)])).collect()
             })
             .collect();
         let point = grid.cursor.point;
+        // Cursor position is relative to the bottom-anchored screen; shift it
+        // into the viewport and hide it when scrolled out of view.
+        let cursor_row = point.line.0 + offset as i32;
+        let modes = self.modes();
         Snapshot {
             size: self.size,
-            rows,
+            lines,
             cursor: Cursor {
-                row: point.line.0.max(0) as u16,
+                row: cursor_row.max(0) as u16,
                 col: point.column.0 as u16,
             },
-            alt_screen: self.term.mode().contains(TermMode::ALT_SCREEN),
+            modes: Modes {
+                cursor_visible: modes.cursor_visible && cursor_row < grid.screen_lines() as i32,
+                ..modes
+            },
             history: grid.history_size(),
+            display_offset: offset,
         }
     }
 
     fn cursor_line_abs(&self) -> usize {
         let grid = self.term.grid();
         grid.history_size() + grid.cursor.point.line.0.max(0) as usize
+    }
+
+    fn history_size(&self) -> usize {
+        self.term.grid().history_size()
     }
 
     fn take_replies(&mut self) -> Vec<u8> {
@@ -152,6 +151,95 @@ impl TerminalEngine for AlacrittyEngine {
             .unwrap_or_else(PoisonError::into_inner)
             .title
             .clone()
+    }
+
+    fn modes(&self) -> Modes {
+        let m = self.term.mode();
+        Modes {
+            app_cursor: m.contains(TermMode::APP_CURSOR),
+            bracketed_paste: m.contains(TermMode::BRACKETED_PASTE),
+            alt_screen: m.contains(TermMode::ALT_SCREEN),
+            cursor_visible: m.contains(TermMode::SHOW_CURSOR),
+        }
+    }
+
+    fn scroll(&mut self, scroll: Scroll) {
+        self.term.scroll_display(match scroll {
+            Scroll::Lines(n) => AScroll::Delta(n),
+            Scroll::PageUp => AScroll::PageUp,
+            Scroll::PageDown => AScroll::PageDown,
+            Scroll::Top => AScroll::Top,
+            Scroll::Bottom => AScroll::Bottom,
+        });
+    }
+}
+
+fn convert_color(c: AColor, flags: &mut CellFlags) -> Color {
+    match c {
+        AColor::Spec(rgb) => Color::Rgb(rgb.r, rgb.g, rgb.b),
+        AColor::Indexed(i) => Color::Indexed(i),
+        AColor::Named(n) => {
+            let idx = n as usize;
+            if idx < 16 {
+                return Color::Indexed(idx as u8);
+            }
+            match n {
+                NamedColor::Background => Color::DefaultBg,
+                NamedColor::DimForeground => {
+                    flags.insert(CellFlags::DIM);
+                    Color::DefaultFg
+                }
+                NamedColor::DimBlack
+                | NamedColor::DimRed
+                | NamedColor::DimGreen
+                | NamedColor::DimYellow
+                | NamedColor::DimBlue
+                | NamedColor::DimMagenta
+                | NamedColor::DimCyan
+                | NamedColor::DimWhite => {
+                    flags.insert(CellFlags::DIM);
+                    Color::Indexed((idx - NamedColor::DimBlack as usize) as u8)
+                }
+                _ => Color::DefaultFg,
+            }
+        }
+    }
+}
+
+fn convert_cell(cell: &ACell) -> Cell {
+    let f = cell.flags;
+    let mut flags = CellFlags::empty();
+    for (from, to) in [
+        (Flags::BOLD, CellFlags::BOLD),
+        (Flags::ITALIC, CellFlags::ITALIC),
+        (Flags::INVERSE, CellFlags::INVERSE),
+        (Flags::DIM, CellFlags::DIM),
+        (Flags::STRIKEOUT, CellFlags::STRIKE),
+        (Flags::HIDDEN, CellFlags::HIDDEN),
+        (Flags::WIDE_CHAR, CellFlags::WIDE),
+        (Flags::WIDE_CHAR_SPACER, CellFlags::WIDE_SPACER),
+    ] {
+        if f.contains(from) {
+            flags.insert(to);
+        }
+    }
+    if f.intersects(Flags::ALL_UNDERLINES) {
+        flags.insert(CellFlags::UNDERLINE);
+    }
+    let fg = convert_color(cell.fg, &mut flags);
+    let bg = convert_color(cell.bg, &mut flags);
+    Cell {
+        ch: if f.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
+            ' '
+        } else {
+            cell.c
+        },
+        zerowidth: cell
+            .zerowidth()
+            .map(|zw| zw.iter().collect::<String>().into_boxed_str()),
+        fg,
+        bg,
+        flags,
     }
 }
 
@@ -202,9 +290,9 @@ mod tests {
     fn alt_screen_flag() {
         let mut e = engine();
         e.feed(b"\x1b[?1049h");
-        assert!(e.snapshot().alt_screen);
+        assert!(e.snapshot().modes.alt_screen);
         e.feed(b"\x1b[?1049l");
-        assert!(!e.snapshot().alt_screen);
+        assert!(!e.snapshot().modes.alt_screen);
     }
 
     #[test]
@@ -221,6 +309,56 @@ mod tests {
         let mut e = engine();
         e.feed(b"\x1b]0;nvim\x07");
         assert_eq!(e.title().as_deref(), Some("nvim"));
+    }
+
+    #[test]
+    fn colors_and_attributes() {
+        let mut e = engine();
+        e.feed(b"\x1b[1;31mR\x1b[0m\x1b[38;5;200mX\x1b[48;2;1;2;3mY\x1b[0m\x1b[7mI");
+        let s = e.snapshot();
+        let row = &s.lines[0];
+        assert_eq!(row[0].fg, Color::Indexed(1));
+        assert!(row[0].flags.contains(CellFlags::BOLD));
+        assert_eq!(row[1].fg, Color::Indexed(200));
+        assert_eq!(row[2].bg, Color::Rgb(1, 2, 3));
+        assert!(row[3].flags.contains(CellFlags::INVERSE));
+        assert_eq!(row[4], Cell::default());
+    }
+
+    #[test]
+    fn wide_chars_keep_column_alignment() {
+        let mut e = engine();
+        e.feed("日x".as_bytes());
+        let s = e.snapshot();
+        assert_eq!(s.lines[0].len(), 20);
+        assert!(s.lines[0][0].flags.contains(CellFlags::WIDE));
+        assert!(s.lines[0][1].flags.contains(CellFlags::WIDE_SPACER));
+        assert_eq!(s.lines[0][2].ch, 'x');
+    }
+
+    #[test]
+    fn modes_are_reported() {
+        let mut e = engine();
+        assert!(e.modes().cursor_visible);
+        e.feed(b"\x1b[?1h\x1b[?2004h\x1b[?25l");
+        let m = e.modes();
+        assert!(m.app_cursor && m.bracketed_paste && !m.cursor_visible);
+    }
+
+    #[test]
+    fn scrolling_the_viewport() {
+        let mut e = engine();
+        for i in 0..10 {
+            e.feed(format!("line{i}\r\n").as_bytes());
+        }
+        e.scroll(Scroll::Lines(3));
+        let s = e.snapshot();
+        assert_eq!(s.display_offset, 3);
+        assert_eq!(s.row_text(0).trim_end(), "line3");
+        assert_eq!(s.top_line_abs(), 3);
+        assert!(!s.modes.cursor_visible, "cursor row is below the viewport");
+        e.scroll(Scroll::Bottom);
+        assert_eq!(e.snapshot().display_offset, 0);
     }
 
     #[test]
