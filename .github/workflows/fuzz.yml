@@ -23,8 +23,10 @@ jobs:
           tool: cargo-fuzz
       - name: fuzz ${{ matrix.target }} (10 min)
         working-directory: fuzz
-        # rust-toolchain.toml pins stable; cargo-fuzz needs nightly.
-        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=600 -max_len=65536
+        # rust-toolchain.toml pins stable; cargo-fuzz needs nightly. The
+        # prebuilt cargo-fuzz is a musl binary and would default to a musl
+        # target, which sanitizers do not support, so name the target.
+        run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target }} -- -max_total_time=600 -max_len=65536
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
