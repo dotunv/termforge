@@ -14,3 +14,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # The toolchain action's ref is the MSRV (msrv job) or a channel;
+      # bumping it would silently raise the MSRV.
+      - dependency-name: dtolnay/rust-toolchain

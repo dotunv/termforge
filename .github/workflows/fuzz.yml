@@ -23,7 +23,8 @@ jobs:
           tool: cargo-fuzz
       - name: fuzz ${{ matrix.target }} (10 min)
         working-directory: fuzz
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=600 -max_len=65536
+        # rust-toolchain.toml pins stable; cargo-fuzz needs nightly.
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=600 -max_len=65536
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
