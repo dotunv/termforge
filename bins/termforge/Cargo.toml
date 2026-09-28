@@ -9,8 +9,16 @@ publish.workspace = true
 
 [dependencies]
 tf-ui.workspace = true
+tf-input.workspace = true
+tf-engine.workspace = true
+tf-session.workspace = true
+tf-pty.workspace = true
 gpui.workspace = true
+futures.workspace = true
 anyhow.workspace = true
+directories.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

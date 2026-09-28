@@ -6,8 +6,10 @@
 //! chrome over those ranges. See `docs/adr/0004-virtual-blocks.md`.
 
 mod blocks;
+mod live;
 
 pub use blocks::{Block, BlockIndex, BlockState};
+pub use live::{LiveSession, SpawnOptions, Waker};
 
 use tf_engine::TerminalEngine;
 use tf_tap::{Located, Tap, TapEvent};
@@ -34,6 +36,7 @@ pub struct Processor<E: TerminalEngine> {
     blocks: BlockIndex,
     cwd: Option<String>,
     scratch: Vec<Located>,
+    history: usize,
 }
 
 impl<E: TerminalEngine> std::fmt::Debug for Processor<E> {
@@ -53,6 +56,7 @@ impl<E: TerminalEngine> Processor<E> {
             blocks: BlockIndex::default(),
             cwd: None,
             scratch: Vec::new(),
+            history: 0,
         }
     }
 
@@ -67,12 +71,32 @@ impl<E: TerminalEngine> Processor<E> {
         self.tap.feed(chunk, &mut self.scratch);
         let mut start = 0;
         for located in std::mem::take(&mut self.scratch) {
-            self.engine.feed(&chunk[start..located.offset]);
+            self.feed_engine(&chunk[start..located.offset]);
             start = located.offset;
             self.apply(located.event, events);
         }
-        self.engine.feed(&chunk[start..]);
+        self.feed_engine(&chunk[start..]);
         self.engine.take_replies()
+    }
+
+    fn feed_engine(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.engine.feed(bytes);
+        // The alternate screen has its own (empty) history; anchors refer to
+        // the primary screen, so ignore history changes while it is active.
+        if self.engine.modes().alt_screen {
+            return;
+        }
+        // Keep block anchors valid when scrollback is cleared (`clear`,
+        // `ESC [3J`). Lines trimmed at the scrollback cap are not yet
+        // detected; see docs/adr/0004-virtual-blocks.md.
+        let history = self.engine.history_size();
+        if history < self.history {
+            self.blocks.remove_top_lines(self.history - history);
+        }
+        self.history = history;
     }
 
     fn apply(&mut self, event: TapEvent, events: &mut Vec<SessionEvent>) {

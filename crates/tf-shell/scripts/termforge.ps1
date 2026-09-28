@@ -27,14 +27,21 @@ function global:prompt {
     }
     $out += "$e]133;A$a"
 
+    __TfWrapReadLine
     $userPrompt = & $global:__TfOriginalPrompt
     $global:LASTEXITCODE = $native
     return "$out$userPrompt$e]133;B$a"
 }
 
 # Mark command start after the line is read, without replacing key handlers.
-if (Get-Command PSConsoleHostReadLine -ErrorAction SilentlyContinue) {
-    $global:__TfOriginalReadLine = $function:PSConsoleHostReadLine
+# PSReadLine may not be loaded yet when this script runs (for example under
+# -Command), so wrapping is retried from the prompt until it succeeds.
+function global:__TfWrapReadLine {
+    if ($global:__TfReadLineWrapped) { return }
+    $original = Get-Command PSConsoleHostReadLine -CommandType Function -ErrorAction SilentlyContinue
+    if (-not $original) { return }
+    $global:__TfOriginalReadLine = $original.ScriptBlock
+    $global:__TfReadLineWrapped = $true
     function global:PSConsoleHostReadLine {
         $line = & $global:__TfOriginalReadLine
         $global:__TfCommandRunning = $true
@@ -42,3 +49,4 @@ if (Get-Command PSConsoleHostReadLine -ErrorAction SilentlyContinue) {
         return $line
     }
 }
+__TfWrapReadLine
