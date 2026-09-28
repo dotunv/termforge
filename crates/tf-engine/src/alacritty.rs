@@ -8,7 +8,10 @@ use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::vte::ansi::{Color as AColor, NamedColor, Processor};
 use alacritty_terminal::Term;
 
-use crate::{Cell, CellFlags, Color, Cursor, GridSize, Modes, Scroll, Snapshot, TerminalEngine};
+use crate::{
+    Cell, CellFlags, Color, Cursor, GridSize, Modes, MouseTracking, Scroll, Snapshot,
+    TerminalEngine,
+};
 
 const DEFAULT_SCROLLBACK: usize = 10_000;
 
@@ -160,7 +163,37 @@ impl TerminalEngine for AlacrittyEngine {
             bracketed_paste: m.contains(TermMode::BRACKETED_PASTE),
             alt_screen: m.contains(TermMode::ALT_SCREEN),
             cursor_visible: m.contains(TermMode::SHOW_CURSOR),
+            mouse: if m.contains(TermMode::MOUSE_MOTION) {
+                MouseTracking::Motion
+            } else if m.contains(TermMode::MOUSE_DRAG) {
+                MouseTracking::Drag
+            } else if m.contains(TermMode::MOUSE_REPORT_CLICK) {
+                MouseTracking::Click
+            } else {
+                MouseTracking::Off
+            },
+            sgr_mouse: m.contains(TermMode::SGR_MOUSE),
+            focus_events: m.contains(TermMode::FOCUS_IN_OUT),
+            alternate_scroll: m.contains(TermMode::ALTERNATE_SCROLL),
         }
+    }
+
+    fn line(&self, abs: usize) -> Option<Vec<Cell>> {
+        let grid = self.term.grid();
+        let history = grid.history_size();
+        if abs >= history + grid.screen_lines() {
+            return None;
+        }
+        let row = &grid[Line(abs as i32 - history as i32)];
+        Some(
+            (0..grid.columns())
+                .map(|c| convert_cell(&row[Column(c)]))
+                .collect(),
+        )
+    }
+
+    fn display_offset(&self) -> usize {
+        self.term.grid().display_offset()
     }
 
     fn scroll(&mut self, scroll: Scroll) {
@@ -218,6 +251,7 @@ fn convert_cell(cell: &ACell) -> Cell {
         (Flags::HIDDEN, CellFlags::HIDDEN),
         (Flags::WIDE_CHAR, CellFlags::WIDE),
         (Flags::WIDE_CHAR_SPACER, CellFlags::WIDE_SPACER),
+        (Flags::WRAPLINE, CellFlags::WRAP),
     ] {
         if f.contains(from) {
             flags.insert(to);
@@ -240,6 +274,7 @@ fn convert_cell(cell: &ACell) -> Cell {
         fg,
         bg,
         flags,
+        link: cell.hyperlink().map(|h| std::sync::Arc::from(h.uri())),
     }
 }
 
@@ -359,6 +394,48 @@ mod tests {
         assert!(!s.modes.cursor_visible, "cursor row is below the viewport");
         e.scroll(Scroll::Bottom);
         assert_eq!(e.snapshot().display_offset, 0);
+    }
+
+    #[test]
+    fn mouse_modes_are_reported() {
+        let mut e = engine();
+        assert_eq!(e.modes().mouse, MouseTracking::Off);
+        e.feed(b"\x1b[?1002h\x1b[?1006h\x1b[?1004h");
+        let m = e.modes();
+        assert_eq!(m.mouse, MouseTracking::Drag);
+        assert!(m.sgr_mouse && m.focus_events);
+        e.feed(b"\x1b[?1003h");
+        assert_eq!(e.modes().mouse, MouseTracking::Motion);
+    }
+
+    #[test]
+    fn lines_are_addressable_by_absolute_index() {
+        let mut e = engine();
+        for i in 0..8 {
+            e.feed(format!("line{i}\r\n").as_bytes());
+        }
+        assert_eq!(e.total_lines(), 4 + 5);
+        let text = |cells: Vec<Cell>| cells.iter().map(|c| c.ch).collect::<String>();
+        assert_eq!(text(e.line(0).unwrap()).trim_end(), "line0");
+        assert_eq!(text(e.line(7).unwrap()).trim_end(), "line7");
+        assert!(e.line(9).is_none());
+    }
+
+    #[test]
+    fn soft_wrap_is_marked() {
+        let mut e = engine();
+        e.feed(&[b'x'; 25]);
+        let l = e.line(e.history_size()).unwrap();
+        assert!(l[19].flags.contains(CellFlags::WRAP));
+    }
+
+    #[test]
+    fn osc8_hyperlinks_are_kept() {
+        let mut e = engine();
+        e.feed(b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\ no");
+        let s = e.snapshot();
+        assert_eq!(s.lines[0][0].link.as_deref(), Some("https://example.com"));
+        assert_eq!(s.lines[0][5].link, None);
     }
 
     #[test]

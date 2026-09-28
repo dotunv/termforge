@@ -5,6 +5,10 @@
 //! [`Mods`], so the encoding rules are unit-tested here rather than buried
 //! in view code.
 
+mod mouse;
+
+pub use mouse::{encode_focus, encode_mouse, MouseAction, MouseButton, Tracking};
+
 /// A logical key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Key {

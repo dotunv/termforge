@@ -2,7 +2,7 @@
 
 A Windows-first, GPU-rendered terminal workspace where every repo is a workspace: shells, services, agents and history, organised per project.
 
-> Status: Phase 1 (terminal core). One GPU-rendered terminal per window with shell integration and command blocks. Not yet a daily driver: no tabs, splits, selection or `forged` IPC. The previous Go/Electron and native prototypes are preserved under the `archive/go-electron` and `archive/native-v0` tags.
+> Status: Phase 1 (terminal core). One GPU-rendered terminal per window with shell integration and command blocks. Selection, search, links and mouse reporting work. Not yet a daily driver: no tabs, splits, settings or `forged` IPC. The previous Go/Electron and native prototypes are preserved under the `archive/go-electron` and `archive/native-v0` tags.
 
 ## Architecture
 
@@ -59,9 +59,14 @@ Linux builds of the app need `libxkbcommon-dev libxcb1-dev libfontconfig-dev lib
 
 | Action | Shortcut |
 |---|---|
-| Paste | `Ctrl+Shift+V`, `Shift+Insert`, right-click |
-| Copy visible screen | `Ctrl+Shift+C` (selection comes in Phase 2) |
-| Scroll back | mouse wheel, `Shift+PageUp` / `Shift+PageDown` |
+| Select | drag; double-click for a word, triple-click for a line; `Shift`+click extends |
+| Copy selection | `Ctrl+C` (only when something is selected), `Ctrl+Shift+C`, right-click |
+| Paste | `Ctrl+Shift+V`, `Shift+Insert`, right-click with no selection |
+| Select all | `Ctrl+Shift+A` |
+| Find | `Ctrl+Shift+F`; `Enter`/`Up` older, `Shift+Enter`/`Down` newer, `Alt+C` match case, `Esc` close |
+| Open link | `Ctrl`+click (http/https only) |
+| Select in apps that use the mouse | hold `Shift` |
+| Scroll back | mouse wheel, `Shift+PageUp` / `Shift+PageDown`, `Ctrl+Shift+Home` / `End` |
 | Font size | `Ctrl+=`, `Ctrl+-`, `Ctrl+0` |
 | Restart after exit | `Enter` |
 
