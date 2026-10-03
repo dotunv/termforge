@@ -9,8 +9,8 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-sha2 = "0.10"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+sha2 = "0.11"
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true
