@@ -42,13 +42,27 @@ const POSIX: Dialect = Dialect {
     three: "sh -c 'exit 3'",
 };
 
+/// PowerShell on Windows.
+///
+/// `cmd /c exit N`, not `exit N`: at an interactive PowerShell prompt `exit`
+/// terminates the shell, so the block never gets its D mark and the harness
+/// would spin until it timed out.
+#[cfg(windows)]
 const PWSH: Dialect = Dialect {
     ok: "Write-Output tf-ok",
-    // `cmd /c exit N`, not `exit N`: at an interactive PowerShell prompt
-    // `exit` terminates the shell, so the block never gets its D mark and the
-    // harness would spin until it timed out.
     one: "cmd /c exit 1",
     three: "cmd /c exit 3",
+};
+
+/// PowerShell elsewhere. `cmd.exe` does not exist, and a command that is not
+/// found leaves `$?` false and `$LASTEXITCODE` unset, so the block reports 1
+/// whatever we asked for. Any native executable will do; `sh` is the one thing
+/// guaranteed present on a Linux CI runner.
+#[cfg(not(windows))]
+const PWSH: Dialect = Dialect {
+    ok: "Write-Output tf-ok",
+    one: "/bin/sh -c 'exit 1'",
+    three: "/bin/sh -c 'exit 3'",
 };
 
 fn dialect(kind: ShellKind) -> Dialect {
