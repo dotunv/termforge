@@ -171,6 +171,12 @@ impl RealShell {
     }
 }
 
+/// How long a run may go without completing a command before it is called
+/// stalled. Well above the slowest per-command time seen in CI (PowerShell
+/// prompts are the slow case) but far below the overall budget, so a stall
+/// reports in seconds rather than after the whole timeout.
+const STALL_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Progress on a driven run, for a readable timeout message.
 pub fn diagnostics(s: &RealShell, sent: usize, total: usize) -> String {
     format!(
@@ -199,6 +205,8 @@ pub fn drive(
 ) -> Result<Duration, String> {
     let started = Instant::now();
     let mut sent = 0usize;
+    let mut last_reported = usize::MAX;
+    let mut last_progress = Instant::now();
     while sent < count {
         if let Some(status) = shell.exit_status() {
             // A command that ends the shell would otherwise look like a hang.
@@ -209,8 +217,18 @@ pub fn drive(
                 shell.screen()
             ));
         }
-        if Instant::now() >= started + budget {
+        let now = Instant::now();
+        if now >= started + budget {
             return Err(diagnostics(shell, sent, count));
+        }
+        // A stall and "slow" look identical until you wait out the whole
+        // budget, so give up early and say where it stopped.
+        if now.duration_since(last_progress) > STALL_TIMEOUT {
+            return Err(format!(
+                "no command completed in {:?} (stalled at {sent}/{count})\n{}",
+                STALL_TIMEOUT,
+                diagnostics(shell, sent, count)
+            ));
         }
         // `finished()` is monotonic, so this is exact even after trimming.
         if shell.finished() > sent {
@@ -222,6 +240,7 @@ pub fn drive(
             })?;
             check(&b, sent).map_err(|e| format!("{e}\n--- screen ---\n{}", shell.screen()))?;
             sent += 1;
+            last_progress = Instant::now();
             continue;
         }
         // Only type once the previous command has been accounted for and the
@@ -237,6 +256,16 @@ pub fn drive(
             }
         } else {
             let _ = shell.wait(Duration::from_millis(50));
+        }
+        // Long runs are otherwise opaque: a stall at 9,000 commands looks the
+        // same as a slow one until you wait out the whole budget.
+        if count >= 2_000 && sent % 1_000 == 0 && sent != last_reported {
+            last_reported = sent;
+            eprintln!(
+                "  {}: {sent}/{count} at {:.1}s",
+                shell.profile.name,
+                started.elapsed().as_secs_f64()
+            );
         }
     }
     Ok(started.elapsed())
