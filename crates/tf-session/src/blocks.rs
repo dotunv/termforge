@@ -29,11 +29,52 @@ pub struct Block {
 #[derive(Debug, Default)]
 pub struct BlockIndex {
     blocks: Vec<Block>,
+    /// Lifetime count of commands that have finished. Unlike `blocks.len()`
+    /// this never decreases when the scrollback trims old blocks, so it is
+    /// what a long-running consumer should compare against to know how much
+    /// work has gone past.
+    finished: usize,
 }
 
 impl BlockIndex {
     pub fn len(&self) -> usize {
         self.blocks.len()
+    }
+
+    /// Total commands that have finished since the session started, including
+    /// those whose blocks have since been trimmed from the scrollback.
+    pub fn finished_commands(&self) -> usize {
+        self.finished
+    }
+
+    /// The most recent command block that has finished, if any. Cheap: the
+    /// newest blocks are at the end. Returns `None` if the block has since
+    /// been trimmed, so callers that must not miss a block should compare
+    /// against [`BlockIndex::finished`] instead.
+    pub fn last_command(&self) -> Option<&Block> {
+        self.blocks
+            .iter()
+            .rev()
+            .find(|b| b.output_line.is_some() && b.state == BlockState::Finished)
+    }
+
+    /// A finished command block by its position in [`BlockIndex::iter`].
+    ///
+    /// Positions shift when the scrollback trims, so this is only meaningful
+    /// for the recent tail of the session.
+    pub fn command_at(&self, i: usize) -> Option<&Block> {
+        self.blocks
+            .iter()
+            .filter(|b| b.output_line.is_some() && b.state == BlockState::Finished)
+            .nth(i)
+    }
+
+    /// Number of command blocks currently retained that have finished.
+    pub fn finished(&self) -> usize {
+        self.blocks
+            .iter()
+            .filter(|b| b.output_line.is_some() && b.state == BlockState::Finished)
+            .count()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -112,6 +153,7 @@ impl BlockIndex {
                 b.exit_code = exit_code;
                 b.end_line = Some(line);
                 b.state = BlockState::Finished;
+                self.finished += 1;
                 Some((idx, exit_code))
             }
         }
@@ -226,6 +268,44 @@ mod tests {
         idx.apply(Mark::PromptStart, 0, None);
         assert_eq!(idx.len(), 1);
         assert_eq!(idx.commands().count(), 0);
+    }
+
+    #[test]
+    fn finished_count_survives_pruning() {
+        let mut idx = BlockIndex::default();
+        for start in [0, 4, 8] {
+            idx.apply(Mark::PromptStart, start, None);
+            idx.apply(Mark::CommandExecuted, start + 1, None);
+            idx.apply(
+                Mark::CommandFinished { exit_code: Some(0) },
+                start + 3,
+                None,
+            );
+        }
+        assert_eq!(idx.finished_commands(), 3);
+        assert_eq!(idx.last_command().unwrap().prompt_line, 8);
+        // Scrollback trims the first two blocks; the counter must not go back.
+        idx.remove_top_lines(8);
+        assert_eq!(idx.len(), 1);
+        assert_eq!(
+            idx.finished_commands(),
+            3,
+            "pruning must not rewind the count"
+        );
+        assert_eq!(idx.last_command().unwrap().prompt_line, 0);
+    }
+
+    #[test]
+    fn last_command_ignores_empty_prompts() {
+        let mut idx = BlockIndex::default();
+        idx.apply(Mark::PromptStart, 0, None);
+        idx.apply(Mark::InputStart, 0, None);
+        idx.apply(Mark::CommandExecuted, 1, None);
+        idx.apply(Mark::CommandFinished { exit_code: Some(0) }, 2, None);
+        // A fresh prompt with nothing typed is not a command.
+        idx.apply(Mark::PromptStart, 3, None);
+        idx.apply(Mark::InputStart, 3, None);
+        assert_eq!(idx.last_command().unwrap().prompt_line, 0);
     }
 
     #[test]
