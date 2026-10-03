@@ -23,6 +23,21 @@ pub struct ShellProfile {
 }
 
 impl ShellProfile {
+    /// Whether `tf-shell` can inject OSC 133 integration into this shell.
+    ///
+    /// Without it there are no command blocks, no exit status and no cwd
+    /// tracking — the terminal still works, but it is a much poorer thing.
+    /// Callers should surface this rather than let the user discover it by
+    /// noticing that blocks never appear.
+    pub fn supports_integration(&self) -> bool {
+        matches!(
+            self.kind,
+            ShellKind::Pwsh | ShellKind::WindowsPowerShell | ShellKind::Bash | ShellKind::GitBash
+        )
+    }
+}
+
+impl ShellProfile {
     fn new(name: &str, kind: ShellKind, program: PathBuf, args: &[&str]) -> Self {
         Self {
             name: name.to_owned(),
@@ -92,7 +107,12 @@ fn platform(out: &mut Vec<ShellProfile>) {
         }
     }
     if let Some(p) = which("wsl.exe") {
-        out.push(ShellProfile::new("WSL", ShellKind::Wsl, p, &[]));
+        // `--cd ~` rather than inheriting the Windows cwd, which wsl.exe
+        // would otherwise try to translate and sometimes fail outright.
+        // The integration script is passed by *path*: wsl.exe copies the
+        // working directory into the distro, but a Windows path is not
+        // readable there. tf-shell rewrites this to a /mnt path at spawn.
+        out.push(ShellProfile::new("WSL", ShellKind::Wsl, p, &["--cd", "~"]));
     }
     if let Some(p) = which("cmd.exe") {
         out.push(ShellProfile::new("Command Prompt", ShellKind::Cmd, p, &[]));
@@ -139,6 +159,59 @@ fn which(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integration_support_matches_what_tf_shell_can_inject() {
+        // Kept in step with `tf_shell::inject` so the UI can warn before the
+        // user discovers missing blocks the hard way.
+        let expected = |k: ShellKind| {
+            matches!(
+                k,
+                ShellKind::Pwsh
+                    | ShellKind::WindowsPowerShell
+                    | ShellKind::Bash
+                    | ShellKind::GitBash
+            )
+        };
+        for kind in [
+            ShellKind::Pwsh,
+            ShellKind::WindowsPowerShell,
+            ShellKind::Cmd,
+            ShellKind::GitBash,
+            ShellKind::Wsl,
+            ShellKind::Bash,
+            ShellKind::Zsh,
+            ShellKind::Fish,
+            ShellKind::Other,
+        ] {
+            let p = ShellProfile {
+                name: "x".into(),
+                kind,
+                program: PathBuf::from("x"),
+                args: vec![],
+            };
+            assert_eq!(
+                p.supports_integration(),
+                expected(kind),
+                "{kind:?} disagrees with tf-shell"
+            );
+        }
+    }
+
+    #[test]
+    fn wsl_starts_in_its_own_home() {
+        // Only meaningful on Windows, where WSL is discovered.
+        let Some(p) = discover_shells()
+            .into_iter()
+            .find(|s| s.kind == ShellKind::Wsl)
+        else {
+            return;
+        };
+        assert!(
+            p.args.windows(2).any(|w| w == ["--cd", "~"]),
+            "WSL should not inherit a Windows cwd: {p:?}"
+        );
+    }
 
     #[test]
     fn discovery_does_not_panic_and_has_no_duplicates() {

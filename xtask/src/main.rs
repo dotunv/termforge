@@ -4,6 +4,10 @@
 //!   place `conpty.dll` + `OpenConsole.exe` in `assets/conpty/`, verified by
 //!   SHA-256.
 //! - `ci`: run the same checks CI runs (fmt, clippy, tests).
+//! - `spike-a [--commands N] [--shells a,b]`: the long ConPTY ordering
+//!   harness from the build plan. Too slow for `ci`, so it is opt-in.
+//! - `latency`: keystroke-to-visible-output probe against a real shell,
+//!   enforcing the plan's p50 budget. Release only.
 #![allow(clippy::print_stdout)]
 
 use std::path::{Path, PathBuf};
@@ -26,8 +30,30 @@ fn main() -> Result<()> {
             conpty(arch)
         }
         Some("ci") => ci(),
+        Some("latency") => latency(),
+        Some("spike-a") => {
+            // Passed through to the test rather than parsed here, so the
+            // harness keeps its own defaults when run directly.
+            let flag = |name: &str| -> Option<String> {
+                let i = args.iter().position(|a| a == name)?;
+                args.get(i + 1).cloned()
+            };
+            for (name, var) in [
+                ("--commands", "TF_SPIKE_COMMANDS"),
+                ("--shells", "TF_SPIKE_SHELLS"),
+            ] {
+                if let Some(v) = flag(name) {
+                    // Single-threaded before any threads are spawned.
+                    std::env::set_var(var, v);
+                }
+            }
+            spike_a()
+        }
         _ => {
-            println!("usage: cargo xtask <conpty [--arch x64|arm64|x86] | ci>");
+            println!(
+                "usage: cargo xtask <conpty [--arch x64|arm64|x86] | ci | \
+                 spike-a [--commands N] [--shells list] | latency>"
+            );
             Ok(())
         }
     }
@@ -113,6 +139,43 @@ fn ci() -> Result<()> {
     ])?;
     step(&["test", "--locked"])?;
     Ok(())
+}
+
+/// Keystroke-to-visible-output latency probe. Always release: the budget is
+/// meaningless in a debug build of this dependency graph.
+fn latency() -> Result<()> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    println!("\n==> cargo test -p tf-session --test latency --release -- --ignored --nocapture");
+    run(Command::new(&cargo).current_dir(root()).args([
+        "test",
+        "-p",
+        "tf-session",
+        "--test",
+        "latency",
+        "--release",
+        "--locked",
+        "--",
+        "--ignored",
+        "--nocapture",
+    ]))
+}
+
+/// The Spike A ordering harness: real shell, real PTY, real integration
+/// script, many commands. Deliberately not part of `ci`; see the test's docs.
+fn spike_a() -> Result<()> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    println!("\n==> cargo test -p tf-session --test spike_a -- --ignored --nocapture");
+    run(Command::new(&cargo).current_dir(root()).args([
+        "test",
+        "-p",
+        "tf-session",
+        "--test",
+        "spike_a",
+        "--locked",
+        "--",
+        "--ignored",
+        "--nocapture",
+    ]))
 }
 
 fn run(cmd: &mut Command) -> Result<()> {

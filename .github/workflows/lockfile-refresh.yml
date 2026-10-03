@@ -1,0 +1,106 @@
+name: Lockfile refresh
+
+# `deny.toml` sets `yanked = "deny"`, and a yanked transitive crate breaks
+# `cargo-deny` without any change to this repository — `yoke-derive 0.8.3` was
+# pulled upstream and turned main red until someone noticed during a merge.
+#
+# Dependabot only opens PRs for manifest requirements, so it never proposes
+# the plain `Cargo.lock` bump that fixes a newly yanked transitive dependency.
+# This workflow opens that PR on a schedule instead.
+#
+# It deliberately does not bump anything else: no `cargo update` (which would
+# jump many crates at once), no manifest edits, no MSRV changes. Only the
+# specific crate that cargo-deny reports as yanked.
+
+on:
+  schedule:
+    # Tuesday 05:23 UTC. Off the hour with the other scheduled workflow.
+    - cron: "23 5 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: lockfile-refresh
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  unyank:
+    name: un-yank yanked crates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lockfile-refresh
+
+      - name: Check for yanked dependencies
+        id: deny
+        continue-on-error: true
+        run: cargo deny check advisories
+
+      - name: Collect yanked crate names
+        id: yanked
+        if: steps.deny.outcome == 'failure'
+        # `error[yanked]: detected yanked crate (try `cargo update -p NAME`)`
+        run: |
+          set -euo pipefail
+          log=$(mktemp)
+          cargo deny check advisories >"$log" 2>&1 || true
+          names=$(grep -oE 'cargo update -p [A-Za-z0-9_-]+' "$log" \
+            | awk '{print $4}' | sort -u || true)
+          if [ -z "$names" ]; then
+            echo "cargo-deny failed but no yanked crate was named; not guessing."
+            cat "$log"
+            exit 1
+          fi
+          echo "crates=$names" >>"$GITHUB_OUTPUT"
+          echo "yanked: $names"
+
+      - name: Bump the yanked crates only
+        if: steps.yanked.outputs.crates != ''
+        run: |
+          set -euo pipefail
+          for crate in ${{ steps.yanked.outputs.crates }}; do
+            echo "cargo update -p $crate"
+            cargo update -p "$crate"
+          done
+          if git diff --quiet Cargo.lock; then
+            echo "yanked crate resolved to the same version; nothing to do."
+            exit 0
+          fi
+
+      - name: Verify the result passes every policy check
+        if: steps.yanked.outputs.crates != ''
+        run: |
+          cargo deny check advisories bans licenses sources
+          cargo xtask ci
+
+      - name: Open a pull request
+        id: pr
+        if: steps.yanked.outputs.crates != ''
+        env:
+          CRATES: ${{ steps.yanked.outputs.crates }}
+        run: |
+          set -euo pipefail
+          branch="chore/un-yank-$(echo "$CRATES" | tr ' ' '-' | tr -cd '[:alnum:]-')"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git commit -am "chore(deps): un-yank $CRATES"
+          git push -u origin "$branch"
+          body=$(printf '%s\n' \
+            'Automated: `deny.toml` sets `yanked = "deny"` and a transitive crate was' \
+            'pulled upstream, which fails `cargo-deny` without any change here.' \
+            '' \
+            "Crates bumped: \`$CRATES\`. Patch versions only; no manifest or MSRV changes." \
+            '' 'Opened by `.github/workflows/lockfile-refresh.yml`.')
+          gh pr create --title "chore(deps): un-yank $CRATES" --body "$body" \
+            --label dependencies || \
+          gh pr create --title "chore(deps): un-yank $CRATES" --body "$body"
