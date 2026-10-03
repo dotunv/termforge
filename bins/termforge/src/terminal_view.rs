@@ -1,52 +1,53 @@
-//! The terminal view: paints a session's grid with GPUI and forwards input.
+//! The terminal view: owns one session and turns GPUI input into terminal
+//! input, selections and searches.
 //!
-//! Everything terminal-specific (emulation, key encoding, block tracking,
-//! colours) lives in framework-free crates; this file only maps those
-//! results onto GPUI primitives.
+//! Everything terminal-specific (emulation, key and mouse encoding, text
+//! selection, search, block tracking, colours) lives in framework-free
+//! crates; this file only wires those onto GPUI events. Painting is in
+//! `paint.rs`.
 
 use std::sync::Arc;
 
 use futures::StreamExt;
 use gpui::{
-    canvas, div, fill, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context,
-    FocusHandle, Font, FontStyle, FontWeight, Hsla, KeyDownEvent, MouseButton, Pixels,
-    ScrollWheelEvent, SharedString, StrikethroughStyle, Task, TextRun, UnderlineStyle, Window,
+    canvas, div, prelude::*, px, App, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
+    Entity, FocusHandle, Hitbox, HitboxBehavior, KeyDownEvent, Modifiers, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollWheelEvent, SharedString,
+    Subscription, Task, Window,
 };
-use tf_engine::{Cell, CellFlags, Color, GridSize, Scroll, Snapshot, TerminalEngine};
-use tf_input::{encode_key, encode_paste, InputModes, Key, Mods};
-use tf_session::{BlockState, LiveSession, SessionEvent, SpawnOptions};
+use tf_engine::text::{find_all, is_openable, link_at, Link, Match};
+use tf_engine::{
+    GridSize, MouseTracking, Point, Scroll, Selection, SelectionKind, Snapshot, TerminalEngine,
+};
+use tf_input::{
+    encode_focus, encode_key, encode_mouse, encode_paste, InputModes, Key, Mods, MouseAction,
+    MouseButton as TMouse, Tracking,
+};
+use tf_session::{LiveSession, SessionEvent, SpawnOptions};
 use tf_ui::{tokens, Rgb, Theme};
 
 use crate::fonts::MonoFont;
+use crate::paint::{hsla, paint_grid, BlockMark, Metrics, Overlay, PaintArgs};
 
-const PAD_X: f32 = 14.0;
-const PAD_Y: f32 = 8.0;
-const GUTTER_X: f32 = 5.0;
-const GUTTER_W: f32 = 2.0;
+/// Search results beyond this are not collected, so a one-letter query in
+/// a full scrollback cannot stall the UI.
+const MAX_MATCHES: usize = 5_000;
 
-pub fn hsla(c: Rgb) -> Hsla {
-    gpui::rgb(u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)).into()
+#[derive(Debug, Default)]
+struct SearchState {
+    query: String,
+    case_sensitive: bool,
+    matches: Vec<Match>,
+    current: Option<usize>,
+    /// New output arrived since `matches` was computed.
+    stale: bool,
 }
 
-fn with_alpha(mut c: Hsla, a: f32) -> Hsla {
-    c.a = a;
-    c
-}
-
-/// Cell metrics for the current font, measured by the platform text system.
+/// A mouse press forwarded to the program (mouse tracking on).
 #[derive(Debug, Clone, Copy)]
-struct Metrics {
-    cell_w: Pixels,
-    line_h: Pixels,
-}
-
-/// Per-block summary copied out of the session for painting.
-#[derive(Debug, Clone, Copy)]
-struct BlockMark {
-    start: usize,
-    end: Option<usize>,
-    state: BlockState,
-    exit_code: Option<i32>,
+struct Reported {
+    button: TMouse,
+    last: (u16, u16),
 }
 
 pub struct TerminalView {
@@ -62,7 +63,20 @@ pub struct TerminalView {
     last_exit: Option<i32>,
     commands: usize,
     error: Option<String>,
+
+    selection: Option<Selection>,
+    selecting: bool,
+    reported: Option<Reported>,
+    last_motion: Option<(u16, u16)>,
+    hover_link: Option<Link>,
+    search: Option<SearchState>,
+    /// Scrollback length at the last output, to notice clears.
+    history: usize,
+    /// Canvas bounds from the last paint, for mouse hit-testing.
+    grid_bounds: Bounds<Pixels>,
+
     _pump: Option<Task<()>>,
+    _focus_subs: Vec<Subscription>,
 }
 
 impl TerminalView {
@@ -75,6 +89,12 @@ impl TerminalView {
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus);
+        let subs = vec![
+            cx.on_focus_in(&focus, window, |this, _, cx| this.focus_changed(true, cx)),
+            cx.on_focus_out(&focus, window, |this, _, _, cx| {
+                this.focus_changed(false, cx);
+            }),
+        ];
         let mut view = Self {
             session: None,
             spawn,
@@ -88,7 +108,16 @@ impl TerminalView {
             last_exit: None,
             commands: 0,
             error: None,
+            selection: None,
+            selecting: false,
+            reported: None,
+            last_motion: None,
+            hover_link: None,
+            search: None,
+            history: 0,
+            grid_bounds: Bounds::default(),
             _pump: None,
+            _focus_subs: subs,
         };
         view.start(cx);
         view
@@ -112,6 +141,9 @@ impl TerminalView {
                 self.session = None;
             }
         }
+        self.selection = None;
+        self.search = None;
+        self.history = 0;
         self._pump = Some(cx.spawn(async move |this, cx| {
             while rx.next().await.is_some() {
                 // Coalesce bursts: one repaint per batch of wakes.
@@ -137,7 +169,22 @@ impl TerminalView {
                     }
                 }
             }
-            self.title = session.with(|p| p.engine().title());
+            let (title, history) =
+                session.with(|p| (p.engine().title(), p.engine().history_size()));
+            self.title = title;
+            // Scrollback shrank (`clear`): absolute positions now point at
+            // different content, so drop anything anchored to them.
+            if history < self.history {
+                self.selection = None;
+                if let Some(s) = &mut self.search {
+                    s.matches.clear();
+                    s.current = None;
+                }
+            }
+            self.history = history;
+            if let Some(s) = &mut self.search {
+                s.stale = true;
+            }
         }
         cx.notify();
     }
@@ -164,22 +211,33 @@ impl TerminalView {
         }
     }
 
-    fn input_modes(&self) -> InputModes {
+    fn modes(&self) -> tf_engine::Modes {
         self.session
             .as_ref()
-            .map(|s| {
-                let m = s.with(|p| p.engine().modes());
-                InputModes {
-                    app_cursor: m.app_cursor,
-                    bracketed_paste: m.bracketed_paste,
-                }
-            })
+            .map(|s| s.with(|p| p.engine().modes()))
             .unwrap_or_default()
+    }
+
+    fn input_modes(&self) -> InputModes {
+        let m = self.modes();
+        InputModes {
+            app_cursor: m.app_cursor,
+            bracketed_paste: m.bracketed_paste,
+        }
     }
 
     fn exited(&self) -> Option<Option<u32>> {
         self.session.as_ref().and_then(|s| s.exit_status())
     }
+
+    fn focus_changed(&mut self, focused: bool, cx: &mut Context<'_, Self>) {
+        if self.modes().focus_events {
+            self.write(encode_focus(focused));
+        }
+        cx.notify();
+    }
+
+    // ---- keyboard -------------------------------------------------------
 
     fn key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<'_, Self>) {
         let ks = &ev.keystroke;
@@ -190,41 +248,66 @@ impl TerminalView {
             shift: m.shift,
         };
         let key = ks.key.as_str();
+        let ctrl_shift = m.control && m.shift && !m.alt;
 
-        // App shortcuts first (Ctrl+Shift+... never collides with shells).
-        if m.control && m.shift && key.eq_ignore_ascii_case("v") || (m.shift && key == "insert") {
+        if self.search.is_some() && self.search_key(ev, cx) {
+            cx.stop_propagation();
+            return;
+        }
+
+        // App shortcuts first. Ctrl+Shift chords never collide with shells.
+        if ctrl_shift && key.eq_ignore_ascii_case("f") {
+            self.open_search(cx);
+        } else if (ctrl_shift && key.eq_ignore_ascii_case("v")) || (m.shift && key == "insert") {
             self.paste(cx);
-            cx.stop_propagation();
-            return;
-        }
-        if m.control && m.shift && key.eq_ignore_ascii_case("c") {
-            self.copy_screen(cx);
-            cx.stop_propagation();
-            return;
-        }
-        if m.control && !m.alt && !m.shift && matches!(key, "=" | "+" | "-" | "0") {
+        } else if ctrl_shift && key.eq_ignore_ascii_case("c") {
+            self.copy_selection(cx);
+        } else if ctrl_shift && key.eq_ignore_ascii_case("a") {
+            self.select_all(cx);
+        } else if m.control && !m.shift && !m.alt && key == "c" && self.has_selection() {
+            // Windows Terminal convention: Ctrl+C copies when something is
+            // selected, and is ^C otherwise.
+            self.copy_selection(cx);
+            self.clear_selection(cx);
+        } else if key == "escape" && self.has_selection() {
+            self.clear_selection(cx);
+        } else if m.control && !m.alt && !m.shift && matches!(key, "=" | "+" | "-" | "0") {
             self.font_size = match key {
                 "-" => (self.font_size - 1.0).max(8.0),
                 "0" => 14.0,
                 _ => (self.font_size + 1.0).min(32.0),
             };
             cx.notify();
-            cx.stop_propagation();
+        } else if m.shift && !m.control && matches!(key, "pageup" | "pagedown") {
+            let s = if key == "pageup" {
+                Scroll::PageUp
+            } else {
+                Scroll::PageDown
+            };
+            self.scroll(s, cx);
+        } else if m.shift && m.control && matches!(key, "home" | "end") {
+            let s = if key == "home" {
+                Scroll::Top
+            } else {
+                Scroll::Bottom
+            };
+            self.scroll(s, cx);
+        } else {
+            self.send_key(ev, mods, window, cx);
             return;
         }
-        if m.shift && !m.control && matches!(key, "pageup" | "pagedown") {
-            self.scroll(
-                if key == "pageup" {
-                    Scroll::PageUp
-                } else {
-                    Scroll::PageDown
-                },
-                cx,
-            );
-            cx.stop_propagation();
-            return;
-        }
+        cx.stop_propagation();
+    }
 
+    fn send_key(
+        &mut self,
+        ev: &KeyDownEvent,
+        mods: Mods,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let ks = &ev.keystroke;
+        let key = ks.key.as_str();
         if let Some(Some(_)) = self.exited() {
             if key == "enter" {
                 self.start(cx);
@@ -234,17 +317,17 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
-
         let logical = Key::from_name(key).or_else(|| {
             // Prefer the layout-resolved character; fall back to the key
             // itself for Ctrl chords, where no character is produced.
             ks.key_char
                 .clone()
-                .or_else(|| (m.control || m.alt).then(|| key.to_owned()))
+                .or_else(|| (mods.ctrl || mods.alt).then(|| key.to_owned()))
                 .map(Key::Text)
         });
         let Some(logical) = logical else { return };
         if let Some(bytes) = encode_key(&logical, mods, self.input_modes()) {
+            self.selection = None;
             self.scroll(Scroll::Bottom, cx);
             self.write(&bytes);
             cx.stop_propagation();
@@ -254,6 +337,7 @@ impl TerminalView {
     fn paste(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
             let bytes = encode_paste(&text, self.input_modes());
+            self.selection = None;
             self.scroll(Scroll::Bottom, cx);
             self.write(&bytes);
         }
@@ -262,6 +346,212 @@ impl TerminalView {
     fn scroll(&mut self, scroll: Scroll, cx: &mut Context<'_, Self>) {
         if let Some(s) = &self.session {
             s.with_mut(|p| p.engine_mut().scroll(scroll));
+            cx.notify();
+        }
+    }
+
+    // ---- selection ------------------------------------------------------
+
+    fn has_selection(&self) -> bool {
+        self.selection.is_some_and(|s| !s.is_empty())
+    }
+
+    fn selection_text(&self) -> Option<String> {
+        let sel = self.selection.filter(|s| !s.is_empty())?;
+        let text = self.session.as_ref()?.with(|p| sel.text(p.engine()));
+        (!text.is_empty()).then_some(text)
+    }
+
+    fn copy_selection(&self, cx: &mut Context<'_, Self>) {
+        if let Some(text) = self.selection_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    fn clear_selection(&mut self, cx: &mut Context<'_, Self>) {
+        self.selection = None;
+        cx.notify();
+    }
+
+    fn select_all(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(s) = &self.session else { return };
+        let (total, cols) = s.with(|p| (p.engine().total_lines(), p.engine().size().cols));
+        let mut sel = Selection::new(Point::new(0, 0), SelectionKind::Cells);
+        sel.extend(Point::new(total.saturating_sub(1), cols.saturating_sub(1)));
+        self.selection = Some(sel);
+        cx.notify();
+    }
+
+    // ---- mouse ----------------------------------------------------------
+
+    /// Viewport cell and absolute point under a window position.
+    fn hit(&self, pos: gpui::Point<Pixels>, window: &Window) -> Option<((u16, u16), Point)> {
+        let s = self.session.as_ref()?;
+        let (size, top) = s.with(|p| {
+            let e = p.engine();
+            (e.size(), e.history_size() - e.display_offset())
+        });
+        let cell = self
+            .metrics(window)
+            .cell_at(self.grid_bounds, pos, size.cols, size.rows);
+        Some((cell, Point::new(top + cell.1 as usize, cell.0)))
+    }
+
+    /// Mouse tracking applies unless Shift is held (Shift always selects).
+    fn tracking(&self, mods: Modifiers) -> Tracking {
+        if mods.shift {
+            return Tracking::Off;
+        }
+        match self.modes().mouse {
+            MouseTracking::Off => Tracking::Off,
+            MouseTracking::Click => Tracking::Click,
+            MouseTracking::Drag => Tracking::Drag,
+            MouseTracking::Motion => Tracking::Motion,
+        }
+    }
+
+    fn report(&mut self, action: MouseAction, cell: (u16, u16), mods: Modifiers) -> bool {
+        let tracking = self.tracking(mods);
+        let m = Mods {
+            ctrl: mods.control,
+            alt: mods.alt,
+            shift: mods.shift,
+        };
+        match encode_mouse(action, cell.0, cell.1, m, tracking, self.modes().sgr_mouse) {
+            Some(bytes) => {
+                self.write(&bytes);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<'_, Self>) {
+        window.focus(&self.focus);
+        let Some((cell, at)) = self.hit(ev.position, window) else {
+            return;
+        };
+        if ev.button == MouseButton::Left && ev.modifiers.control {
+            if let Some(link) = self.link_at(at) {
+                if is_openable(&link.url) {
+                    cx.open_url(&link.url);
+                }
+                return;
+            }
+        }
+        let button = match ev.button {
+            MouseButton::Left => Some(TMouse::Left),
+            MouseButton::Middle => Some(TMouse::Middle),
+            MouseButton::Right => Some(TMouse::Right),
+            _ => None,
+        };
+        if let Some(b) = button {
+            if self.report(MouseAction::Press(b), cell, ev.modifiers) {
+                self.reported = Some(Reported {
+                    button: b,
+                    last: cell,
+                });
+                self.selection = None;
+                cx.notify();
+                return;
+            }
+        }
+        match ev.button {
+            MouseButton::Left => {
+                let kind = match ev.click_count {
+                    0 | 1 => SelectionKind::Cells,
+                    2 => SelectionKind::Words,
+                    _ => SelectionKind::Lines,
+                };
+                match &mut self.selection {
+                    Some(sel) if ev.modifiers.shift && ev.click_count <= 1 => sel.extend(at),
+                    _ => self.selection = Some(Selection::new(at, kind)),
+                }
+                self.selecting = true;
+            }
+            // Windows Terminal convention: right-click copies a selection,
+            // or pastes when there is none.
+            MouseButton::Right => {
+                if self.has_selection() {
+                    self.copy_selection(cx);
+                    self.selection = None;
+                } else {
+                    self.paste(cx);
+                }
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    fn mouse_move(&mut self, ev: &MouseMoveEvent, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some((cell, at)) = self.hit(ev.position, window) else {
+            return;
+        };
+        self.update_hover(ev.modifiers, Some(at), cx);
+
+        if let Some(r) = self.reported {
+            if cell != r.last {
+                self.report(MouseAction::Motion(Some(r.button)), cell, ev.modifiers);
+                self.reported = Some(Reported { last: cell, ..r });
+            }
+            return;
+        }
+        if self.selecting && ev.pressed_button == Some(MouseButton::Left) {
+            // Dragging past the edge scrolls, one line per move event.
+            let b = self.grid_bounds;
+            if ev.position.y < b.origin.y {
+                self.scroll(Scroll::Lines(1), cx);
+            } else if ev.position.y > b.origin.y + b.size.height {
+                self.scroll(Scroll::Lines(-1), cx);
+            }
+            if let Some((_, at)) = self.hit(ev.position, window) {
+                if let Some(sel) = &mut self.selection {
+                    sel.extend(at);
+                }
+            }
+            cx.notify();
+            return;
+        }
+        if ev.pressed_button.is_none()
+            && self.tracking(ev.modifiers) == Tracking::Motion
+            && self.last_motion != Some(cell)
+            && self.grid_bounds.contains(&ev.position)
+        {
+            self.last_motion = Some(cell);
+            self.report(MouseAction::Motion(None), cell, ev.modifiers);
+        }
+    }
+
+    fn mouse_up(&mut self, ev: &MouseUpEvent, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if let Some(r) = self.reported.take() {
+            let cell = self.hit(ev.position, window).map_or(r.last, |(c, _)| c);
+            self.report(MouseAction::Release(r.button), cell, ev.modifiers);
+            return;
+        }
+        if self.selecting {
+            self.selecting = false;
+            if self.selection.is_some_and(|s| s.is_empty()) {
+                self.selection = None;
+            }
+            cx.notify();
+        }
+    }
+
+    fn link_at(&self, at: Point) -> Option<Link> {
+        self.session.as_ref()?.with(|p| link_at(p.engine(), at))
+    }
+
+    /// Ctrl+hover underlines links, as in VS Code and Windows Terminal.
+    fn update_hover(&mut self, mods: Modifiers, at: Option<Point>, cx: &mut Context<'_, Self>) {
+        let link = if mods.control && !mods.shift {
+            at.and_then(|p| self.link_at(p))
+                .filter(|l| is_openable(&l.url))
+        } else {
+            None
+        };
+        if link != self.hover_link {
+            self.hover_link = link;
             cx.notify();
         }
     }
@@ -279,15 +569,27 @@ impl TerminalView {
             return;
         }
         self.scroll_accum -= lines as f32;
-        let alt = self
-            .session
-            .as_ref()
-            .is_some_and(|s| s.with(|p| p.engine().modes().alt_screen));
-        if alt {
+        let steps = lines.unsigned_abs().min(10);
+
+        if self.tracking(ev.modifiers) != Tracking::Off {
+            if let Some((cell, _)) = self.hit(ev.position, window) {
+                let b = if lines > 0 {
+                    TMouse::WheelUp
+                } else {
+                    TMouse::WheelDown
+                };
+                for _ in 0..steps {
+                    self.report(MouseAction::Press(b), cell, ev.modifiers);
+                }
+            }
+            return;
+        }
+        let modes = self.modes();
+        if modes.alt_screen && modes.alternate_scroll {
             // Alternate scroll mode: full-screen apps get arrow keys.
             let key = if lines > 0 { Key::Up } else { Key::Down };
             if let Some(b) = encode_key(&key, Mods::NONE, self.input_modes()) {
-                for _ in 0..lines.unsigned_abs().min(10) {
+                for _ in 0..steps {
                     self.write(&b);
                 }
             }
@@ -296,12 +598,221 @@ impl TerminalView {
         }
     }
 
-    /// Copy the visible screen as plain text (selection lands in Phase 2).
-    fn copy_screen(&self, cx: &mut Context<'_, Self>) {
-        if let Some(s) = &self.session {
-            cx.write_to_clipboard(ClipboardItem::new_string(s.snapshot().text()));
+    // ---- search ---------------------------------------------------------
+
+    fn open_search(&mut self, cx: &mut Context<'_, Self>) {
+        let prefill = self
+            .selection_text()
+            .filter(|t| !t.contains('\n') && t.chars().count() <= 200);
+        let search = self.search.get_or_insert_with(SearchState::default);
+        if let Some(text) = prefill {
+            search.query = text;
+            self.selection = None;
         }
+        self.run_search(cx);
     }
+
+    fn close_search(&mut self, cx: &mut Context<'_, Self>) {
+        self.search = None;
+        cx.notify();
+    }
+
+    /// Recompute matches and jump to the one nearest the bottom of the
+    /// viewport, searching upwards (terminal output reads bottom-up).
+    fn run_search(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(session) = &self.session else { return };
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        let (matches, bottom) = session.with(|p| {
+            let e = p.engine();
+            let m = find_all(e, &search.query, search.case_sensitive, MAX_MATCHES);
+            (
+                m,
+                e.history_size() - e.display_offset() + e.size().rows as usize,
+            )
+        });
+        search.current = matches
+            .iter()
+            .rposition(|m| m.start.line < bottom)
+            .or_else(|| matches.len().checked_sub(1));
+        search.matches = matches;
+        search.stale = false;
+        self.reveal_current(cx);
+    }
+
+    fn step_search(&mut self, up: bool, cx: &mut Context<'_, Self>) {
+        if self.search.as_ref().is_some_and(|s| s.stale) {
+            // Keep the position: re-find, then continue from the old match.
+            let old = self
+                .search
+                .as_ref()
+                .and_then(|s| s.current.and_then(|i| s.matches.get(i)).copied());
+            self.run_search(cx);
+            if let (Some(old), Some(s)) = (old, &mut self.search) {
+                if let Some(i) = s.matches.iter().position(|m| *m == old) {
+                    s.current = Some(i);
+                }
+            }
+        }
+        let Some(s) = &mut self.search else { return };
+        let n = s.matches.len();
+        if n == 0 {
+            return;
+        }
+        s.current = Some(match (s.current, up) {
+            (Some(i), true) => (i + n - 1) % n,
+            (Some(i), false) => (i + 1) % n,
+            (None, _) => n - 1,
+        });
+        self.reveal_current(cx);
+    }
+
+    /// Scroll so the current match is visible, centred when it was not.
+    fn reveal_current(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(line) = self
+            .search
+            .as_ref()
+            .and_then(|s| s.current.and_then(|i| s.matches.get(i)))
+            .map(|m| m.start.line)
+        else {
+            cx.notify();
+            return;
+        };
+        if let Some(session) = &self.session {
+            session.with_mut(|p| {
+                let e = p.engine_mut();
+                let history = e.history_size();
+                let rows = e.size().rows as usize;
+                let offset = e.display_offset();
+                let top = history - offset;
+                if line < top || line >= top + rows {
+                    let want_top = line.saturating_sub(rows / 2).min(history);
+                    let want_offset = history - want_top;
+                    e.scroll(Scroll::Lines(want_offset as i32 - offset as i32));
+                }
+            });
+        }
+        cx.notify();
+    }
+
+    /// Keys while the search bar is open. Returns whether it was consumed.
+    fn search_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<'_, Self>) -> bool {
+        let ks = &ev.keystroke;
+        let m = ks.modifiers;
+        let key = ks.key.as_str();
+        let Some(search) = &mut self.search else {
+            return false;
+        };
+        match key {
+            "escape" => self.close_search(cx),
+            "enter" => self.step_search(!m.shift, cx),
+            "up" => self.step_search(true, cx),
+            "down" => self.step_search(false, cx),
+            "backspace" => {
+                if m.control {
+                    search.query.clear();
+                } else {
+                    search.query.pop();
+                }
+                self.run_search(cx);
+            }
+            "c" if m.alt && !m.control => {
+                search.case_sensitive = !search.case_sensitive;
+                self.run_search(cx);
+            }
+            "f" if m.control && m.shift => {}
+            "v" if m.control => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+                    search
+                        .query
+                        .push_str(text.lines().next().unwrap_or_default());
+                    self.run_search(cx);
+                }
+            }
+            _ if !m.control && !m.alt => match ks.key_char.as_deref() {
+                Some(ch) if !ch.chars().any(char::is_control) => {
+                    search.query.push_str(ch);
+                    self.run_search(cx);
+                }
+                _ => return false,
+            },
+            _ => return false,
+        }
+        true
+    }
+
+    fn search_bar(&self) -> Option<impl IntoElement> {
+        let s = self.search.as_ref()?;
+        let t = &self.theme;
+        let count = match (s.current, s.matches.len()) {
+            (_, 0) if s.query.is_empty() => String::new(),
+            (_, 0) => "No results".to_owned(),
+            (Some(i), n) if n >= MAX_MATCHES => format!("{} of {n}+", i + 1),
+            (Some(i), n) => format!("{} of {n}", i + 1),
+            (None, n) => format!("{n}"),
+        };
+        let pill = |label: &'static str, on: bool| {
+            div()
+                .px(px(tokens::space::XS + 2.0))
+                .rounded(px(tokens::radius::SM))
+                .text_size(px(tokens::text::XS))
+                .when(on, |d| d.bg(hsla(t.accent)).text_color(hsla(t.accent_text)))
+                .when(!on, |d| d.text_color(hsla(t.text_faint)))
+                .child(label)
+        };
+        Some(
+            div()
+                .absolute()
+                .top(px(tokens::space::SM))
+                .right(px(tokens::space::LG))
+                .h(px(30.0))
+                .min_w(px(300.0))
+                .px(px(tokens::space::MD))
+                .flex()
+                .items_center()
+                .gap(px(tokens::space::SM))
+                .rounded(px(tokens::radius::LG))
+                .bg(hsla(t.bg_elevated))
+                .border_1()
+                .border_color(hsla(t.border_strong))
+                .shadow_md()
+                .child(
+                    div()
+                        .text_color(hsla(t.text_faint))
+                        .text_size(px(tokens::text::XS))
+                        .child("Find"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .text_color(hsla(t.text))
+                        .child(SharedString::from(s.query.clone()))
+                        .child(div().w(px(1.5)).h(px(15.0)).bg(hsla(t.accent))),
+                )
+                .child(
+                    div()
+                        .text_size(px(tokens::text::XS))
+                        .text_color(hsla(if count == "No results" {
+                            t.danger
+                        } else {
+                            t.text_muted
+                        }))
+                        .child(SharedString::from(count)),
+                )
+                .child(pill("Aa", s.case_sensitive))
+                .child(
+                    div()
+                        .text_size(px(tokens::text::XS))
+                        .text_color(hsla(t.text_faint))
+                        .child("↑↓  Esc"),
+                ),
+        )
+    }
+
+    // ---- chrome ---------------------------------------------------------
 
     fn header(&self) -> impl IntoElement {
         let t = &self.theme;
@@ -371,9 +882,13 @@ impl TerminalView {
         if let Some(code) = self.last_exit {
             left.push_str(&format!("  ·  last exit {code}"));
         }
-        let right = grid
-            .map(|g| format!("{}×{}", g.cols, g.rows))
-            .unwrap_or_default();
+        let mut right = String::new();
+        if self.hover_link.is_some() {
+            right.push_str("Ctrl+click to open  ·  ");
+        }
+        if let Some(g) = grid {
+            right.push_str(&format!("{}×{}", g.cols, g.rows));
+        }
         div()
             .h(px(tokens::layout::STATUSBAR_H))
             .px(px(tokens::space::MD))
@@ -388,6 +903,60 @@ impl TerminalView {
             .child(SharedString::from(left))
             .child(SharedString::from(right))
     }
+
+    /// What the canvas needs for one frame, gathered under one session lock.
+    fn frame(&self, session: &LiveSession, size: GridSize) -> Frame {
+        if let Err(e) = session.resize(size) {
+            tracing::warn!("resize failed: {e:#}");
+        }
+        session.with(|p| {
+            let e = p.engine();
+            let snap = e.snapshot();
+            let top = snap.top_line_abs();
+            let bottom = top + snap.lines.len();
+            let visible = |m: &Match| m.end.line >= top && m.start.line < bottom;
+            let mut overlay = Overlay {
+                selection: self.selection.filter(|s| !s.is_empty()).map(|s| s.range(e)),
+                link: self.hover_link.as_ref().map(|l| (l.start, l.end)),
+                ..Overlay::default()
+            };
+            if let Some(s) = &self.search {
+                overlay.matches = s
+                    .matches
+                    .iter()
+                    .filter(|m| visible(m))
+                    .map(|m| (m.start, m.end))
+                    .collect();
+                overlay.current_match = s
+                    .current
+                    .and_then(|i| s.matches.get(i))
+                    .map(|m| (m.start, m.end));
+            }
+            let blocks = p
+                .blocks()
+                .iter()
+                .map(|b| BlockMark {
+                    start: b.prompt_line,
+                    end: b.end_line,
+                    state: b.state,
+                    exit_code: b.exit_code,
+                })
+                .collect();
+            Frame {
+                snap,
+                blocks,
+                overlay,
+                hitbox: None,
+            }
+        })
+    }
+}
+
+struct Frame {
+    snap: Snapshot,
+    blocks: Vec<BlockMark>,
+    overlay: Overlay,
+    hitbox: Option<Hitbox>,
 }
 
 impl Render for TerminalView {
@@ -399,6 +968,9 @@ impl Render for TerminalView {
         let focused = self.focus.is_focused(window);
         let session = self.session.clone();
         let grid = session.as_ref().map(|s| s.with(|p| p.engine().size()));
+        let view: Entity<Self> = cx.entity();
+        let mouse_mode = self.modes().mouse != MouseTracking::Off;
+        let over_link = self.hover_link.is_some();
 
         let exit_overlay = self.exited().flatten().map(|code| {
             div()
@@ -427,38 +999,75 @@ impl Render for TerminalView {
 
         let grid_canvas = canvas(
             {
-                let session = session.clone();
-                move |bounds: Bounds<Pixels>, _window: &mut Window, _cx: &mut App| {
-                    let cols = ((bounds.size.width - px(PAD_X * 2.0)) / metrics.cell_w).floor();
-                    let rows = ((bounds.size.height - px(PAD_Y * 2.0)) / metrics.line_h).floor();
+                let view = view.clone();
+                move |bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
+                    let cols = ((bounds.size.width - px(crate::paint::PAD_X * 2.0))
+                        / metrics.cell_w)
+                        .floor();
+                    let rows = ((bounds.size.height - px(crate::paint::PAD_Y * 2.0))
+                        / metrics.line_h)
+                        .floor();
                     let size = GridSize::new(cols.max(2.0) as u16, rows.max(1.0) as u16);
-                    let snapshot = session.as_ref().map(|s| {
-                        if let Err(e) = s.resize(size) {
-                            tracing::warn!("resize failed: {e:#}");
-                        }
-                        let blocks = s.with(|p| {
-                            p.blocks()
-                                .iter()
-                                .map(|b| BlockMark {
-                                    start: b.prompt_line,
-                                    end: b.end_line,
-                                    state: b.state,
-                                    exit_code: b.exit_code,
-                                })
-                                .collect::<Vec<_>>()
-                        });
-                        (s.snapshot(), blocks)
-                    });
-                    snapshot
+                    let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+                    let frame = session.as_ref().map(|s| view.read(cx).frame(s, size));
+                    frame.map(|f| Frame {
+                        hitbox: Some(hitbox),
+                        ..f
+                    })
                 }
             },
-            move |bounds, snapshot, window, cx| {
-                if let Some((snap, blocks)) = snapshot {
-                    paint_grid(
-                        &snap, &blocks, bounds, &theme, &font, font_size, metrics, focused, window,
-                        cx,
-                    );
+            move |bounds, frame, window, cx| {
+                let Some(frame) = frame else { return };
+                view.update(cx, |v, _| v.grid_bounds = bounds);
+                if let Some(hitbox) = &frame.hitbox {
+                    let style = if over_link {
+                        CursorStyle::PointingHand
+                    } else if mouse_mode {
+                        CursorStyle::Arrow
+                    } else {
+                        CursorStyle::IBeam
+                    };
+                    window.set_cursor_style(style, hitbox);
                 }
+                paint_grid(
+                    PaintArgs {
+                        snap: &frame.snap,
+                        blocks: &frame.blocks,
+                        overlay: &frame.overlay,
+                        bounds,
+                        theme: &theme,
+                        font: &font,
+                        font_size,
+                        metrics,
+                        focused,
+                    },
+                    window,
+                    cx,
+                );
+
+                // Mouse listeners are window-level so drags keep working
+                // outside the grid; presses only count when over it.
+                let hitbox = frame.hitbox.clone();
+                let v = view.clone();
+                window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Bubble
+                        && hitbox.as_ref().is_some_and(|h| h.is_hovered(window))
+                    {
+                        v.update(cx, |this, cx| this.mouse_down(ev, window, cx));
+                    }
+                });
+                let v = view.clone();
+                window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Bubble {
+                        v.update(cx, |this, cx| this.mouse_move(ev, window, cx));
+                    }
+                });
+                let v = view.clone();
+                window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Bubble {
+                        v.update(cx, |this, cx| this.mouse_up(ev, window, cx));
+                    }
+                });
             },
         )
         .size_full();
@@ -478,275 +1087,19 @@ impl Render for TerminalView {
                     .flex_1()
                     .overflow_hidden()
                     .track_focus(&self.focus)
-                    .cursor_text()
                     .on_key_down(cx.listener(Self::key_down))
                     .on_scroll_wheel(cx.listener(Self::scroll_wheel))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            window.focus(&this.focus);
-                            cx.notify();
-                        }),
-                    )
-                    // Right-click pastes, as in Windows Terminal and conhost.
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(|this, _, _, cx| this.paste(cx)),
-                    )
+                    .on_modifiers_changed(cx.listener(
+                        |this, ev: &gpui::ModifiersChangedEvent, window, cx| {
+                            let at = this.hit(window.mouse_position(), window).map(|(_, p)| p);
+                            this.update_hover(ev.modifiers, at, cx);
+                        },
+                    ))
                     .child(grid_canvas)
+                    .children(self.search_bar())
                     .children(error)
                     .children(exit_overlay),
             )
             .child(self.status_bar(grid))
     }
-}
-
-struct Painter<'a> {
-    theme: &'a Theme,
-    font: &'a MonoFont,
-}
-
-impl Painter<'_> {
-    fn resolve(&self, c: Color) -> Rgb {
-        match c {
-            Color::DefaultFg => self.theme.term_fg,
-            Color::DefaultBg => self.theme.term_bg,
-            Color::Indexed(i) => self.theme.indexed(i),
-            Color::Rgb(r, g, b) => Rgb::new(r, g, b),
-        }
-    }
-
-    /// Effective (fg, bg) after inverse/dim/hidden.
-    fn colors(&self, cell: &Cell) -> (Hsla, Option<Hsla>) {
-        let mut fg = self.resolve(cell.fg);
-        let mut bg = self.resolve(cell.bg);
-        let mut bg_set = cell.bg != Color::DefaultBg;
-        if cell.flags.contains(CellFlags::INVERSE) {
-            std::mem::swap(&mut fg, &mut bg);
-            bg_set = true;
-        }
-        let mut fg = hsla(fg);
-        if cell.flags.contains(CellFlags::DIM) {
-            fg = with_alpha(fg, 0.6);
-        }
-        if cell.flags.contains(CellFlags::HIDDEN) {
-            fg = with_alpha(fg, 0.0);
-        }
-        (fg, bg_set.then(|| hsla(bg)))
-    }
-
-    fn run(&self, cell: &Cell, len: usize, fg: Hsla) -> TextRun {
-        let f = cell.flags;
-        let mut font: Font = self.font.regular();
-        if f.contains(CellFlags::BOLD) {
-            font.weight = FontWeight::BOLD;
-        }
-        if f.contains(CellFlags::ITALIC) {
-            font.style = FontStyle::Italic;
-        }
-        TextRun {
-            len,
-            font,
-            color: fg,
-            background_color: None,
-            underline: f.contains(CellFlags::UNDERLINE).then_some(UnderlineStyle {
-                thickness: px(1.0),
-                color: Some(fg),
-                wavy: false,
-            }),
-            strikethrough: f.contains(CellFlags::STRIKE).then_some(StrikethroughStyle {
-                thickness: px(1.0),
-                color: Some(fg),
-            }),
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn paint_grid(
-    snap: &Snapshot,
-    blocks: &[BlockMark],
-    bounds: Bounds<Pixels>,
-    theme: &Theme,
-    font: &MonoFont,
-    font_size: Pixels,
-    m: Metrics,
-    focused: bool,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let p = Painter { theme, font };
-    let origin = point(bounds.origin.x + px(PAD_X), bounds.origin.y + px(PAD_Y));
-    let cell_origin = |row: usize, col: usize| {
-        point(
-            origin.x + m.cell_w * col as f32,
-            origin.y + m.line_h * row as f32,
-        )
-    };
-
-    // Block chrome: a separator above each prompt and a status bar in the
-    // gutter. Blocks are virtual (docs/adr/0004-virtual-blocks.md).
-    let top = snap.top_line_abs();
-    let rows = snap.lines.len();
-    // Full-screen apps own the whole grid; no block chrome there.
-    let blocks = if snap.modes.alt_screen {
-        &[][..]
-    } else {
-        blocks
-    };
-    for (i, b) in blocks.iter().enumerate() {
-        let end = b.end.unwrap_or(top + rows);
-        if end < top || b.start >= top + rows {
-            continue;
-        }
-        let start_row = b.start.saturating_sub(top);
-        let end_row = (end.saturating_sub(top)).min(rows);
-        if i > 0 && b.start >= top {
-            let y = origin.y + m.line_h * start_row as f32;
-            window.paint_quad(fill(
-                Bounds::new(point(bounds.origin.x, y), size(bounds.size.width, px(1.0))),
-                hsla(theme.border),
-            ));
-        }
-        let color = match (b.state, b.exit_code) {
-            (BlockState::Running, _) => Some(theme.accent),
-            (BlockState::Finished, Some(c)) if c != 0 => Some(theme.danger),
-            (BlockState::Finished, _) => Some(theme.border_strong),
-            (BlockState::Prompt, _) => None,
-        };
-        if let Some(color) = color {
-            let y0 = origin.y + m.line_h * start_row as f32;
-            let h = m.line_h * (end_row.max(start_row + 1) - start_row) as f32;
-            window.paint_quad(
-                fill(
-                    Bounds::new(
-                        point(bounds.origin.x + px(GUTTER_X), y0),
-                        size(px(GUTTER_W), h),
-                    ),
-                    hsla(color),
-                )
-                .corner_radii(px(1.0)),
-            );
-        }
-    }
-
-    for (row, cells) in snap.lines.iter().enumerate() {
-        // Backgrounds, merged into runs.
-        let mut col = 0;
-        while col < cells.len() {
-            let (_, bg) = p.colors(&cells[col]);
-            let Some(bg) = bg else {
-                col += 1;
-                continue;
-            };
-            let start = col;
-            while col < cells.len() && p.colors(&cells[col]).1 == Some(bg) {
-                col += 1;
-            }
-            window.paint_quad(fill(
-                Bounds::new(
-                    cell_origin(row, start),
-                    size(m.cell_w * (col - start) as f32, m.line_h),
-                ),
-                bg,
-            ));
-        }
-
-        // Text, in segments broken at wide characters so every glyph stays
-        // on the cell grid.
-        let mut seg = String::new();
-        let mut runs: Vec<TextRun> = Vec::new();
-        let mut seg_start = 0;
-        let flush = |seg: &mut String,
-                     runs: &mut Vec<TextRun>,
-                     at: usize,
-                     force: bool,
-                     window: &mut Window,
-                     cx: &mut App| {
-            if seg.trim_end().is_empty()
-                && runs
-                    .iter()
-                    .all(|r| r.underline.is_none() && r.strikethrough.is_none())
-            {
-                seg.clear();
-                runs.clear();
-                return;
-            }
-            let line = window.text_system().shape_line(
-                SharedString::from(std::mem::take(seg)),
-                font_size,
-                runs,
-                force.then_some(m.cell_w),
-            );
-            runs.clear();
-            let _ = line.paint(cell_origin(row, at), m.line_h, window, cx);
-        };
-        for (col, cell) in cells.iter().enumerate() {
-            if cell.flags.contains(CellFlags::WIDE_SPACER) {
-                continue;
-            }
-            let (fg, _) = p.colors(cell);
-            let mut text = String::new();
-            text.push(cell.ch);
-            if let Some(zw) = &cell.zerowidth {
-                text.push_str(zw);
-            }
-            if cell.flags.contains(CellFlags::WIDE) {
-                flush(&mut seg, &mut runs, seg_start, true, window, cx);
-                let run = p.run(cell, text.len(), fg);
-                let mut single = text;
-                flush(&mut single, &mut vec![run], col, false, window, cx);
-                seg_start = col + 2;
-                continue;
-            }
-            if seg.is_empty() {
-                seg_start = col;
-            }
-            let run = p.run(cell, text.len(), fg);
-            match runs.last_mut() {
-                Some(last) if same_style(last, &run) => last.len += run.len,
-                _ => runs.push(run),
-            }
-            seg.push_str(&text);
-        }
-        flush(&mut seg, &mut runs, seg_start, true, window, cx);
-    }
-
-    // Cursor.
-    if snap.modes.cursor_visible {
-        let c = snap.cursor;
-        let (row, col) = (c.row as usize, c.col as usize);
-        if row < rows {
-            let cursor = hsla(theme.term_cursor);
-            let wide = snap.lines[row]
-                .get(col)
-                .is_some_and(|c| c.flags.contains(CellFlags::WIDE));
-            let w = if wide { m.cell_w * 2.0 } else { m.cell_w };
-            let rect = Bounds::new(cell_origin(row, col), size(w, m.line_h));
-            if focused {
-                window.paint_quad(fill(rect, cursor));
-                if let Some(cell) = snap.lines[row].get(col).filter(|c| c.ch != ' ') {
-                    let text = SharedString::from(cell.ch.to_string());
-                    let run = p.run(cell, text.len(), hsla(theme.term_bg));
-                    let line = window
-                        .text_system()
-                        .shape_line(text, font_size, &[run], None);
-                    let _ = line.paint(rect.origin, m.line_h, window, cx);
-                }
-            } else {
-                window.paint_quad(
-                    fill(rect, with_alpha(cursor, 0.0))
-                        .border_widths(px(1.0))
-                        .border_color(cursor),
-                );
-            }
-        }
-    }
-}
-
-fn same_style(a: &TextRun, b: &TextRun) -> bool {
-    a.font == b.font
-        && a.color == b.color
-        && a.underline == b.underline
-        && a.strikethrough == b.strikethrough
 }

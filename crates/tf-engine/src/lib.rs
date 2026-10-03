@@ -6,8 +6,10 @@
 //! without touching callers.
 
 mod alacritty;
+pub mod text;
 
 pub use alacritty::AlacrittyEngine;
+pub use text::{Match, Point, Selection, SelectionKind};
 
 /// Grid dimensions in cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +61,8 @@ impl CellFlags {
     pub const WIDE: Self = Self(1 << 7);
     /// Second half of a double-width character; render nothing.
     pub const WIDE_SPACER: Self = Self(1 << 8);
+    /// Set on the last cell of a row that soft-wraps into the next row.
+    pub const WRAP: Self = Self(1 << 9);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -79,6 +83,8 @@ pub struct Cell {
     pub fg: Color,
     pub bg: Color,
     pub flags: CellFlags,
+    /// OSC 8 hyperlink target, if the program attached one.
+    pub link: Option<std::sync::Arc<str>>,
 }
 
 impl Default for Cell {
@@ -89,8 +95,22 @@ impl Default for Cell {
             fg: Color::DefaultFg,
             bg: Color::DefaultBg,
             flags: CellFlags::empty(),
+            link: None,
         }
     }
+}
+
+/// Which mouse events the running program asked to receive.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MouseTracking {
+    #[default]
+    Off,
+    /// Presses and releases (DECSET 1000).
+    Click,
+    /// Plus motion while a button is held (1002).
+    Drag,
+    /// Plus all motion (1003).
+    Motion,
 }
 
 /// Terminal modes the UI needs to know about.
@@ -100,6 +120,13 @@ pub struct Modes {
     pub bracketed_paste: bool,
     pub alt_screen: bool,
     pub cursor_visible: bool,
+    pub mouse: MouseTracking,
+    /// SGR mouse encoding (1006).
+    pub sgr_mouse: bool,
+    /// Focus in/out reports (1004).
+    pub focus_events: bool,
+    /// Wheel sends arrow keys on the alternate screen (1007).
+    pub alternate_scroll: bool,
 }
 
 /// A copy of the visible viewport, safe to hand to another thread or
@@ -180,4 +207,13 @@ pub trait TerminalEngine: Send {
     fn title(&self) -> Option<String>;
     fn modes(&self) -> Modes;
     fn scroll(&mut self, scroll: Scroll);
+    /// Total addressable lines: scrollback plus screen.
+    fn total_lines(&self) -> usize {
+        self.history_size() + self.size().rows as usize
+    }
+    /// One line by absolute index (`0` is the oldest scrollback line), or
+    /// `None` when out of range. Used for selection, search and links.
+    fn line(&self, abs: usize) -> Option<Vec<Cell>>;
+    /// Current viewport offset from the bottom, in lines.
+    fn display_offset(&self) -> usize;
 }
