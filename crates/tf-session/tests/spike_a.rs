@@ -44,8 +44,11 @@ const POSIX: Dialect = Dialect {
 
 const PWSH: Dialect = Dialect {
     ok: "Write-Output tf-ok",
-    one: "exit 1",
-    three: "exit 3",
+    // `cmd /c exit N`, not `exit N`: at an interactive PowerShell prompt
+    // `exit` terminates the shell, so the block never gets its D mark and the
+    // harness would spin until it timed out.
+    one: "cmd /c exit 1",
+    three: "cmd /c exit 3",
 };
 
 fn dialect(kind: ShellKind) -> Dialect {
@@ -116,9 +119,11 @@ fn wanted_shells() -> Vec<ShellKind> {
         .collect()
 }
 
-/// PowerShell prompts are far slower than POSIX shells; scale the budget.
+/// PowerShell prompts are far slower than POSIX shells, so scale with the
+/// workload. Kept generous: the budget only matters when something is wrong,
+/// and too tight a bound turns a loaded runner into a false failure.
 fn budget(count: usize) -> Duration {
-    Duration::from_secs(30 + (count as u64) / 4)
+    Duration::from_secs(120 + (count as u64) / 10)
 }
 
 #[test]

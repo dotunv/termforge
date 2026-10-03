@@ -23,6 +23,10 @@ pub enum SessionEvent {
         body: String,
     },
     BlockFinished {
+        /// Position in [`BlockIndex::iter`] *at the moment the block finished*.
+        /// Positions shift as the scrollback trims old blocks and as the index
+        /// reaches its retention bound, so treat this as a hint for "the block
+        /// that just completed" rather than a durable key.
         index: usize,
         exit_code: Option<i32>,
     },

@@ -150,6 +150,13 @@ impl RealShell {
         self.wake.recv_timeout(dur).is_ok()
     }
 
+    /// `Some(status)` once the child has exited. Checked while driving so a
+    /// command that kills the shell (`exit` at a PowerShell prompt, a stray
+    /// `logout`) reports itself instead of looking like a hang.
+    pub fn exit_status(&self) -> Option<Option<u32>> {
+        self.session.exit_status()
+    }
+
     /// Ask the shell to exit, so the child ends before the test returns.
     pub fn quit(&self) {
         let _ = self.session.write(b"exit\r");
@@ -193,6 +200,15 @@ pub fn drive(
     let started = Instant::now();
     let mut sent = 0usize;
     while sent < count {
+        if let Some(status) = shell.exit_status() {
+            // A command that ends the shell would otherwise look like a hang.
+            return Err(format!(
+                "{} exited (status {status:?}) after {sent}/{count} commands, \
+                 so no further marks can arrive.\n--- screen ---\n{}",
+                shell.profile.name,
+                shell.screen()
+            ));
+        }
         if Instant::now() >= started + budget {
             return Err(diagnostics(shell, sent, count));
         }
