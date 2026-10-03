@@ -1,4 +1,4 @@
-name: Spike A (ConPTY ordering)
+name: Slow gates (Spike A + latency)
 
 # The build plan's risk spike: prove OSC 133 marks stay ordered relative to
 # output over 10,000 real commands. Warp had to fork ConPTY after finding it
@@ -59,3 +59,21 @@ jobs:
         # 6h job timeout is the binding constraint, not the test's own budget.
         timeout-minutes: 300
         run: cargo xtask spike-a
+
+  latency:
+    name: latency (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: latency-${{ matrix.os }}
+      - name: Keystroke to visible output
+        # Release only: the budget is meaningless in a debug build.
+        timeout-minutes: 60
+        run: cargo xtask latency

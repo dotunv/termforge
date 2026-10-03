@@ -110,7 +110,28 @@ rather than let it look like a broken terminal.
 - `clippy -D warnings`, `rustfmt`, `cargo-deny` on every PR, on Windows and Linux.
 - Parsers are property-tested and fuzzed (`fuzz/`, nightly workflow).
 - `unsafe` is denied workspace-wide; any exception needs an ADR and a `// SAFETY:` comment.
-- Performance budgets (enforced once the renderer lands): p50 input latency <= 8 ms, 60 fps at 4K, cold start <= 400 ms, idle memory <= 150 MB.
+- Performance budgets: p50 input latency <= 8 ms, 60 fps at 4K, cold start <= 400 ms, idle memory <= 150 MB.
+
+### What is actually measured
+
+"If it isn't measured, it doesn't count." Current state, honestly:
+
+| Budget | Status |
+|---|---|
+| Keystroke -> visible output, p50 <= 8 ms | **Enforced**, `cargo xtask latency`. Covers PTY, tap, engine, snapshot. Does **not** cover GPUI paint or scanout. |
+| OSC 133 ordering over 10,000 commands | **Enforced**, [slow gates](.github/workflows/spike-a.yml), on `main` and nightly. |
+| 60 fps at 4K, frame time | Not measured. Needs a window and a display pipeline. |
+| Cold start <= 400 ms | Not measured. |
+| Idle memory <= 150 MB | Not measured. |
+| VT conformance (`vttest`/`esctest`) | Not present. One `insta` snapshot in `tf-engine`; no golden-grid suite. |
+| Real-app matrix (vim, htop, lazygit, PSReadLine, agents) | Not present. |
+| Crash reporting | Not present. |
+| Accessibility (AccessKit), IME | Not present. |
+
+The latency probe is a necessary condition for the input budget, not the whole
+of it: it stops at the snapshot, so a renderer regression would not show up
+there. It needs its own frame-timestamp probe before the 8 ms claim covers the
+full pipeline.
 
 ## License
 

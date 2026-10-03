@@ -6,6 +6,8 @@
 //! - `ci`: run the same checks CI runs (fmt, clippy, tests).
 //! - `spike-a [--commands N] [--shells a,b]`: the long ConPTY ordering
 //!   harness from the build plan. Too slow for `ci`, so it is opt-in.
+//! - `latency`: keystroke-to-visible-output probe against a real shell,
+//!   enforcing the plan's p50 budget. Release only.
 #![allow(clippy::print_stdout)]
 
 use std::path::{Path, PathBuf};
@@ -28,6 +30,7 @@ fn main() -> Result<()> {
             conpty(arch)
         }
         Some("ci") => ci(),
+        Some("latency") => latency(),
         Some("spike-a") => {
             // Passed through to the test rather than parsed here, so the
             // harness keeps its own defaults when run directly.
@@ -49,7 +52,7 @@ fn main() -> Result<()> {
         _ => {
             println!(
                 "usage: cargo xtask <conpty [--arch x64|arm64|x86] | ci | \
-                 spike-a [--commands N] [--shells list]>"
+                 spike-a [--commands N] [--shells list] | latency>"
             );
             Ok(())
         }
@@ -136,6 +139,25 @@ fn ci() -> Result<()> {
     ])?;
     step(&["test", "--locked"])?;
     Ok(())
+}
+
+/// Keystroke-to-visible-output latency probe. Always release: the budget is
+/// meaningless in a debug build of this dependency graph.
+fn latency() -> Result<()> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    println!("\n==> cargo test -p tf-session --test latency --release -- --ignored --nocapture");
+    run(Command::new(&cargo).current_dir(root()).args([
+        "test",
+        "-p",
+        "tf-session",
+        "--test",
+        "latency",
+        "--release",
+        "--locked",
+        "--",
+        "--ignored",
+        "--nocapture",
+    ]))
 }
 
 /// The Spike A ordering harness: real shell, real PTY, real integration
