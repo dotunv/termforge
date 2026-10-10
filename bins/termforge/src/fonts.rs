@@ -46,3 +46,32 @@ impl MonoFont {
         }
     }
 }
+
+/// Proportional fonts for interface chrome, best first. The terminal grid
+/// keeps its monospace font; labels, hints and settings read better in a
+/// proportional face and do not run together at small sizes.
+const PREFERRED_UI: &[&str] = &[
+    "Inter",
+    "Segoe UI Variable",
+    "Segoe UI",
+    "SF Pro Text",
+    "Helvetica Neue",
+    "Cantarell",
+    "Noto Sans",
+    "DejaVu Sans",
+    "Liberation Sans",
+    "Arial",
+];
+
+/// The family used for interface text, falling back to the terminal font
+/// when no proportional face is installed.
+pub fn detect_ui_family(cx: &App, fallback: &SharedString) -> SharedString {
+    let available = cx.text_system().all_font_names();
+    let family = PREFERRED_UI
+        .iter()
+        .find(|want| available.iter().any(|have| have.eq_ignore_ascii_case(want)))
+        .map(|name| SharedString::from(*name))
+        .unwrap_or_else(|| fallback.clone());
+    tracing::info!(font = %family, "interface font");
+    family
+}

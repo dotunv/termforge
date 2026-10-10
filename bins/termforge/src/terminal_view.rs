@@ -27,7 +27,7 @@ use tf_input::{
 use tf_session::{SessionEvent, SpawnOptions};
 use tf_ui::{tokens, Rgb, Theme, ThemeInput};
 
-use crate::fonts::MonoFont;
+use crate::fonts::{detect_ui_family, MonoFont};
 use crate::paint::{hsla, paint_grid, BlockMark, Metrics, Overlay, PaintArgs};
 use crate::remote_session::{self, Attach, SessionHandle};
 use crate::workspace::{self, Layout, SavedTab};
@@ -290,6 +290,8 @@ pub struct TerminalView {
     focus: FocusHandle,
     theme: Arc<Theme>,
     font: MonoFont,
+    /// Proportional family for interface chrome.
+    ui_font: SharedString,
     font_size: f32,
     scroll_accum: f32,
     cwd: Option<String>,
@@ -380,6 +382,7 @@ impl TerminalView {
             ssh_hosts: tf_pty::discover_ssh_hosts(),
             focus,
             theme,
+            ui_font: detect_ui_family(cx, &font.family),
             font,
             font_size: 14.0,
             scroll_accum: 0.0,
@@ -2453,18 +2456,28 @@ impl TerminalView {
         let t = &self.theme;
         div()
             .id(id)
-            .h(px(30.0))
+            .h(px(32.0))
             .px(px(tokens::space::SM))
             .flex()
             .items_center()
             .justify_between()
+            .gap(px(tokens::space::MD))
             .rounded(px(tokens::radius::MD))
+            .text_size(px(tokens::text::MD))
             .text_color(hsla(t.text_muted))
             .hover(|style| style.bg(hsla(t.bg_hover)).text_color(hsla(t.text)))
             .on_click(on_click)
-            .child(label)
             .child(
                 div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(label),
+            )
+            .child(
+                div()
+                    .flex_none()
                     .text_size(px(tokens::text::XS))
                     .text_color(hsla(t.text_faint))
                     .child(hint),
@@ -2605,6 +2618,7 @@ impl TerminalView {
         let hover_bg = t.bg_hover;
         div()
             .id(("workspace-row", tab_id))
+            .group(SharedString::from(format!("ws-row-{tab_id}")))
             .relative()
             .px(px(tokens::space::SM))
             .py(px(6.0))
@@ -2707,6 +2721,12 @@ impl TerminalView {
                 div()
                     .id(("workspace-row-pin", tab_id))
                     .flex_none()
+                    .when(!pinned, |d| {
+                        d.invisible()
+                            .group_hover(SharedString::from(format!("ws-row-{tab_id}")), |style| {
+                                style.visible()
+                            })
+                    })
                     .size(px(20.0))
                     .flex()
                     .items_center()
@@ -2724,6 +2744,10 @@ impl TerminalView {
                 div()
                     .id(("workspace-row-close", tab_id))
                     .flex_none()
+                    .invisible()
+                    .group_hover(SharedString::from(format!("ws-row-{tab_id}")), |style| {
+                        style.visible()
+                    })
                     .size(px(20.0))
                     .flex()
                     .items_center()
@@ -3060,11 +3084,39 @@ impl TerminalView {
 
     fn settings_section_title(&self, title: &'static str) -> impl IntoElement {
         div()
-            .mt(px(tokens::space::MD))
-            .mb(px(tokens::space::XS))
+            .mt(px(tokens::space::LG))
+            .mb(px(tokens::space::SM))
+            .px(px(2.0))
             .text_size(px(tokens::text::XS))
             .text_color(hsla(self.theme.text_faint))
             .child(title)
+    }
+
+    /// A rounded group of rows with hairline dividers between them.
+    fn settings_card(&self, rows: Vec<gpui::AnyElement>) -> gpui::AnyElement {
+        let t = &self.theme;
+        let mut children = Vec::with_capacity(rows.len() * 2);
+        for (index, row) in rows.into_iter().enumerate() {
+            if index > 0 {
+                children.push(
+                    div()
+                        .h(px(1.0))
+                        .mx(px(tokens::space::MD))
+                        .bg(hsla(t.border))
+                        .into_any_element(),
+                );
+            }
+            children.push(row);
+        }
+        div()
+            .flex()
+            .flex_col()
+            .rounded(px(tokens::radius::LG))
+            .bg(hsla(t.bg_panel))
+            .border_1()
+            .border_color(hsla(t.border))
+            .children(children)
+            .into_any_element()
     }
 
     fn setting_row(
@@ -3072,28 +3124,40 @@ impl TerminalView {
         label: &'static str,
         description: &'static str,
         control: impl IntoElement,
-    ) -> impl IntoElement {
+    ) -> gpui::AnyElement {
         let t = &self.theme;
         div()
-            .py(px(tokens::space::SM))
+            .px(px(tokens::space::MD))
+            .py(px(tokens::space::MD))
             .flex()
             .items_center()
             .justify_between()
-            .gap(px(tokens::space::LG))
-            .border_b_1()
-            .border_color(hsla(t.border))
+            .gap(px(tokens::space::XL))
             .child(
                 div()
                     .flex_1()
-                    .child(div().text_color(hsla(t.text)).child(label))
+                    .min_w(px(0.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
                     .child(
                         div()
-                            .text_size(px(tokens::text::XS))
-                            .text_color(hsla(t.text_faint))
-                            .child(description),
-                    ),
+                            .text_size(px(tokens::text::MD))
+                            .text_color(hsla(t.text))
+                            .child(label),
+                    )
+                    .when(!description.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .text_size(px(tokens::text::SM))
+                                .line_height(px(17.0))
+                                .text_color(hsla(t.text_faint))
+                                .child(description),
+                        )
+                    }),
             )
-            .child(control)
+            .child(div().flex_none().child(control))
+            .into_any_element()
     }
 
     fn toggle_switch(
@@ -3105,14 +3169,17 @@ impl TerminalView {
         let t = &self.theme;
         div()
             .id(id)
-            .w(px(36.0))
-            .h(px(20.0))
+            .w(px(38.0))
+            .h(px(22.0))
             .p(px(2.0))
             .flex()
             .items_center()
             .when(on, |d| d.justify_end())
             .rounded_full()
+            .cursor_pointer()
             .bg(hsla(if on { t.accent } else { t.bg_hover }))
+            .border_1()
+            .border_color(hsla(if on { t.accent } else { t.border_strong }))
             .on_click(on_click)
             .child(div().size(px(16.0)).rounded_full().bg(hsla(if on {
                 t.accent_text
@@ -3125,242 +3192,398 @@ impl TerminalView {
         &self,
         id: impl Into<ElementId>,
         label: impl Into<SharedString>,
-        selected: bool,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
         let t = &self.theme;
         div()
             .id(id)
-            .h(px(26.0))
+            .h(px(28.0))
+            .min_w(px(28.0))
             .px(px(tokens::space::MD))
             .flex()
             .items_center()
+            .justify_center()
             .rounded(px(tokens::radius::MD))
+            .cursor_pointer()
+            .bg(hsla(t.bg_elevated))
             .border_1()
-            .border_color(hsla(if selected { t.accent } else { t.border_strong }))
-            .text_color(hsla(if selected { t.text } else { t.text_muted }))
-            .when(selected, |d| d.bg(hsla(t.bg_selected)))
+            .border_color(hsla(t.border_strong))
+            .text_color(hsla(t.text))
             .hover(|style| style.bg(hsla(t.bg_hover)))
             .on_click(on_click)
             .child(label.into())
     }
 
+    /// Joined options of which exactly one is selected.
+    fn segmented(
+        &self,
+        id_prefix: &'static str,
+        options: Vec<(SharedString, bool, ClickHandler)>,
+    ) -> impl IntoElement {
+        let t = &self.theme;
+        div()
+            .flex()
+            .rounded(px(tokens::radius::MD))
+            .border_1()
+            .border_color(hsla(t.border_strong))
+            .bg(hsla(t.bg_elevated))
+            .overflow_hidden()
+            .children(
+                options
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (label, selected, handler))| {
+                        div()
+                            .id(SharedString::from(format!("{id_prefix}-{index}")))
+                            .h(px(28.0))
+                            .px(px(tokens::space::MD))
+                            .flex()
+                            .items_center()
+                            .cursor_pointer()
+                            .when(index > 0, |d| d.border_l_1().border_color(hsla(t.border)))
+                            .when(selected, |d| {
+                                d.bg(hsla(t.accent)).text_color(hsla(t.accent_text))
+                            })
+                            .when(!selected, |d| {
+                                d.text_color(hsla(t.text_muted)).hover(|style| {
+                                    style.bg(hsla(t.bg_hover)).text_color(hsla(t.text))
+                                })
+                            })
+                            .on_click(move |ev, window, cx| handler(ev, window, cx))
+                            .child(label)
+                    }),
+            )
+    }
+
+    fn theme_card(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        input: ThemeInput,
+        selected: bool,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> impl IntoElement {
+        let t = &self.theme;
+        let preview = Theme::generate(input);
+        div()
+            .id(id)
+            .flex()
+            .flex_col()
+            .gap(px(tokens::space::SM))
+            .cursor_pointer()
+            .on_click(on_click)
+            .child(
+                div()
+                    .w(px(168.0))
+                    .h(px(92.0))
+                    .p(px(tokens::space::MD))
+                    .flex()
+                    .flex_col()
+                    .gap(px(7.0))
+                    .rounded(px(tokens::radius::LG))
+                    .bg(hsla(preview.bg_app))
+                    .border_2()
+                    .border_color(hsla(if selected { t.accent } else { t.border_strong }))
+                    .child(
+                        div()
+                            .h(px(8.0))
+                            .w(px(64.0))
+                            .rounded_full()
+                            .bg(hsla(preview.text)),
+                    )
+                    .child(
+                        div()
+                            .h(px(6.0))
+                            .w(px(112.0))
+                            .rounded_full()
+                            .bg(hsla(preview.text_muted)),
+                    )
+                    .child(
+                        div()
+                            .h(px(6.0))
+                            .w(px(84.0))
+                            .rounded_full()
+                            .bg(hsla(preview.accent)),
+                    ),
+            )
+            .child(
+                div()
+                    .text_color(hsla(if selected { t.text } else { t.text_muted }))
+                    .child(label),
+            )
+    }
+
+    /// Row of key caps for a shortcut written as space-separated keys.
+    fn key_caps(&self, shortcut: &'static str) -> impl IntoElement {
+        let t = &self.theme;
+        div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .children(shortcut.split(' ').map(|key| {
+                div()
+                    .min_w(px(22.0))
+                    .h(px(22.0))
+                    .px(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(tokens::radius::SM))
+                    .bg(hsla(t.bg_elevated))
+                    .border_1()
+                    .border_color(hsla(t.border_strong))
+                    .text_size(px(tokens::text::XS))
+                    .text_color(hsla(t.text))
+                    .child(SharedString::from(key))
+            }))
+    }
+
     fn settings_general(&self, cx: &mut Context<'_, Self>) -> Vec<gpui::AnyElement> {
-        let shell_buttons: Vec<_> = self
+        let default_shell = self.local_spawn.profile.name.clone();
+        let shells: Vec<(SharedString, bool, ClickHandler)> = self
             .shells
             .iter()
             .enumerate()
             .map(|(index, shell)| {
-                self.button(
-                    SharedString::from(format!("set-shell-{index}")),
-                    shell.name.clone(),
-                    shell.name == self.local_spawn.profile.name,
-                    cx.listener(move |this, _, _, cx| this.set_default_shell(index, cx)),
+                let view = cx.entity();
+                let handler: ClickHandler = Box::new(move |_, _, cx| {
+                    view.update(cx, |this, cx| this.set_default_shell(index, cx));
+                });
+                (
+                    SharedString::from(shell.name.clone()),
+                    shell.name == default_shell,
+                    handler,
                 )
             })
             .collect();
         vec![
             self.settings_section_title("LAYOUT").into_any_element(),
-            self.setting_row(
-                "Sidebar",
-                "Workspace list, SSH hosts and project actions. Ctrl Shift B",
-                self.toggle_switch(
-                    "set-sidebar",
-                    self.show_sidebar,
-                    cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
+            self.settings_card(vec![
+                self.setting_row(
+                    "Sidebar",
+                    "Workspaces, SSH hosts and project actions.",
+                    self.toggle_switch(
+                        "set-sidebar",
+                        self.show_sidebar,
+                        cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
+                    ),
                 ),
-            )
-            .into_any_element(),
-            self.setting_row(
-                "Open sidebar on hover",
-                "While the sidebar is hidden, move the pointer to the left edge to peek at it.",
-                self.toggle_switch(
-                    "set-sidebar-hover",
-                    self.sidebar_hover,
-                    cx.listener(|this, _, _, cx| {
-                        this.sidebar_hover = !this.sidebar_hover;
-                        this.sidebar_peek = false;
-                        cx.notify();
-                    }),
+                self.setting_row(
+                    "Open sidebar on hover",
+                    "While the sidebar is hidden, move the pointer to the left edge to peek at it.",
+                    self.toggle_switch(
+                        "set-sidebar-hover",
+                        self.sidebar_hover,
+                        cx.listener(|this, _, _, cx| {
+                            this.sidebar_hover = !this.sidebar_hover;
+                            this.sidebar_peek = false;
+                            cx.notify();
+                        }),
+                    ),
                 ),
-            )
-            .into_any_element(),
-            self.setting_row(
-                "Tab strip",
-                "Also show workspaces as horizontal tabs above the terminal.",
-                self.toggle_switch(
-                    "set-tabstrip",
-                    self.show_tab_strip,
-                    cx.listener(|this, _, _, cx| {
-                        this.show_tab_strip = !this.show_tab_strip;
-                        cx.notify();
-                    }),
+                self.setting_row(
+                    "Tab strip",
+                    "Also show workspaces as horizontal tabs above the terminal.",
+                    self.toggle_switch(
+                        "set-tabstrip",
+                        self.show_tab_strip,
+                        cx.listener(|this, _, _, cx| {
+                            this.show_tab_strip = !this.show_tab_strip;
+                            cx.notify();
+                        }),
+                    ),
                 ),
-            )
-            .into_any_element(),
-            self.setting_row(
-                "Status bar",
-                "Command count, last exit code, program status and grid size.",
-                self.toggle_switch(
-                    "set-statusbar",
-                    self.show_status_bar,
-                    cx.listener(|this, _, _, cx| {
-                        this.show_status_bar = !this.show_status_bar;
-                        cx.notify();
-                    }),
+                self.setting_row(
+                    "Status bar",
+                    "Command count, last exit code, program status and grid size.",
+                    self.toggle_switch(
+                        "set-statusbar",
+                        self.show_status_bar,
+                        cx.listener(|this, _, _, cx| {
+                            this.show_status_bar = !this.show_status_bar;
+                            cx.notify();
+                        }),
+                    ),
                 ),
-            )
-            .into_any_element(),
+            ]),
             self.settings_section_title("SHELL").into_any_element(),
-            self.setting_row(
+            self.settings_card(vec![self.setting_row(
                 "Default shell",
-                "Used by New terminal and Ctrl Shift T. Pick a different one from the ▾ next to New terminal.",
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .justify_end()
-                    .gap(px(tokens::space::SM))
-                    .children(shell_buttons),
-            )
-            .into_any_element(),
+                "Used by New terminal and Ctrl Shift T. Pick another from the arrow beside New terminal.",
+                self.segmented("set-shell", shells),
+            )]),
         ]
     }
 
     fn settings_appearance(&self, cx: &mut Context<'_, Self>) -> Vec<gpui::AnyElement> {
+        let t = &self.theme;
         let dark = self.theme.is_dark;
         let size = self.font_size;
         let width = self.sidebar_width;
-        let widths = SIDEBAR_WIDTHS.iter().enumerate().map(|(i, (w, label))| {
-            let w = *w;
-            let id: &'static str = ["set-width-0", "set-width-1", "set-width-2"][i];
-            self.button(
-                id,
-                *label,
-                (width - w).abs() < 1.0,
-                cx.listener(move |this, _, _, cx| {
-                    this.sidebar_width = w;
-                    cx.notify();
-                }),
-            )
-        });
+        let widths: Vec<(SharedString, bool, ClickHandler)> = SIDEBAR_WIDTHS
+            .iter()
+            .map(|(w, label)| {
+                let w = *w;
+                let view = cx.entity();
+                let handler: ClickHandler = Box::new(move |_, _, cx| {
+                    view.update(cx, |this, cx| {
+                        this.sidebar_width = w;
+                        cx.notify();
+                    });
+                });
+                (SharedString::from(*label), (width - w).abs() < 1.0, handler)
+            })
+            .collect();
         vec![
             self.settings_section_title("THEME").into_any_element(),
-            self.setting_row(
-                "Color scheme",
-                "Applies immediately to the whole window.",
+            div()
+                .flex()
+                .gap(px(tokens::space::LG))
+                .child(self.theme_card(
+                    "set-theme-dark",
+                    "Dark",
+                    ThemeInput::DARK,
+                    dark,
+                    cx.listener(|this, _, _, cx| this.set_dark_theme(true, cx)),
+                ))
+                .child(self.theme_card(
+                    "set-theme-light",
+                    "Light",
+                    ThemeInput::LIGHT,
+                    !dark,
+                    cx.listener(|this, _, _, cx| this.set_dark_theme(false, cx)),
+                ))
+                .into_any_element(),
+            self.settings_section_title("TERMINAL TEXT")
+                .into_any_element(),
+            self.settings_card(vec![
+                self.setting_row(
+                    "Font size",
+                    "Ctrl +, Ctrl - and Ctrl 0 also work inside the terminal.",
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(tokens::space::SM))
+                        .child(self.button(
+                            "set-font-dec",
+                            "−",
+                            cx.listener(|this, _, _, cx| {
+                                this.font_size = (this.font_size - 1.0).max(8.0);
+                                cx.notify();
+                            }),
+                        ))
+                        .child(
+                            div()
+                                .w(px(44.0))
+                                .flex()
+                                .justify_center()
+                                .text_color(hsla(t.text))
+                                .child(SharedString::from(format!("{size:.0} pt"))),
+                        )
+                        .child(self.button(
+                            "set-font-inc",
+                            "+",
+                            cx.listener(|this, _, _, cx| {
+                                this.font_size = (this.font_size + 1.0).min(32.0);
+                                cx.notify();
+                            }),
+                        ))
+                        .child(self.button(
+                            "set-font-reset",
+                            "Reset",
+                            cx.listener(|this, _, _, cx| {
+                                this.font_size = 14.0;
+                                cx.notify();
+                            }),
+                        )),
+                ),
                 div()
-                    .flex()
-                    .gap(px(tokens::space::SM))
-                    .child(self.button(
-                        "set-theme-dark",
-                        "Dark",
-                        dark,
-                        cx.listener(|this, _, _, cx| this.set_dark_theme(true, cx)),
-                    ))
-                    .child(self.button(
-                        "set-theme-light",
-                        "Light",
-                        !dark,
-                        cx.listener(|this, _, _, cx| this.set_dark_theme(false, cx)),
-                    )),
-            )
-            .into_any_element(),
-            self.settings_section_title("TERMINAL").into_any_element(),
-            self.setting_row(
-                "Font size",
-                "Ctrl +, Ctrl -, Ctrl 0 also work in the terminal.",
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(tokens::space::SM))
-                    .child(self.button(
-                        "set-font-dec",
-                        "−",
-                        false,
-                        cx.listener(|this, _, _, cx| {
-                            this.font_size = (this.font_size - 1.0).max(8.0);
-                            cx.notify();
-                        }),
-                    ))
-                    .child(
-                        div()
-                            .w(px(36.0))
-                            .flex()
-                            .justify_center()
-                            .text_color(hsla(self.theme.text))
-                            .child(SharedString::from(format!("{size:.0}"))),
-                    )
-                    .child(self.button(
-                        "set-font-inc",
-                        "+",
-                        false,
-                        cx.listener(|this, _, _, cx| {
-                            this.font_size = (this.font_size + 1.0).min(32.0);
-                            cx.notify();
-                        }),
-                    ))
-                    .child(self.button(
-                        "set-font-reset",
-                        "Reset",
-                        false,
-                        cx.listener(|this, _, _, cx| {
-                            this.font_size = 14.0;
-                            cx.notify();
-                        }),
-                    )),
-            )
-            .into_any_element(),
+                    .m(px(tokens::space::MD))
+                    .px(px(tokens::space::MD))
+                    .py(px(tokens::space::SM))
+                    .rounded(px(tokens::radius::MD))
+                    .bg(hsla(t.term_bg))
+                    .border_1()
+                    .border_color(hsla(t.border))
+                    .font_family(self.font.family.clone())
+                    .text_size(px(size))
+                    .text_color(hsla(t.text))
+                    .child(SharedString::from("❯ cargo test --workspace  # 0123456789"))
+                    .into_any_element(),
+            ]),
             self.settings_section_title("SIDEBAR").into_any_element(),
-            self.setting_row(
+            self.settings_card(vec![self.setting_row(
                 "Sidebar width",
                 "",
-                div().flex().gap(px(tokens::space::SM)).children(widths),
-            )
-            .into_any_element(),
+                self.segmented("set-width", widths),
+            )]),
         ]
     }
 
     fn settings_keybindings(&self) -> Vec<gpui::AnyElement> {
-        let t = &self.theme;
-        let extra: &[(&str, &str)] = &[
-            ("Toggle sidebar", "Ctrl Shift B"),
-            ("Open settings", "Ctrl ,"),
-            ("Rename workspace", "Double-click"),
-            ("Reorder workspace", "Drag a row"),
-            ("Jump to tab 1–9", "Ctrl 1…9"),
-            ("Previous / next tab", "Ctrl Shift ← / →"),
+        let groups: &[(&'static str, &[(&'static str, &'static str)])] = &[
+            (
+                "TABS",
+                &[
+                    ("New terminal", "Ctrl Shift T"),
+                    ("Close tab", "Ctrl Shift W"),
+                    ("Next tab", "Ctrl Tab"),
+                    ("Previous tab", "Ctrl Shift Tab"),
+                    ("Jump to tab 1–9", "Ctrl 1…9"),
+                ],
+            ),
+            (
+                "WORKSPACES",
+                &[
+                    ("Toggle sidebar", "Ctrl Shift B"),
+                    ("Rename workspace", "Ctrl Shift R"),
+                    ("Pin or unpin workspace", "Ctrl Shift K"),
+                    ("Move workspace up or down", "Ctrl Shift ↑ ↓"),
+                    ("Jump to workspace needing attention", "Ctrl Shift U"),
+                ],
+            ),
+            (
+                "TERMINAL",
+                &[
+                    ("Command palette", "Ctrl Shift P"),
+                    ("Find", "Ctrl Shift F"),
+                    ("Copy", "Ctrl Shift C"),
+                    ("Paste", "Ctrl Shift V"),
+                    ("Increase, decrease, reset font", "Ctrl + − 0"),
+                    ("Scroll to top or bottom", "Ctrl Shift Home End"),
+                ],
+            ),
+            (
+                "APPLICATION",
+                &[("Open settings", "Ctrl ,"), ("Quit", "Ctrl Shift Q")],
+            ),
         ];
-        let mut rows = vec![self.settings_section_title("SHORTCUTS").into_any_element()];
-        rows.extend(
-            PALETTE_COMMANDS
-                .iter()
-                .filter(|(_, _, shortcut)| !shortcut.is_empty())
-                .map(|(_, label, shortcut)| (*label, *shortcut))
-                .chain(extra.iter().copied())
-                .map(|(label, shortcut)| {
-                    div()
-                        .py(px(6.0))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .border_b_1()
-                        .border_color(hsla(t.border))
-                        .text_color(hsla(t.text_muted))
-                        .child(label)
-                        .child(
+        let t = &self.theme;
+        let mut out = Vec::new();
+        for (title, items) in groups {
+            out.push(self.settings_section_title(title).into_any_element());
+            out.push(
+                self.settings_card(
+                    items
+                        .iter()
+                        .map(|(label, shortcut)| {
                             div()
-                                .px(px(6.0))
-                                .py(px(1.0))
-                                .rounded(px(tokens::radius::SM))
-                                .bg(hsla(t.bg_elevated))
-                                .text_size(px(tokens::text::XS))
+                                .px(px(tokens::space::MD))
+                                .h(px(40.0))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .text_size(px(tokens::text::MD))
                                 .text_color(hsla(t.text))
-                                .child(shortcut),
-                        )
-                        .into_any_element()
-                }),
-        );
-        rows
+                                .child(*label)
+                                .child(self.key_caps(shortcut))
+                                .into_any_element()
+                        })
+                        .collect(),
+                ),
+            );
+        }
+        out
     }
 
     fn settings_advanced(&self, cx: &mut Context<'_, Self>) -> Vec<gpui::AnyElement> {
@@ -3372,59 +3595,59 @@ impl TerminalView {
             self.spawn.profile.name
         );
         vec![
-            self.settings_section_title("DIAGNOSTICS").into_any_element(),
-            self.setting_row(
-                "Build",
-                "",
-                div().text_color(hsla(t.text_muted)).child(SharedString::from(info)),
-            )
-            .into_any_element(),
-            self.setting_row(
-                "Copy diagnostics",
-                "Version, protocol, shell and working directory to the clipboard.",
-                self.button(
-                    "set-copy-diag",
-                    "Copy",
-                    false,
-                    cx.listener(|this, _, _, cx| {
-                        this.run_palette_action(PaletteAction::CopyDiagnostics, cx);
-                    }),
+            self.settings_section_title("DIAGNOSTICS")
+                .into_any_element(),
+            self.settings_card(vec![
+                self.setting_row(
+                    "Build",
+                    "",
+                    div()
+                        .text_size(px(tokens::text::SM))
+                        .text_color(hsla(t.text_muted))
+                        .child(SharedString::from(info)),
                 ),
-            )
-            .into_any_element(),
-            self.setting_row(
-                "Daemon doctor",
-                "Runs `forged doctor` in the active terminal.",
-                self.button(
-                    "set-doctor",
-                    "Run",
-                    false,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings = None;
-                        this.run_palette_action(PaletteAction::DaemonDoctor, cx);
-                    }),
+                self.setting_row(
+                    "Copy diagnostics",
+                    "Version, protocol, shell and working directory to the clipboard.",
+                    self.button(
+                        "set-copy-diag",
+                        "Copy",
+                        cx.listener(|this, _, _, cx| {
+                            this.run_palette_action(PaletteAction::CopyDiagnostics, cx);
+                        }),
+                    ),
                 ),
-            )
-            .into_any_element(),
-            self.setting_row(
-                "Restart session",
-                "Restarts the shell in the active workspace.",
-                self.button(
-                    "set-restart",
-                    "Restart",
-                    false,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings = None;
-                        this.start(cx);
-                    }),
+                self.setting_row(
+                    "Daemon doctor",
+                    "Runs `forged doctor` in the active terminal.",
+                    self.button(
+                        "set-doctor",
+                        "Run",
+                        cx.listener(|this, _, _, cx| {
+                            this.settings = None;
+                            this.run_palette_action(PaletteAction::DaemonDoctor, cx);
+                        }),
+                    ),
                 ),
-            )
-            .into_any_element(),
+                self.setting_row(
+                    "Restart session",
+                    "Restarts the shell in the active workspace.",
+                    self.button(
+                        "set-restart",
+                        "Restart",
+                        cx.listener(|this, _, _, cx| {
+                            this.settings = None;
+                            this.start(cx);
+                        }),
+                    ),
+                ),
+            ]),
             div()
                 .mt(px(tokens::space::LG))
-                .text_size(px(tokens::text::XS))
+                .px(px(2.0))
+                .text_size(px(tokens::text::SM))
                 .text_color(hsla(t.text_faint))
-                .child("Settings apply to this window only; saving them to the config file is not wired up yet.")
+                .child("Settings apply to this window only and are not saved yet.")
                 .into_any_element(),
         ]
     }
@@ -3432,6 +3655,14 @@ impl TerminalView {
     fn settings_panel(&self, cx: &mut Context<'_, Self>) -> Option<impl IntoElement> {
         let page = self.settings?;
         let t = &self.theme;
+        let (title, subtitle) = match page {
+            SettingsPage::General => ("General", "Layout and the shell new terminals start with."),
+            SettingsPage::Appearance => ("Appearance", "Theme, terminal text and sidebar size."),
+            SettingsPage::Keybindings => {
+                ("Keybindings", "Keyboard shortcuts available in TermForge.")
+            }
+            SettingsPage::Advanced => ("Advanced", "Diagnostics and session controls."),
+        };
         let body = match page {
             SettingsPage::General => self.settings_general(cx),
             SettingsPage::Appearance => self.settings_appearance(cx),
@@ -3446,17 +3677,19 @@ impl TerminalView {
                 let id: &'static str = ["set-nav-0", "set-nav-1", "set-nav-2", "set-nav-3"][i];
                 div()
                     .id(id)
-                    .h(px(30.0))
+                    .h(px(34.0))
                     .px(px(tokens::space::MD))
                     .flex()
                     .items_center()
                     .rounded(px(tokens::radius::MD))
+                    .text_size(px(tokens::text::MD))
+                    .cursor_pointer()
                     .when(target == page, |d| {
                         d.bg(hsla(t.bg_selected)).text_color(hsla(t.text))
                     })
                     .when(target != page, |d| {
                         d.text_color(hsla(t.text_muted))
-                            .hover(|style| style.bg(hsla(t.bg_hover)))
+                            .hover(|style| style.bg(hsla(t.bg_hover)).text_color(hsla(t.text)))
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.settings = Some(target);
@@ -3475,7 +3708,7 @@ impl TerminalView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui::black().opacity(0.45))
+                .bg(gpui::black().opacity(0.5))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.settings = None;
                     cx.notify();
@@ -3483,13 +3716,13 @@ impl TerminalView {
                 .child(
                     div()
                         .id("settings-panel")
-                        .w(px(760.0))
+                        .w(px(860.0))
                         .max_w_full()
-                        .h(px(480.0))
+                        .h(px(580.0))
                         .max_h_full()
                         .flex()
                         .rounded(px(tokens::radius::XL))
-                        .bg(hsla(t.bg_elevated))
+                        .bg(hsla(t.bg_app))
                         .border_1()
                         .border_color(hsla(t.border_strong))
                         .shadow_lg()
@@ -3497,9 +3730,9 @@ impl TerminalView {
                         .on_click(|_, _, cx| cx.stop_propagation())
                         .child(
                             div()
-                                .w(px(180.0))
+                                .w(px(200.0))
                                 .flex_none()
-                                .p(px(tokens::space::SM))
+                                .p(px(tokens::space::MD))
                                 .flex()
                                 .flex_col()
                                 .gap(px(2.0))
@@ -3509,7 +3742,9 @@ impl TerminalView {
                                 .child(
                                     div()
                                         .px(px(tokens::space::MD))
-                                        .py(px(tokens::space::SM))
+                                        .pt(px(tokens::space::SM))
+                                        .pb(px(tokens::space::MD))
+                                        .text_size(px(tokens::text::LG))
                                         .text_color(hsla(t.text))
                                         .child("Settings"),
                                 )
@@ -3523,20 +3758,29 @@ impl TerminalView {
                                 .flex_col()
                                 .child(
                                     div()
-                                        .h(px(40.0))
-                                        .px(px(tokens::space::LG))
+                                        .px(px(tokens::space::XL))
+                                        .pt(px(tokens::space::LG))
+                                        .pb(px(tokens::space::MD))
                                         .flex()
-                                        .items_center()
+                                        .items_start()
                                         .justify_between()
-                                        .border_b_1()
-                                        .border_color(hsla(t.border))
                                         .child(
-                                            div().text_color(hsla(t.text)).child(
-                                                SETTINGS_PAGES
-                                                    .iter()
-                                                    .find(|(p, _)| *p == page)
-                                                    .map_or("", |(_, l)| *l),
-                                            ),
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap(px(2.0))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(tokens::text::XL))
+                                                        .text_color(hsla(t.text))
+                                                        .child(title),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(tokens::text::SM))
+                                                        .text_color(hsla(t.text_faint))
+                                                        .child(subtitle),
+                                                ),
                                         )
                                         .child(self.icon_button(
                                             "settings-close",
@@ -3552,10 +3796,11 @@ impl TerminalView {
                                         .id("settings-body")
                                         .flex_1()
                                         .overflow_y_scroll()
-                                        .px(px(tokens::space::LG))
-                                        .pb(px(tokens::space::LG))
+                                        .px(px(tokens::space::XL))
+                                        .pb(px(tokens::space::XL))
                                         .flex()
                                         .flex_col()
+                                        .text_size(px(tokens::text::MD))
                                         .text_color(hsla(t.text_muted))
                                         .children(body),
                                 ),
@@ -3830,8 +4075,8 @@ impl Render for TerminalView {
             .flex()
             .relative()
             .bg(hsla(self.theme.bg_app))
-            .font_family(self.font.family.clone())
-            .text_size(px(tokens::text::SM))
+            .font_family(self.ui_font.clone())
+            .text_size(px(tokens::text::MD))
             .when(self.show_sidebar, |d| d.child(self.workspace_sidebar(cx)))
             .when(!self.show_sidebar && self.sidebar_hover, |d| {
                 if self.sidebar_peek {
