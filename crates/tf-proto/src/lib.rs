@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped on any incompatible change to the types in this crate.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Stable identifier for a PTY session owned by `forged`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -97,6 +97,9 @@ pub enum Request {
     },
     CreateTask(CreateTask),
     UpdateTask(UpdateTask),
+    DeleteTask {
+        id: TaskId,
+    },
     CreateSession(CreateSession),
     Write {
         session: SessionId,
@@ -187,6 +190,8 @@ pub struct CreateTask {
     pub title: String,
     /// A concise durable summary of intent, constraints and decisions.
     pub context: String,
+    /// A single-line shell command the UI can run for this task.
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,6 +200,8 @@ pub struct UpdateTask {
     pub state: Option<TaskState>,
     pub title: Option<String>,
     pub context: Option<String>,
+    /// `None` leaves the command unchanged; `Some("")` clears it.
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,6 +218,7 @@ pub struct TaskInfo {
     pub project_root: PathBuf,
     pub title: String,
     pub context: String,
+    pub command: Option<String>,
     pub state: TaskState,
     pub updated_at: i64,
 }

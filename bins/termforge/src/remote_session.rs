@@ -693,3 +693,53 @@ pub fn save_workspace_state(project_root: PathBuf, state: String) {
         tracing::debug!("could not start layout save thread: {error}");
     }
 }
+
+/// Tasks for a project, fetched from the daemon. Blocking; call it from a
+/// background thread.
+pub fn list_tasks(project_root: PathBuf) -> Result<Vec<tf_proto::TaskInfo>> {
+    blocking_ipc(move |mut client| async move {
+        match client.request(Request::ListTasks { project_root }).await? {
+            Response::Tasks(tasks) => Ok(tasks),
+            response => anyhow::bail!("unexpected list-tasks response: {response:?}"),
+        }
+    })
+}
+
+/// Create a task. Blocking; call it from a background thread.
+pub fn create_task(project_root: PathBuf, title: String, command: Option<String>) -> Result<()> {
+    blocking_ipc(move |mut client| async move {
+        client
+            .request(Request::CreateTask(tf_proto::CreateTask {
+                project_root,
+                title,
+                context: String::new(),
+                command,
+            }))
+            .await?;
+        Ok(())
+    })
+}
+
+/// Change a task's state. Blocking; call it from a background thread.
+pub fn set_task_state(id: tf_proto::TaskId, state: tf_proto::TaskState) -> Result<()> {
+    blocking_ipc(move |mut client| async move {
+        client
+            .request(Request::UpdateTask(tf_proto::UpdateTask {
+                id,
+                state: Some(state),
+                title: None,
+                context: None,
+                command: None,
+            }))
+            .await?;
+        Ok(())
+    })
+}
+
+/// Delete a task. Blocking; call it from a background thread.
+pub fn delete_task(id: tf_proto::TaskId) -> Result<()> {
+    blocking_ipc(move |mut client| async move {
+        client.request(Request::DeleteTask { id }).await?;
+        Ok(())
+    })
+}

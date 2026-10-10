@@ -84,6 +84,10 @@ const MIGRATIONS: &[&str] = &[
     r"
     ALTER TABLE restorable_sessions ADD COLUMN ssh_host TEXT;
     ",
+    // v5: an optional runnable command attached to a task.
+    r"
+    ALTER TABLE tasks ADD COLUMN command TEXT;
+    ",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +134,8 @@ pub struct TaskRecord {
     pub project_root: PathBuf,
     pub title: String,
     pub context: String,
+    /// A single-line shell command the UI can run for this task.
+    pub command: Option<String>,
     pub state: TaskState,
     pub updated_at: i64,
 }
@@ -331,8 +337,8 @@ impl Store {
 
     pub fn create_task(&self, task: &TaskRecord) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO tasks (id, project_root, title, context, state, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            "INSERT INTO tasks (id, project_root, title, context, state, created_at, updated_at, command)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
             params![
                 task.id,
                 task.project_root.to_string_lossy(),
@@ -340,6 +346,7 @@ impl Store {
                 task.context,
                 task_state_name(task.state),
                 now_ms(),
+                task.command,
             ],
         )?;
         Ok(())
@@ -349,7 +356,7 @@ impl Store {
         let root = dunce::canonicalize(project_root)
             .map_err(|error| StoreError::Path(project_root.into(), error))?;
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, project_root, title, context, state, updated_at FROM tasks
+            "SELECT id, project_root, title, context, state, updated_at, command FROM tasks
              WHERE project_root = ?1 ORDER BY updated_at DESC, id",
         )?;
         let rows = stmt.query_map(params![root.to_string_lossy()], row_to_task)?;
@@ -362,17 +369,37 @@ impl Store {
         state: Option<TaskState>,
         title: Option<&str>,
         context: Option<&str>,
+        command: Option<&str>,
     ) -> Result<bool> {
+        // `command`: `None` leaves it alone, `Some("")` clears it.
         let changed = self.conn.execute(
             "UPDATE tasks SET
                 state = COALESCE(?2, state),
                 title = COALESCE(?3, title),
                 context = COALESCE(?4, context),
-                updated_at = ?5
+                command = CASE WHEN ?5 IS NULL THEN command
+                               WHEN ?5 = '' THEN NULL
+                               ELSE ?5 END,
+                updated_at = ?6
              WHERE id = ?1",
-            params![id, state.map(task_state_name), title, context, now_ms()],
+            params![
+                id,
+                state.map(task_state_name),
+                title,
+                context,
+                command,
+                now_ms()
+            ],
         )?;
         Ok(changed != 0)
+    }
+
+    /// Remove a task. Sessions that referenced it keep running with no task.
+    pub fn delete_task(&self, id: &str) -> Result<bool> {
+        let removed = self
+            .conn
+            .execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+        Ok(removed != 0)
     }
 }
 
@@ -398,6 +425,7 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
         project_root: PathBuf::from(row.get::<_, String>(1)?),
         title: row.get(2)?,
         context: row.get(3)?,
+        command: row.get(6)?,
         state,
         updated_at: row.get(5)?,
     })
@@ -554,6 +582,7 @@ mod tests {
             project_root: root.path().canonicalize().unwrap(),
             title: "Ship beta".into(),
             context: "Keep the daemon local-first".into(),
+            command: Some("cargo test".into()),
             state: TaskState::Planned,
             updated_at: 0,
         };
@@ -567,13 +596,30 @@ mod tests {
                 Some(TaskState::Active),
                 None,
                 Some("Protocol and storage are stable"),
+                None,
             )
             .unwrap());
         let updated = store.tasks_for_project(root.path()).unwrap().pop().unwrap();
         assert_eq!(updated.state, TaskState::Active);
         assert_eq!(updated.context, "Protocol and storage are stable");
-        assert!(!store
-            .update_task("missing", Some(TaskState::Done), None, None)
+        // Updating other fields leaves the command alone; "" clears it.
+        assert_eq!(updated.command.as_deref(), Some("cargo test"));
+        assert!(store
+            .update_task("task-1", None, None, None, Some("cargo clippy"))
             .unwrap());
+        let changed = store.tasks_for_project(root.path()).unwrap().pop().unwrap();
+        assert_eq!(changed.command.as_deref(), Some("cargo clippy"));
+        assert!(store
+            .update_task("task-1", None, None, None, Some(""))
+            .unwrap());
+        let cleared = store.tasks_for_project(root.path()).unwrap().pop().unwrap();
+        assert_eq!(cleared.command, None);
+
+        assert!(!store
+            .update_task("missing", Some(TaskState::Done), None, None, None)
+            .unwrap());
+        assert!(store.delete_task("task-1").unwrap());
+        assert!(!store.delete_task("task-1").unwrap());
+        assert!(store.tasks_for_project(root.path()).unwrap().is_empty());
     }
 }

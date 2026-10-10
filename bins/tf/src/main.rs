@@ -84,6 +84,9 @@ enum TaskCommand {
         title: String,
         #[arg(long, default_value = "")]
         context: String,
+        /// A one-line shell command TermForge can run for this task.
+        #[arg(long)]
+        command: Option<String>,
         #[arg(long, default_value = ".")]
         project: PathBuf,
     },
@@ -95,7 +98,12 @@ enum TaskCommand {
         title: Option<String>,
         #[arg(long)]
         context: Option<String>,
+        /// Set the task's command; pass an empty string to clear it.
+        #[arg(long)]
+        command: Option<String>,
     },
+    /// Delete a task.
+    Delete { id: tf_proto::TaskId },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -167,6 +175,9 @@ fn run_task(command: TaskCommand, out: &mut impl Write) -> Result<()> {
                 };
                 for task in tasks {
                     writeln!(out, "{}\t{:?}\t{}", task.id, task.state, task.title)?;
+                    if let Some(command) = &task.command {
+                        writeln!(out, "  $ {command}")?;
+                    }
                     if !task.context.is_empty() {
                         writeln!(out, "  {}", task.context)?;
                     }
@@ -175,6 +186,7 @@ fn run_task(command: TaskCommand, out: &mut impl Write) -> Result<()> {
             TaskCommand::Create {
                 title,
                 context,
+                command,
                 project,
             } => {
                 let project_root = dunce::canonicalize(project)?;
@@ -183,6 +195,7 @@ fn run_task(command: TaskCommand, out: &mut impl Write) -> Result<()> {
                         project_root,
                         title,
                         context,
+                        command,
                     }))
                     .await?;
                 let tf_proto::Response::TaskCreated(id) = response else {
@@ -195,6 +208,7 @@ fn run_task(command: TaskCommand, out: &mut impl Write) -> Result<()> {
                 state,
                 title,
                 context,
+                command,
             } => {
                 let state = state.map(|state| match state {
                     TaskStateArg::Planned => tf_proto::TaskState::Planned,
@@ -208,8 +222,12 @@ fn run_task(command: TaskCommand, out: &mut impl Write) -> Result<()> {
                         state,
                         title,
                         context,
+                        command,
                     }))
                     .await?;
+            }
+            TaskCommand::Delete { id } => {
+                client.request(tf_proto::Request::DeleteTask { id }).await?;
             }
         }
         Ok(())

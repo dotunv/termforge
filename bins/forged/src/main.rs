@@ -224,6 +224,16 @@ impl SessionHost {
             Request::ListTasks { project_root } => self.list_tasks(&project_root),
             Request::CreateTask(create) => self.create_task(create),
             Request::UpdateTask(update) => self.update_task(update),
+            Request::DeleteTask { id } => {
+                let removed = lock(&self.store)
+                    .delete_task(&id.to_string())
+                    .map_err(internal)?;
+                if removed {
+                    Ok(Response::Ok)
+                } else {
+                    Err(ProtoError::Internal(format!("task not found: {id}")))
+                }
+            }
             Request::CreateSession(create) => self.create(create).map(Response::Created),
             Request::Write { session, data } => {
                 let live = self.session(session)?;
@@ -472,8 +482,9 @@ impl SessionHost {
     }
 
     fn create_task(&self, create: tf_proto::CreateTask) -> Result<Response, ProtoError> {
-        validate_task_text(&create.title, 200, "task title")?;
-        validate_task_text(&create.context, 16 * 1024, "task context")?;
+        validate_task_text(&create.title, 200, "task title", false)?;
+        validate_task_text(&create.context, 16 * 1024, "task context", true)?;
+        let command = normalize_task_command(create.command.as_deref())?;
         let project_root = dunce::canonicalize(&create.project_root).map_err(internal)?;
         let id = TaskId::new();
         lock(&self.store)
@@ -482,6 +493,7 @@ impl SessionHost {
                 project_root,
                 title: create.title,
                 context: create.context,
+                command,
                 state: StoreTaskState::Planned,
                 updated_at: 0,
             })
@@ -491,17 +503,23 @@ impl SessionHost {
 
     fn update_task(&self, update: tf_proto::UpdateTask) -> Result<Response, ProtoError> {
         if let Some(title) = update.title.as_deref() {
-            validate_task_text(title, 200, "task title")?;
+            validate_task_text(title, 200, "task title", false)?;
         }
         if let Some(context) = update.context.as_deref() {
-            validate_task_text(context, 16 * 1024, "task context")?;
+            validate_task_text(context, 16 * 1024, "task context", true)?;
         }
+        // Keep `Some("")` meaning "clear"; only a non-empty command is checked.
+        let command = match update.command.as_deref() {
+            Some(value) if value.trim().is_empty() => Some(String::new()),
+            other => normalize_task_command(other)?,
+        };
         let changed = lock(&self.store)
             .update_task(
                 &update.id.to_string(),
                 update.state.map(task_state_to_store),
                 update.title.as_deref(),
                 update.context.as_deref(),
+                command.as_deref(),
             )
             .map_err(internal)?;
         if !changed {
@@ -514,11 +532,31 @@ impl SessionHost {
     }
 }
 
-fn validate_task_text(value: &str, max: usize, name: &str) -> Result<(), ProtoError> {
-    if value.trim().is_empty() || value.len() > max || value.chars().any(|ch| ch == '\0') {
+/// Titles must say something; a context is optional and may be cleared with
+/// an empty string, which is also what `tf task create` sends by default.
+fn validate_task_text(
+    value: &str,
+    max: usize,
+    name: &str,
+    allow_empty: bool,
+) -> Result<(), ProtoError> {
+    let blank = value.trim().is_empty();
+    if (blank && !allow_empty) || value.len() > max || value.chars().any(|ch| ch == '\0') {
         return Err(ProtoError::Internal(format!("invalid {name}")));
     }
     Ok(())
+}
+
+/// A task command is typed into a terminal and run, so it must be one line
+/// of printable text. Blank means "no command".
+fn normalize_task_command(command: Option<&str>) -> Result<Option<String>, ProtoError> {
+    let Some(command) = command.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if command.len() > 2048 || command.chars().any(|ch| ch.is_control() && ch != '\t') {
+        return Err(ProtoError::Internal("invalid task command".into()));
+    }
+    Ok(Some(command.to_owned()))
 }
 
 fn task_state_to_store(state: ProtoTaskState) -> StoreTaskState {
@@ -536,6 +574,7 @@ fn task_to_proto(task: TaskRecord) -> Result<TaskInfo, ProtoError> {
         project_root: task.project_root,
         title: task.title,
         context: task.context,
+        command: task.command,
         state: match task.state {
             StoreTaskState::Planned => ProtoTaskState::Planned,
             StoreTaskState::Active => ProtoTaskState::Active,
@@ -846,6 +885,30 @@ fn doctor(data_dir: &std::path::Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn task_command_must_be_one_printable_line() {
+        assert_eq!(normalize_task_command(None).unwrap(), None);
+        assert_eq!(normalize_task_command(Some("  ")).unwrap(), None);
+        assert_eq!(
+            normalize_task_command(Some(" cargo test "))
+                .unwrap()
+                .as_deref(),
+            Some("cargo test")
+        );
+        assert!(normalize_task_command(Some("a\nb")).is_err());
+        assert!(normalize_task_command(Some("a\x1b[31mb")).is_err());
+        assert!(normalize_task_command(Some(&"x".repeat(2049))).is_err());
+    }
+
+    #[test]
+    fn task_context_may_be_empty_but_title_may_not() {
+        assert!(validate_task_text("", 200, "task context", true).is_ok());
+        assert!(validate_task_text("  ", 200, "task title", false).is_err());
+        assert!(validate_task_text("ship it", 200, "task title", false).is_ok());
+        assert!(validate_task_text("a\0b", 200, "task context", true).is_err());
+        assert!(validate_task_text(&"x".repeat(201), 200, "task title", false).is_err());
+    }
+
     use super::*;
     use std::collections::VecDeque;
 
@@ -910,6 +973,7 @@ mod tests {
                 project_root: dir.path().to_path_buf(),
                 title: "Ship beta".into(),
                 context: "Preserve project state".into(),
+                command: Some("cargo test".into()),
             }))
             .expect("create task")
         else {
@@ -920,6 +984,7 @@ mod tests {
             state: Some(ProtoTaskState::Active),
             title: None,
             context: Some("Daemon and UI share context".into()),
+            command: None,
         }))
         .expect("update task");
         let Response::Tasks(tasks) = host
@@ -934,6 +999,21 @@ mod tests {
         assert_eq!(tasks[0].id, id);
         assert_eq!(tasks[0].state, ProtoTaskState::Active);
         assert_eq!(tasks[0].context, "Daemon and UI share context");
+        assert_eq!(tasks[0].command.as_deref(), Some("cargo test"));
+
+        // A task command is typed into a terminal, so reject control text.
+        assert!(host
+            .handle(Request::CreateTask(tf_proto::CreateTask {
+                project_root: dir.path().to_path_buf(),
+                title: "Bad".into(),
+                context: String::new(),
+                command: Some("echo hi\nrm -rf /".into()),
+            }))
+            .is_err());
+
+        host.handle(Request::DeleteTask { id })
+            .expect("delete task");
+        assert!(host.handle(Request::DeleteTask { id }).is_err());
     }
 
     #[test]
