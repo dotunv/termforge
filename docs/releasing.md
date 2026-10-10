@@ -37,14 +37,32 @@ Push a version tag such as `v0.1.0-beta.1`. The release workflow:
 
 Manual workflow runs build artifacts without publishing a GitHub release.
 
+## Signing secrets
+
+All are optional; a missing group skips that platform's signing step.
+
+| Secret | Used for |
+|---|---|
+| `WINDOWS_CERT_PFX_BASE64`, `WINDOWS_CERT_PASSWORD` | Authenticode signing of `termforge.exe`, `forged.exe`, `tf.exe` |
+| `MACOS_CERT_P12_BASE64`, `MACOS_CERT_PASSWORD`, `MACOS_SIGN_IDENTITY` | Developer ID signing |
+| `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD` | notarization and stapling |
+| `TF_UPDATE_SIGNING_SEED` | 64 hex chars (`openssl rand -hex 32`); signs `manifest.json` |
+
+Run `TF_UPDATE_SIGNING_SEED=<seed> cargo xtask update-pubkey` to get the public
+key that the application must embed. Keep the seed out of the repository.
+
 ## Current beta limitations
 
-- Artifacts are not code-signed or notarized. Windows SmartScreen and macOS
-  Gatekeeper may warn; signing identities and protected CI secrets are required
-  before calling these production installers.
+- Artifacts are signed and notarized only when the signing secrets below are
+  configured; otherwise Windows SmartScreen and macOS Gatekeeper will warn. The
+  signing steps in `release.yml` have not been exercised against real
+  certificates yet: do a dry run with a tag on a fork before relying on them.
 - The Linux artifact is a native tarball, not an AppImage or distro package,
   and relies on the system graphics/font libraries listed in the README.
-- There is no auto-update channel yet.
+- There is no in-app updater. Releases publish a signed `manifest.json` (see
+  [ADR 0013](adr/0013-signed-updates.md)), and `tf-update` can verify it, but
+  nothing in the application fetches or shows it yet, and the public key has
+  not been embedded.
 - A green hosted build validates compilation and bundle structure; the release
   owner must still complete the native smoke checklist below.
 

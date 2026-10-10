@@ -9,6 +9,10 @@
 //! - `latency`: keystroke-to-visible-output probe against a real shell,
 //!   enforcing the plan's p50 budget. Release only.
 //! - `dist`: build and stage a self-contained beta bundle for the host OS.
+//! - `release-manifest --version V --base-url URL --dir DIR`: write
+//!   `SHA256SUMS`, `manifest.json` and (when `TF_UPDATE_SIGNING_SEED` is set)
+//!   `manifest.json.sig` for the bundles in DIR. See ADR 0013.
+//! - `update-pubkey`: print the public key for `TF_UPDATE_SIGNING_SEED`.
 #![allow(clippy::print_stdout)]
 
 use std::path::{Path, PathBuf};
@@ -33,6 +37,28 @@ fn main() -> Result<()> {
         Some("ci") => ci(),
         Some("latency") => latency(),
         Some("dist") => dist(),
+        Some("update-pubkey") => {
+            let seed = std::env::var("TF_UPDATE_SIGNING_SEED")
+                .context("TF_UPDATE_SIGNING_SEED is not set")?;
+            println!("{}", tf_update::public_key_hex(seed.trim())?);
+            Ok(())
+        }
+        Some("release-manifest") => {
+            let flag = |name: &str| -> Result<String> {
+                let i = args
+                    .iter()
+                    .position(|a| a == name)
+                    .with_context(|| format!("{name} is required"))?;
+                args.get(i + 1)
+                    .cloned()
+                    .with_context(|| format!("{name} needs a value"))
+            };
+            release_manifest(
+                &flag("--version")?,
+                &flag("--base-url")?,
+                Path::new(&flag("--dir")?),
+            )
+        }
         Some("spike-a") => {
             // Passed through to the test rather than parsed here, so the
             // harness keeps its own defaults when run directly.
@@ -54,11 +80,87 @@ fn main() -> Result<()> {
         _ => {
             println!(
                 "usage: cargo xtask <conpty [--arch x64|arm64|x86] | ci | dist | \
-                 spike-a [--commands N] [--shells list] | latency>"
+                 spike-a [--commands N] [--shells list] | latency | \
+                 release-manifest --version V --base-url URL --dir DIR | update-pubkey>"
             );
             Ok(())
         }
     }
+}
+
+/// Checksums and a signed update manifest for the archives in `dir`.
+///
+/// Archives are named `termforge-<ver>-<os>-<arch>.{zip,tar.gz}` by `dist`.
+fn release_manifest(version: &str, base_url: &str, dir: &Path) -> Result<()> {
+    ensure!(
+        base_url.starts_with("https://"),
+        "--base-url must be https, got {base_url}"
+    );
+    let version = version.trim_start_matches('v');
+    tf_update::Version::parse(version)?;
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            let n = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            n.starts_with("termforge-") && (n.ends_with(".zip") || n.ends_with(".tar.gz"))
+        })
+        .collect();
+    files.sort();
+    ensure!(
+        !files.is_empty(),
+        "no termforge-* archives in {}",
+        dir.display()
+    );
+
+    let mut sums = String::new();
+    let mut assets = Vec::new();
+    for path in &files {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let bytes = std::fs::read(path).with_context(|| format!("reading {name}"))?;
+        let sha256 = tf_update::sha256_hex(&bytes);
+        sums.push_str(&format!("{sha256}  {name}\n"));
+        let stem = name.trim_end_matches(".zip").trim_end_matches(".tar.gz");
+        let mut parts = stem.rsplitn(3, '-');
+        let (arch, os) = (parts.next(), parts.next());
+        let (Some(arch), Some(os)) = (arch, os) else {
+            bail!("cannot read os/arch from {name}");
+        };
+        ensure!(
+            matches!(os, "windows" | "macos" | "linux"),
+            "unexpected os `{os}` in {name}"
+        );
+        assets.push(tf_update::Asset {
+            os: os.to_owned(),
+            arch: arch.to_owned(),
+            url: format!("{}/{name}", base_url.trim_end_matches('/')),
+            sha256,
+            size: bytes.len() as u64,
+        });
+    }
+    std::fs::write(dir.join("SHA256SUMS"), sums)?;
+
+    let manifest = serde_json::to_vec_pretty(&tf_update::Manifest {
+        version: version.to_owned(),
+        notes: String::new(),
+        assets,
+    })?;
+    std::fs::write(dir.join("manifest.json"), &manifest)?;
+    match std::env::var("TF_UPDATE_SIGNING_SEED") {
+        Ok(seed) if !seed.trim().is_empty() => {
+            let sig = tf_update::sign(&manifest, seed.trim())?;
+            std::fs::write(dir.join("manifest.json.sig"), sig)?;
+            println!("wrote SHA256SUMS, manifest.json and manifest.json.sig");
+        }
+        _ => println!(
+            "wrote SHA256SUMS and manifest.json; TF_UPDATE_SIGNING_SEED is not set, \
+             so the manifest is UNSIGNED and must not be published as an update"
+        ),
+    }
+    Ok(())
 }
 
 fn dist() -> Result<()> {

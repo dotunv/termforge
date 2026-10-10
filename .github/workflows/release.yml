@@ -20,6 +20,15 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+      WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+      MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -34,6 +43,48 @@ jobs:
           key: release-${{ matrix.os }}
       - name: Build beta bundle
         run: cargo xtask dist
+      # Signing runs only when the repository provides the secrets, so forks
+      # and unconfigured repos still produce (unsigned) artifacts. See
+      # docs/releasing.md for what each secret is.
+      - name: Sign Windows executables
+        if: runner.os == 'Windows' && env.WINDOWS_CERT_PFX_BASE64 != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'sign.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          $bundle = Get-ChildItem target/dist -Directory -Filter 'termforge-*' | Select-Object -First 1
+          # Only our own binaries: conpty.dll and OpenConsole.exe keep Microsoft's signature.
+          Get-ChildItem $bundle.FullName -Recurse -Include termforge.exe,forged.exe,tf.exe | ForEach-Object {
+            & $signtool sign /fd SHA256 /f $pfx /p $env:WINDOWS_CERT_PASSWORD `
+              /tr http://timestamp.digicert.com /td SHA256 $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "signing failed: $($_.Name)" }
+          }
+          Remove-Item $pfx
+      - name: Sign and notarize macOS bundle
+        if: runner.os == 'macOS' && env.MACOS_CERT_P12_BASE64 != ''
+        shell: bash
+        run: |
+          keychain="$RUNNER_TEMP/sign.keychain-db"
+          security create-keychain -p "$MACOS_CERT_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$MACOS_CERT_PASSWORD" "$keychain"
+          echo "$MACOS_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/sign.p12"
+          security import "$RUNNER_TEMP/sign.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$MACOS_CERT_PASSWORD" "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain
+          bundle=$(find target/dist -mindepth 1 -maxdepth 1 -type d -name 'termforge-*' -print -quit)
+          # Sign helpers first, then the app, so the app seal covers them.
+          find "$bundle" -type f -perm -u+x ! -path '*.app/*' -print0 |
+            xargs -0 -n1 codesign --force --options runtime --timestamp --sign "$MACOS_SIGN_IDENTITY"
+          find "$bundle" -name '*.app' -prune -print0 |
+            xargs -0 -n1 codesign --force --deep --options runtime --timestamp --sign "$MACOS_SIGN_IDENTITY"
+          ditto -c -k --keepParent "$bundle" "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" --wait \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+          find "$bundle" -name '*.app' -prune -print0 | xargs -0 -n1 xcrun stapler staple
       - name: Verify daemon diagnostics
         if: runner.os != 'macOS'
         run: cargo run -p forged --release --locked -- --data-dir target/tf-release-doctor doctor
@@ -63,11 +114,23 @@ jobs:
     needs: bundle
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/download-artifact@v7
         with:
           pattern: termforge-*
           path: artifacts
           merge-multiple: true
+      - name: Checksums and update manifest
+        env:
+          TF_UPDATE_SIGNING_SEED: ${{ secrets.TF_UPDATE_SIGNING_SEED }}
+        run: |
+          cargo xtask release-manifest \
+            --version "${GITHUB_REF_NAME}" \
+            --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}" \
+            --dir artifacts
+          # An unsigned manifest must never be mistaken for an update feed.
+          if [ ! -f artifacts/manifest.json.sig ]; then rm artifacts/manifest.json; fi
       - name: Create GitHub prerelease
         env:
           GH_TOKEN: ${{ github.token }}
