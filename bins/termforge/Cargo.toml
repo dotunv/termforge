@@ -13,12 +13,19 @@ tf-input.workspace = true
 tf-engine.workspace = true
 tf-session.workspace = true
 tf-pty.workspace = true
+tf-proto.workspace = true
+tf-ipc = { path = "../../crates/tf-ipc" }
 gpui.workspace = true
 futures.workspace = true
 anyhow.workspace = true
 directories.workspace = true
+dunce.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tokio = { version = "1.36", features = ["rt", "sync", "time"] }
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0"
 
 [lints]
 workspace = true

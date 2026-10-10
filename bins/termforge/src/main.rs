@@ -1,13 +1,16 @@
 //! TermForge desktop app.
 //!
-//! Phase 1: one terminal per window, rendered with GPUI. The session runs
-//! in-process; Phase 2 moves it behind `forged` (docs/adr/0005).
+//! GPUI desktop client for project-scoped sessions hosted by `forged`.
+//! An embedded session remains available only as an explicit development
+//! fallback (`TERMFORGE_EMBED_SESSION=1`).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod fonts;
 mod paint;
+mod remote_session;
 mod terminal_view;
+mod workspace;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,21 +35,55 @@ fn data_dir() -> Option<PathBuf> {
 }
 
 fn spawn_options() -> anyhow::Result<SpawnOptions> {
-    let profile = tf_pty::discover_shells()
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("no shell found"))?;
-    let cwd = std::env::current_dir()
-        .ok()
-        .filter(|d| d.parent().is_some())
-        .or_else(|| directories::UserDirs::new().map(|u| u.home_dir().to_path_buf()));
+    let ssh_host = std::env::var("TERMFORGE_SSH_HOST").ok();
+    let profile = match ssh_host.as_deref() {
+        Some(host) => tf_pty::ssh_profile(host)
+            .ok_or_else(|| anyhow::anyhow!("invalid SSH host or ssh not found: {host}"))?,
+        None => tf_pty::discover_shells()
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("no shell found"))?,
+    };
+    let cwd = if ssh_host.is_some() {
+        None
+    } else {
+        std::env::current_dir()
+            .ok()
+            .filter(|d| d.parent().is_some())
+            .or_else(|| directories::UserDirs::new().map(|u| u.home_dir().to_path_buf()))
+    };
+    let mut env = Vec::new();
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(bundle_bin) = executable.parent() {
+            let mut paths = vec![bundle_bin.to_path_buf()];
+            if let Some(existing) = std::env::var_os("PATH") {
+                paths.extend(std::env::split_paths(&existing));
+            }
+            if let Ok(path) = std::env::join_paths(paths) {
+                env.push(("PATH".into(), path.to_string_lossy().into_owned()));
+            }
+        }
+    }
     Ok(SpawnOptions {
         profile,
+        ssh_host,
         cwd,
         size: GridSize::new(120, 30),
-        env: Vec::new(),
+        env,
         integration_dir: data_dir().map(|d| d.join("shell")),
     })
+}
+
+/// Resolve the repository root once so every session created by this window
+/// carries a stable project identity. Outside a repository, the launch
+/// directory itself is the project root.
+fn project_root(cwd: Option<&std::path::Path>) -> Option<PathBuf> {
+    let cwd = cwd?;
+    let root = cwd
+        .ancestors()
+        .find(|path| path.join(".git").exists())
+        .unwrap_or(cwd);
+    dunce::canonicalize(root).ok()
 }
 
 fn main() {
@@ -65,6 +102,11 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let project_root = if spawn.ssh_host.is_some() {
+        None
+    } else {
+        project_root(spawn.cwd.as_deref())
+    };
 
     Application::new().run(move |cx: &mut App| {
         let theme = Arc::new(Theme::generate(ThemeInput::DARK));
@@ -73,6 +115,7 @@ fn main() {
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                app_id: Some("dev.termforge.TermForge".into()),
                 titlebar: Some(TitlebarOptions {
                     title: Some("TermForge".into()),
                     ..Default::default()
@@ -80,7 +123,9 @@ fn main() {
                 window_min_size: Some(size(px(360.0), px(220.0))),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| TerminalView::new(spawn, theme, font, window, cx)),
+            |window, cx| {
+                cx.new(|cx| TerminalView::new(spawn, project_root, theme, font, window, cx))
+            },
         );
         if let Err(e) = opened {
             tracing::error!("failed to open window: {e:#}");

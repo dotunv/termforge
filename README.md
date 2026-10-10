@@ -2,7 +2,7 @@
 
 A Windows-first, GPU-rendered terminal workspace where every repo is a workspace: shells, services, agents and history, organised per project.
 
-> Status: Phase 1 (terminal core). One GPU-rendered terminal per window with shell integration and command blocks. Selection, search, links and mouse reporting work. Not yet a daily driver: no tabs, splits, settings or `forged` IPC. The previous Go/Electron and native prototypes are preserved under the `archive/go-electron` and `archive/native-v0` tags.
+> Status: Phase 2 foundation. One GPU-rendered terminal per window with shell integration, command blocks and OSC 7501 program status. Selection, search, links and mouse reporting work. `forged` owns authenticated sessions, bounded output replay, and durable project tasks with context summaries. The UI reconnects to a hosted session for the current canonical project and can start the bundled daemon automatically. Project shells, their latest working directories, dimensions, and task association are recreated after a daemon restart. Not yet a daily driver: integrated task UI, tabs, splits and settings are unfinished. The previous Go/Electron and native prototypes are preserved under the `archive/go-electron` and `archive/native-v0` tags.
 
 ## Architecture
 
@@ -13,7 +13,7 @@ bins/
   tf          CLI companion (notifications, shell integration)
 crates/
   tf-proto    versioned IPC messages + length-prefixed postcard framing
-  tf-tap      streaming OSC tap (133 marks, 7 / 9;9 cwd, 9 / 777 / 99 notifications)
+  tf-tap      streaming OSC tap (133 marks, 7501 program status, cwd, progress, notifications)
   tf-engine   TerminalEngine trait + alacritty_terminal implementation (cells, colours, modes, scrollback)
   tf-input    key and paste encoding (xterm conventions, safe bracketed paste)
   tf-pty      portable-pty wrapper, ConPTY sideloading, shell discovery
@@ -49,7 +49,11 @@ cargo xtask ci                   # fmt + clippy -D warnings + tests, same as CI
 cargo run -p termforge           # desktop app (GPUI; first build is slow)
 cargo run -p forged -- doctor    # environment diagnostics
 cargo xtask spike-a              # slow ConPTY ordering harness; see below
+cargo xtask dist                 # native beta bundle in target/dist
 ```
+
+Tagged beta builds and the required native smoke checklist are documented in
+[`docs/releasing.md`](docs/releasing.md).
 
 ### Spike A: ConPTY ordering
 
@@ -91,6 +95,39 @@ Linux builds of the app need `libxkbcommon-dev libxcb1-dev libfontconfig-dev lib
 | Scroll back | mouse wheel, `Shift+PageUp` / `Shift+PageDown`, `Ctrl+Shift+Home` / `End` |
 | Font size | `Ctrl+=`, `Ctrl+-`, `Ctrl+0` |
 | Restart after exit | `Enter` |
+| Command palette | `Ctrl+Shift+P`; type to filter, `Up`/`Down`, `Enter`, `Esc` |
+
+Programs can report structured status with OSC 7501. The tab indicator and
+status bar distinguish working, blocked, done and failed programs. Scripts can
+emit valid reports without constructing escape sequences themselves:
+
+```sh
+tf status working --app cargo --message "Running tests"
+tf status blocked --kind question --message "Choose a deployment target"
+tf status done --message "Tests passed"
+tf status clear
+```
+
+### Remote SSH preview
+
+TermForge delegates SSH transport, host-key verification and authentication to
+the installed OpenSSH client. Press `Ctrl+Shift+P` and choose `SSH: connect to
+<host>` to connect to a concrete alias declared by a `Host` directive in
+`~/.ssh/config`. Wildcard rules are applied by OpenSSH but omitted from the
+picker because they are not concrete destinations.
+
+For automation or aliases not listed in the main config file, start the current
+workspace as an SSH connection with any host argument understood by `ssh`
+(including Tailscale MagicDNS names):
+
+```sh
+TERMFORGE_SSH_HOST=devbox cargo run -p termforge
+```
+
+The SSH PTY is owned by `forged`, so it survives a UI restart. Remote working
+directories remain tagged as remote and are never reused as local restart
+directories. This preview has no host picker, automatic remote shell
+integration or daemon-crash recovery yet; see ADR 0011.
 
 The left gutter marks each command block: accent while running, red on a non-zero exit, neutral on success.
 
