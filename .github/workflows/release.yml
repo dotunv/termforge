@@ -1,0 +1,79 @@
+name: Beta release artifacts
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  bundle:
+    name: bundle (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libfontconfig-dev libfreetype-dev libwayland-dev libvulkan-dev libx11-xcb-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.os }}
+      - name: Build beta bundle
+        run: cargo xtask dist
+      - name: Verify daemon diagnostics
+        if: runner.os != 'macOS'
+        run: cargo run -p forged --release --locked -- --data-dir target/tf-release-doctor doctor
+      - name: Archive bundle (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bundle = Get-ChildItem target/dist -Directory -Filter 'termforge-*' | Select-Object -First 1
+          Compress-Archive -Path $bundle.FullName -DestinationPath "target/$($bundle.Name).zip"
+      - name: Archive bundle (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bundle=$(find target/dist -mindepth 1 -maxdepth 1 -type d -name 'termforge-*' -print -quit)
+          tar -C target/dist -czf "target/$(basename "$bundle").tar.gz" "$(basename "$bundle")"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: termforge-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            target/termforge-*.zip
+            target/termforge-*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish tagged beta
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: termforge-*
+          path: artifacts
+          merge-multiple: true
+      - name: Create GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" artifacts/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --prerelease \
+            --generate-notes \
+            --title "TermForge ${GITHUB_REF_NAME} beta"
