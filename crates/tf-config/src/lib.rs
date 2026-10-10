@@ -78,9 +78,7 @@ impl Config {
         let content = tokio::fs::read_to_string(path)
             .await
             .map_err(ConfigError::Read)?;
-        let config: Config = toml::from_str(&content).map_err(ConfigError::Parse)?;
-        config.validate()?;
-        Ok(config)
+        Self::parse(&content)
     }
 
     /// Save configuration to a specific path.
@@ -95,6 +93,13 @@ impl Config {
             .await
             .map_err(ConfigError::Write)?;
         Ok(())
+    }
+
+    /// Parse and validate configuration text. Never panics, whatever the input.
+    pub fn parse(text: &str) -> Result<Config> {
+        let config: Config = toml::from_str(text).map_err(ConfigError::Parse)?;
+        config.validate()?;
+        Ok(config)
     }
 
     /// Validate the configuration.
@@ -220,8 +225,7 @@ impl ConfigHandle {
         let content = tokio::fs::read_to_string(path)
             .await
             .map_err(ConfigError::Read)?;
-        let new_config: Config = toml::from_str(&content).map_err(ConfigError::Parse)?;
-        new_config.validate()?;
+        let new_config = Config::parse(&content)?;
 
         let mut guard = config.write().await;
         *guard = new_config.clone();

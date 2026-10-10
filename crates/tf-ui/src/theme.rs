@@ -59,7 +59,50 @@ pub struct Theme {
     pub ansi: [Rgb; 16],
 }
 
+/// One foreground/background pair that falls short of its WCAG target.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContrastIssue {
+    pub name: String,
+    pub ratio: f64,
+    pub required: f64,
+}
+
 impl Theme {
+    /// Every text, status and ANSI colour that misses its contrast target
+    /// against the surface it is drawn on. Empty means the theme is usable;
+    /// custom themes can be checked with this before being applied.
+    pub fn contrast_issues(&self) -> Vec<ContrastIssue> {
+        let mut issues = Vec::new();
+        let mut check = |name: String, fg: Rgb, bg: Rgb, required: f64| {
+            let ratio = fg.contrast(bg);
+            if ratio < required {
+                issues.push(ContrastIssue {
+                    name,
+                    ratio,
+                    required,
+                });
+            }
+        };
+        check("text".into(), self.text, self.bg_app, 7.0);
+        check("text_muted".into(), self.text_muted, self.bg_app, 4.5);
+        check("text_faint".into(), self.text_faint, self.bg_app, 3.0);
+        check("accent_text".into(), self.accent_text, self.accent, 3.0);
+        for (name, c) in [
+            ("success", self.success),
+            ("warning", self.warning),
+            ("danger", self.danger),
+        ] {
+            check(name.into(), c, self.bg_panel, 3.0);
+        }
+        // Black and white entries are intentionally outside the ramp.
+        for (i, c) in self.ansi.iter().enumerate() {
+            if ![0, 7, 8, 15].contains(&i) {
+                check(format!("ansi {i}"), *c, self.term_bg, 3.0);
+            }
+        }
+        issues
+    }
+
     pub fn generate(input: ThemeInput) -> Self {
         let base = Oklch::from_rgb(input.base);
         let accent = Oklch::from_rgb(input.accent);
@@ -250,6 +293,32 @@ mod tests {
         assert_eq!(t.indexed(231), Rgb::new(255, 255, 255));
         assert_eq!(t.indexed(232), Rgb::new(8, 8, 8));
         assert_eq!(t.indexed(255), Rgb::new(238, 238, 238));
+    }
+
+    #[test]
+    fn contrast_holds_across_the_contrast_slider() {
+        // The slider's `text` target (7 + 5k) is only meaningful when it can
+        // be reached, so sweep the whole range for both defaults.
+        for base in [ThemeInput::DARK, ThemeInput::LIGHT] {
+            for contrast in (0..=100).step_by(5) {
+                let t = Theme::generate(ThemeInput { contrast, ..base });
+                let issues = t.contrast_issues();
+                assert!(
+                    issues.is_empty(),
+                    "contrast {contrast} base {:?}: {issues:?}",
+                    base.base
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn contrast_issues_reports_a_bad_theme() {
+        let mut t = Theme::generate(ThemeInput::DARK);
+        t.text = t.bg_app;
+        let issues = t.contrast_issues();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].name, "text");
     }
 
     #[test]

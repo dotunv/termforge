@@ -11,6 +11,9 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 tf-tap = { path = "../crates/tf-tap" }
 tf-proto = { path = "../crates/tf-proto" }
+tf-input = { path = "../crates/tf-input" }
+tf-config = { path = "../crates/tf-config" }
+toml = "0.9"
 
 # Keep the fuzz crate out of the main workspace.
 [workspace]
@@ -25,6 +28,20 @@ bench = false
 [[bin]]
 name = "proto_frame"
 path = "fuzz_targets/proto_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "paste"
+path = "fuzz_targets/paste.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
 test = false
 doc = false
 bench = false
