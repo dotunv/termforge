@@ -11,12 +11,21 @@ publish.workspace = true
 tf-proto.workspace = true
 tf-pty.workspace = true
 tf-store.workspace = true
+dunce.workspace = true
 tf-shell.workspace = true
+tf-session.workspace = true
+tf-engine.workspace = true
+tf-ipc = { path = "../../crates/tf-ipc" }
 anyhow.workspace = true
+async-trait = "0.1"
 clap.workspace = true
 directories.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tokio = { version = "1.36", features = ["rt", "time"] }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

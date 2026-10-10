@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped on any incompatible change to the types in this crate.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Stable identifier for a PTY session owned by `forged`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -27,6 +27,35 @@ pub struct SessionId(pub uuid::Uuid);
 impl SessionId {
     pub fn new() -> Self {
         Self(uuid::Uuid::new_v4())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TaskId(pub uuid::Uuid);
+
+impl TaskId {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+impl Default for TaskId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for TaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::str::FromStr for TaskId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse().map(Self)
     }
 }
 
@@ -63,6 +92,11 @@ pub enum ClientMsg {
 pub enum Request {
     Ping,
     ListSessions,
+    ListTasks {
+        project_root: PathBuf,
+    },
+    CreateTask(CreateTask),
+    UpdateTask(UpdateTask),
     CreateSession(CreateSession),
     Write {
         session: SessionId,
@@ -83,13 +117,27 @@ pub enum Request {
     Unsubscribe {
         session: SessionId,
     },
+    /// Persist the UI's opaque workspace layout document for a project.
+    SaveWorkspaceState {
+        project_root: PathBuf,
+        state: String,
+    },
+    LoadWorkspaceState {
+        project_root: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateSession {
     /// Profile name from config; `None` selects the default shell.
     pub profile: Option<String>,
+    /// OpenSSH host alias. When set, `profile` is ignored and the system SSH
+    /// client is launched without TermForge handling credentials.
+    pub ssh_host: Option<String>,
     pub cwd: Option<PathBuf>,
+    /// Canonical root of the project this session belongs to.
+    pub project_root: Option<PathBuf>,
+    pub task: Option<TaskId>,
     pub size: TermSize,
 }
 
@@ -127,6 +175,44 @@ pub enum Response {
     Ok,
     Sessions(Vec<SessionInfo>),
     Created(SessionId),
+    Tasks(Vec<TaskInfo>),
+    TaskCreated(TaskId),
+    /// The stored layout document, if one was saved for the project.
+    WorkspaceState(Option<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateTask {
+    pub project_root: PathBuf,
+    pub title: String,
+    /// A concise durable summary of intent, constraints and decisions.
+    pub context: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateTask {
+    pub id: TaskId,
+    pub state: Option<TaskState>,
+    pub title: Option<String>,
+    pub context: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskState {
+    Planned,
+    Active,
+    Blocked,
+    Done,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskInfo {
+    pub id: TaskId,
+    pub project_root: PathBuf,
+    pub title: String,
+    pub context: String,
+    pub state: TaskState,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,7 +220,11 @@ pub struct SessionInfo {
     pub id: SessionId,
     pub title: String,
     pub shell: String,
-    pub cwd: Option<PathBuf>,
+    pub ssh_host: Option<String>,
+    pub cwd: Option<WorkingDirectory>,
+    /// Canonical project identity, shared by the UI, CLI and session host.
+    pub project_root: Option<PathBuf>,
+    pub task: Option<TaskId>,
     pub size: TermSize,
     pub running: bool,
 }
@@ -143,23 +233,59 @@ pub struct SessionInfo {
 pub enum Event {
     /// Raw PTY bytes. Kept as bytes so UTF-8 sequences split across reads
     /// are never corrupted in transit.
-    Output {
-        session: SessionId,
-        data: Vec<u8>,
-    },
+    Output { session: SessionId, data: Vec<u8> },
     Exited {
         session: SessionId,
         exit_code: Option<u32>,
     },
     CwdChanged {
         session: SessionId,
-        cwd: String,
+        cwd: WorkingDirectory,
     },
     Notify {
         session: SessionId,
         title: Option<String>,
         body: String,
     },
+    /// Authoritative current OSC 7501 state, sent after scrollback replay
+    /// when a client subscribes.
+    ProgramStatusSnapshot {
+        session: SessionId,
+        records: Vec<ProgramStatus>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkingDirectory {
+    pub host: Option<String>,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgramStatus {
+    pub state: ProgramState,
+    pub id: Option<String>,
+    pub kind: Option<BlockedKind>,
+    pub progress: Option<u8>,
+    pub app: Option<String>,
+    pub title: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProgramState {
+    Idle,
+    Working,
+    Done,
+    Blocked,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlockedKind {
+    Permission,
+    Question,
+    Auth,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -194,6 +320,10 @@ mod tests {
                 id: 8,
                 result: Err(ProtoError::SessionNotFound(s)),
             },
+            ServerMsg::Response {
+                id: 9,
+                result: Ok(Response::WorkspaceState(Some("layout".into()))),
+            },
             ServerMsg::Event(Event::Output {
                 session: s,
                 data: vec![0xe2, 0x94],
@@ -201,6 +331,25 @@ mod tests {
             ServerMsg::Event(Event::Exited {
                 session: s,
                 exit_code: Some(1),
+            }),
+            ServerMsg::Event(Event::CwdChanged {
+                session: s,
+                cwd: WorkingDirectory {
+                    host: Some("devbox".into()),
+                    path: "/srv/project".into(),
+                },
+            }),
+            ServerMsg::Event(Event::ProgramStatusSnapshot {
+                session: s,
+                records: vec![ProgramStatus {
+                    state: ProgramState::Blocked,
+                    id: Some("deploy/eu".into()),
+                    kind: Some(BlockedKind::Permission),
+                    progress: Some(50),
+                    app: Some("deploy".into()),
+                    title: None,
+                    message: Some("Approve?".into()),
+                }],
             }),
         ];
         for m in msgs {

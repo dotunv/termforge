@@ -20,6 +20,8 @@ pub type Waker = Arc<dyn Fn() + Send + Sync>;
 #[derive(Debug, Clone)]
 pub struct SpawnOptions {
     pub profile: ShellProfile,
+    /// System OpenSSH host alias when this PTY represents a remote connection.
+    pub ssh_host: Option<String>,
     pub cwd: Option<PathBuf>,
     pub size: GridSize,
     pub env: Vec<(String, String)>,
@@ -172,6 +174,7 @@ fn read_loop(shared: &Shared, mut reader: Box<dyn Read + Send>) {
             Ok(n) => n,
         };
         let reply = lock(&shared.processor).process(&buf[..n], &mut events);
+        events.insert(0, SessionEvent::Output(buf[..n].to_vec()));
         if !reply.is_empty() {
             if let Some(pty) = lock(&shared.pty).as_mut() {
                 let _ = pty.write_all(&reply);
@@ -199,6 +202,9 @@ fn wait_loop(shared: &Shared) {
             // Give the reader a moment to drain the final output.
             thread::sleep(Duration::from_millis(50));
             *lock(&shared.exit) = Some(Some(code));
+            if lock(&shared.processor).process_exited() {
+                lock(&shared.events).push(SessionEvent::ProgramStatusChanged);
+            }
             drop(lock(&shared.pty).take());
             (shared.wake)();
             return;

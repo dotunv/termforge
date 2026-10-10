@@ -1,8 +1,12 @@
 #![allow(clippy::unwrap_used)] // test helpers outside #[test] fns
 //! End-to-end tests of the processing pipeline.
 
+mod common;
+
+use common::RealShell;
 use tf_engine::{AlacrittyEngine, GridSize, TerminalEngine};
 use tf_session::{BlockState, Processor, SessionEvent};
+use tf_tap::ProgramState;
 
 #[test]
 fn synthetic_shell_output_produces_anchored_blocks() {
@@ -13,7 +17,12 @@ fn synthetic_shell_output_produces_anchored_blocks() {
     for b in stream {
         p.process(std::slice::from_ref(b), &mut ev);
     }
-    assert!(ev.contains(&SessionEvent::Cwd("C:\\src".into())));
+    assert!(
+        ev.contains(&SessionEvent::Cwd(tf_session::WorkingDirectory {
+            host: None,
+            path: "C:\\src".into(),
+        }))
+    );
     assert!(ev.contains(&SessionEvent::BlockFinished {
         index: 0,
         exit_code: Some(0)
@@ -65,86 +74,100 @@ fn alternate_screen_does_not_move_blocks() {
     assert_eq!(lines, vec![0, 21, 22], "{:?}", p.blocks());
 }
 
-/// Real shell, real PTY, real integration script: the ConPTY ordering
-/// harness from the build plan. Each command must produce A <= C <= D marks
-/// in order with the right exit code.
+#[test]
+fn program_status_is_stateful_and_prompt_clears_transient_records() {
+    let mut p = Processor::new(AlacrittyEngine::new(GridSize::new(40, 5)));
+    let mut events = Vec::new();
+    let reply = p.process(
+        b"\x1b]7501;?\x1b\\\x1b]7501;state=working:app=codex:id=task\x1b\\\x1b]7501;state=done:id=result\x1b\\",
+        &mut events,
+    );
+    assert_eq!(reply, b"\x1b]7501;?\x1b\\");
+    assert_eq!(p.program_status().len(), 2);
+
+    p.process(b"\x1b]133;A\x1b\\", &mut events);
+    let records: Vec<_> = p.program_status().iter().collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].report.state, ProgramState::Done);
+    assert!(events.contains(&SessionEvent::ProgramStatusChanged));
+}
+
+#[test]
+fn program_status_clear_removes_descendants() {
+    let mut p = Processor::new(AlacrittyEngine::new(GridSize::new(40, 5)));
+    let mut events = Vec::new();
+    p.process(
+        b"\x1b]7501;state=working:id=deploy\x1b\\\x1b]7501;state=blocked:id=deploy/eu\x1b\\\x1b]7501;state=done:id=other\x1b\\\x1b]7501;state=clear:id=deploy\x1b\\",
+        &mut events,
+    );
+    let ids: Vec<_> = p
+        .program_status()
+        .iter()
+        .map(|record| record.report.id.as_deref())
+        .collect();
+    assert_eq!(ids, vec![Some("other")]);
+}
+
+#[test]
+fn full_reset_clears_program_status_but_soft_reset_does_not() {
+    let mut p = Processor::new(AlacrittyEngine::new(GridSize::new(40, 5)));
+    let mut events = Vec::new();
+    p.process(
+        b"\x1b]7501;state=working:id=agent\x1b\\\x1b[!p",
+        &mut events,
+    );
+    assert_eq!(p.program_status().len(), 1);
+
+    p.process(b"\x1bc", &mut events);
+    assert!(p.program_status().is_empty());
+    assert!(events.contains(&SessionEvent::ProgramStatusChanged));
+}
+
+/// Real shell, real PTY, real integration script. Each command must produce
+/// A <= C <= D marks in order with the right exit code.
+///
+/// The long 10,000-command version of this lives in `spike_a.rs`; this is the
+/// cheap version that runs on every PR.
 fn assert_integration(kind: tf_pty::ShellKind, commands: &[&str], codes: &[i32]) {
-    use std::sync::{mpsc, Arc, Mutex};
-    use std::time::{Duration, Instant};
-    use tf_session::{LiveSession, SpawnOptions};
+    use std::time::Duration;
 
-    let Some(shell) = tf_pty::discover_shells()
-        .into_iter()
-        .find(|s| s.kind == kind)
-    else {
-        eprintln!("{kind:?} not found; skipping");
-        return;
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let home = tempfile::tempdir().unwrap();
-    let (tx, rx) = mpsc::channel::<()>();
-    let tx = Mutex::new(tx);
-    let session = LiveSession::spawn(
-        SpawnOptions {
-            profile: shell,
-            cwd: Some(dir.path().to_path_buf()),
-            size: GridSize::new(100, 30),
-            env: vec![
-                ("HOME".into(), home.path().to_string_lossy().into_owned()),
-                ("PS1".into(), "$ ".into()),
-            ],
-            integration_dir: Some(dir.path().join("shell")),
-        },
-        Arc::new(move || {
-            let _ = tx.lock().unwrap().send(());
-        }),
-    )
-    .unwrap();
-
-    let finished = |s: &LiveSession| {
-        s.with(|p| {
-            p.blocks()
-                .commands()
-                .filter(|b| b.state == BlockState::Finished)
-                .count()
-        })
-    };
-    let deadline = Instant::now() + Duration::from_secs(90);
-    let mut sent = 0;
-    while finished(&session) < commands.len() {
-        assert!(
-            Instant::now() < deadline,
-            "timed out; blocks = {:?}\nscreen:\n{}",
-            session.with(|p| format!("{:?}", p.blocks())),
-            session.snapshot().text()
-        );
-        let _ = rx.recv_timeout(Duration::from_millis(200));
-        // Send the next command once the shell is sitting at a prompt.
-        let at_prompt = session.with(|p| {
-            p.blocks()
-                .iter()
-                .last()
-                .is_some_and(|b| b.state == BlockState::Prompt && b.input_line.is_some())
-        });
-        if at_prompt && sent < commands.len() && finished(&session) == sent {
-            session
-                .write(format!("{}\r", commands[sent]).as_bytes())
-                .unwrap();
-            sent += 1;
+    let shell = match RealShell::spawn(kind) {
+        Ok(s) => s,
+        Err(common::Skip::NotInstalled) => {
+            eprintln!("{kind:?} not installed; skipping");
+            return;
         }
-    }
+        Err(e) => panic!("{kind:?} is {e} but is a supported shell"),
+    };
 
-    let cmds: Vec<_> = session.with(|p| p.blocks().commands().cloned().collect());
+    common::drive(
+        &shell,
+        commands.len(),
+        Duration::from_secs(90),
+        |n| commands[n].to_owned(),
+        |_, _| Ok(()),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+
+    // Retained blocks are ordered oldest-first, so they line up with `codes`.
+    let cmds = shell.finished_commands();
+    assert_eq!(
+        cmds.len(),
+        commands.len(),
+        "{}",
+        common::diagnostics(&shell, commands.len(), commands.len())
+    );
     for (b, code) in cmds.iter().zip(codes) {
         assert_eq!(b.exit_code, Some(*code), "block {b:?}");
         let (a, c, d) = (b.prompt_line, b.output_line.unwrap(), b.end_line.unwrap());
         assert!(a <= c && c <= d, "marks out of order: {b:?}");
     }
-    assert!(session
+    assert!(shell
+        .session
         .take_events()
         .iter()
         .any(|e| matches!(e, SessionEvent::Cwd(_))));
-    let _ = session.write(b"exit\r");
+    shell.quit();
 }
 
 #[test]

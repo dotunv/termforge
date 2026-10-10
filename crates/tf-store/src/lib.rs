@@ -51,6 +51,39 @@ const MIGRATIONS: &[&str] = &[
         saved_at   INTEGER NOT NULL
     );
     ",
+    // v2: enough metadata to recreate a project shell after forged restarts.
+    r"
+    CREATE TABLE restorable_sessions (
+        id           TEXT PRIMARY KEY,
+        project_root TEXT,
+        profile      TEXT NOT NULL,
+        cwd          TEXT,
+        cols         INTEGER NOT NULL,
+        rows         INTEGER NOT NULL,
+        updated_at   INTEGER NOT NULL
+    );
+    CREATE INDEX idx_restorable_sessions_project
+        ON restorable_sessions(project_root, updated_at DESC);
+    ",
+    // v3: durable project tasks and optional session association.
+    r"
+    CREATE TABLE tasks (
+        id           TEXT PRIMARY KEY,
+        project_root TEXT NOT NULL,
+        title        TEXT NOT NULL,
+        context      TEXT NOT NULL,
+        state        TEXT NOT NULL,
+        created_at   INTEGER NOT NULL,
+        updated_at   INTEGER NOT NULL
+    );
+    CREATE INDEX idx_tasks_project_updated
+        ON tasks(project_root, updated_at DESC);
+    ALTER TABLE restorable_sessions ADD COLUMN task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL;
+    ",
+    // v4: identify sessions recreated through the user's system SSH client.
+    r"
+    ALTER TABLE restorable_sessions ADD COLUMN ssh_host TEXT;
+    ",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +101,37 @@ pub struct CommandRecord {
     pub exit_code: Option<i32>,
     pub started_at: i64,
     pub duration_ms: Option<i64>,
+}
+
+/// Minimal shell metadata that can safely survive a daemon restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestorableSession {
+    pub id: String,
+    pub project_root: Option<PathBuf>,
+    pub profile: String,
+    pub ssh_host: Option<String>,
+    pub cwd: Option<PathBuf>,
+    pub cols: u16,
+    pub rows: u16,
+    pub task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskState {
+    Planned,
+    Active,
+    Blocked,
+    Done,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRecord {
+    pub id: String,
+    pub project_root: PathBuf,
+    pub title: String,
+    pub context: String,
+    pub state: TaskState,
+    pub updated_at: i64,
 }
 
 #[derive(Debug)]
@@ -195,6 +259,148 @@ impl Store {
             )
             .optional()?)
     }
+
+    pub fn save_restorable_session(&self, session: &RestorableSession) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO restorable_sessions
+                (id, project_root, profile, cwd, cols, rows, updated_at, task_id, ssh_host)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                project_root = excluded.project_root,
+                profile = excluded.profile,
+                cwd = excluded.cwd,
+                cols = excluded.cols,
+                rows = excluded.rows,
+                updated_at = excluded.updated_at,
+                task_id = excluded.task_id,
+                ssh_host = excluded.ssh_host",
+            params![
+                session.id,
+                session
+                    .project_root
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                session.profile,
+                session
+                    .cwd
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                session.cols,
+                session.rows,
+                now_ms(),
+                session.task_id,
+                session.ssh_host,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn restorable_sessions(&self) -> Result<Vec<RestorableSession>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, project_root, profile, cwd, cols, rows, task_id, ssh_host
+             FROM restorable_sessions ORDER BY updated_at, id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(RestorableSession {
+                id: row.get(0)?,
+                project_root: row.get::<_, Option<String>>(1)?.map(PathBuf::from),
+                profile: row.get(2)?,
+                cwd: row.get::<_, Option<String>>(3)?.map(PathBuf::from),
+                cols: row.get(4)?,
+                rows: row.get(5)?,
+                task_id: row.get(6)?,
+                ssh_host: row.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn remove_restorable_session(&self, id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM restorable_sessions WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn update_restorable_session_cwd(&self, id: &str, cwd: &Path) -> Result<()> {
+        self.conn.execute(
+            "UPDATE restorable_sessions SET cwd = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, cwd.to_string_lossy(), now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn create_task(&self, task: &TaskRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO tasks (id, project_root, title, context, state, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![
+                task.id,
+                task.project_root.to_string_lossy(),
+                task.title,
+                task.context,
+                task_state_name(task.state),
+                now_ms(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn tasks_for_project(&self, project_root: &Path) -> Result<Vec<TaskRecord>> {
+        let root = dunce::canonicalize(project_root)
+            .map_err(|error| StoreError::Path(project_root.into(), error))?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, project_root, title, context, state, updated_at FROM tasks
+             WHERE project_root = ?1 ORDER BY updated_at DESC, id",
+        )?;
+        let rows = stmt.query_map(params![root.to_string_lossy()], row_to_task)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn update_task(
+        &self,
+        id: &str,
+        state: Option<TaskState>,
+        title: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE tasks SET
+                state = COALESCE(?2, state),
+                title = COALESCE(?3, title),
+                context = COALESCE(?4, context),
+                updated_at = ?5
+             WHERE id = ?1",
+            params![id, state.map(task_state_name), title, context, now_ms()],
+        )?;
+        Ok(changed != 0)
+    }
+}
+
+fn task_state_name(state: TaskState) -> &'static str {
+    match state {
+        TaskState::Planned => "planned",
+        TaskState::Active => "active",
+        TaskState::Blocked => "blocked",
+        TaskState::Done => "done",
+    }
+}
+
+fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
+    let state = match row.get::<_, String>(4)?.as_str() {
+        "planned" => TaskState::Planned,
+        "active" => TaskState::Active,
+        "blocked" => TaskState::Blocked,
+        "done" => TaskState::Done,
+        value => return Err(rusqlite::Error::InvalidParameterName(value.into())),
+    };
+    Ok(TaskRecord {
+        id: row.get(0)?,
+        project_root: PathBuf::from(row.get::<_, String>(1)?),
+        title: row.get(2)?,
+        context: row.get(3)?,
+        state,
+        updated_at: row.get(5)?,
+    })
 }
 
 fn row_to_project(r: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
@@ -289,5 +495,85 @@ mod tests {
             s.load_workspace_state(p.id).unwrap().as_deref(),
             Some(r#"{"tabs":2}"#)
         );
+    }
+
+    #[test]
+    fn restorable_sessions_roundtrip_and_update() {
+        let store = Store::open_in_memory().unwrap();
+        let mut session = RestorableSession {
+            id: "session-1".into(),
+            project_root: Some(PathBuf::from("/project")),
+            profile: "bash".into(),
+            ssh_host: None,
+            cwd: Some(PathBuf::from("/project/src")),
+            cols: 100,
+            rows: 30,
+            task_id: None,
+        };
+        store.save_restorable_session(&session).unwrap();
+        session.cwd = Some(PathBuf::from("/project/tests"));
+        session.cols = 140;
+        store.save_restorable_session(&session).unwrap();
+
+        assert_eq!(store.restorable_sessions().unwrap(), vec![session]);
+        store
+            .update_restorable_session_cwd("session-1", Path::new("/project/live"))
+            .unwrap();
+        assert_eq!(
+            store.restorable_sessions().unwrap()[0].cwd.as_deref(),
+            Some(Path::new("/project/live"))
+        );
+        store.remove_restorable_session("session-1").unwrap();
+        assert!(store.restorable_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ssh_session_identity_roundtrips_without_a_local_cwd() {
+        let store = Store::open_in_memory().unwrap();
+        let session = RestorableSession {
+            id: "ssh-session".into(),
+            project_root: None,
+            profile: "SSH devbox".into(),
+            ssh_host: Some("devbox".into()),
+            cwd: None,
+            cols: 120,
+            rows: 30,
+            task_id: None,
+        };
+        store.save_restorable_session(&session).unwrap();
+        assert_eq!(store.restorable_sessions().unwrap(), vec![session]);
+    }
+
+    #[test]
+    fn tasks_are_project_scoped_and_mutable() {
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let task = TaskRecord {
+            id: "task-1".into(),
+            project_root: root.path().canonicalize().unwrap(),
+            title: "Ship beta".into(),
+            context: "Keep the daemon local-first".into(),
+            state: TaskState::Planned,
+            updated_at: 0,
+        };
+        store.create_task(&task).unwrap();
+        assert!(store.tasks_for_project(other.path()).unwrap().is_empty());
+        assert_eq!(store.tasks_for_project(root.path()).unwrap().len(), 1);
+
+        assert!(store
+            .update_task(
+                "task-1",
+                Some(TaskState::Active),
+                None,
+                Some("Protocol and storage are stable"),
+            )
+            .unwrap());
+        let updated = store.tasks_for_project(root.path()).unwrap().pop().unwrap();
+        assert_eq!(updated.state, TaskState::Active);
+        assert_eq!(updated.context, "Protocol and storage are stable");
+        assert!(!store
+            .update_task("missing", Some(TaskState::Done), None, None)
+            .unwrap());
     }
 }

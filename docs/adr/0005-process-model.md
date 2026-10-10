@@ -5,6 +5,10 @@
 
 ## Context
 
+> Implementation note (2026-10-08): the authenticated IPC host described
+> below is now implemented. The embedded UI session is retained only as an
+> explicit development fallback.
+
 Users expect running shells, dev servers and agents to survive a UI crash or update. A single process couples UI bugs to session loss.
 
 ## Decision

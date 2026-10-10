@@ -21,19 +21,91 @@ pub struct Block {
     pub state: BlockState,
 }
 
+/// Most blocks retained at once.
+///
+/// Bounding this is not a memory optimisation, it is a correctness one.
+/// [`BlockIndex::apply`] inspects every retained block when a prompt arrives,
+/// so cost per prompt is linear in this number. Nothing else trims the index
+/// once the scrollback reaches its cap, because `history_size()` stops growing
+/// and the caller can no longer tell that lines were dropped: without a bound
+/// a session left open for a day degrades quadratically and leaks.
+const DEFAULT_MAX_BLOCKS: usize = 5_000;
+
 /// Builds blocks from the OSC 133 mark stream.
 ///
 /// The detector is tolerant of shells that skip marks: a new `A` closes any
 /// open block, and a `D` without a preceding `C` (for example an empty
 /// Enter) does not create a block.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BlockIndex {
     blocks: Vec<Block>,
+    /// Lifetime count of commands that have finished. Unlike `blocks.len()`
+    /// this never decreases when the scrollback trims old blocks, so it is
+    /// what a long-running consumer should compare against to know how much
+    /// work has gone past.
+    finished: usize,
+    max_blocks: usize,
+}
+
+impl Default for BlockIndex {
+    fn default() -> Self {
+        Self {
+            blocks: Vec::new(),
+            finished: 0,
+            max_blocks: DEFAULT_MAX_BLOCKS,
+        }
+    }
 }
 
 impl BlockIndex {
+    /// Retain at most `max_blocks` blocks. Lower values bound the per-prompt
+    /// cost in [`BlockIndex::apply`]; blocks older than the bound are dropped,
+    /// so their output stays in the scrollback but their metadata does not.
+    pub fn with_max_blocks(max_blocks: usize) -> Self {
+        Self {
+            max_blocks: max_blocks.max(1),
+            ..Self::default()
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.blocks.len()
+    }
+
+    /// Total commands that have finished since the session started, including
+    /// those whose blocks have since been trimmed from the scrollback.
+    pub fn finished_commands(&self) -> usize {
+        self.finished
+    }
+
+    /// The most recent command block that has finished, if any. Cheap: the
+    /// newest blocks are at the end. Returns `None` if the block has since
+    /// been trimmed, so callers that must not miss a block should compare
+    /// against [`BlockIndex::finished`] instead.
+    pub fn last_command(&self) -> Option<&Block> {
+        self.blocks
+            .iter()
+            .rev()
+            .find(|b| b.output_line.is_some() && b.state == BlockState::Finished)
+    }
+
+    /// A finished command block by its position in [`BlockIndex::iter`].
+    ///
+    /// Positions shift when the scrollback trims, so this is only meaningful
+    /// for the recent tail of the session.
+    pub fn command_at(&self, i: usize) -> Option<&Block> {
+        self.blocks
+            .iter()
+            .filter(|b| b.output_line.is_some() && b.state == BlockState::Finished)
+            .nth(i)
+    }
+
+    /// Number of command blocks currently retained that have finished.
+    pub fn finished(&self) -> usize {
+        self.blocks
+            .iter()
+            .filter(|b| b.output_line.is_some() && b.state == BlockState::Finished)
+            .count()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -83,6 +155,12 @@ impl BlockIndex {
                     cwd,
                     state: BlockState::Prompt,
                 });
+                // Keep the index bounded: `apply` is linear in `blocks`, and
+                // nothing else trims it once the scrollback caps.
+                if self.blocks.len() > self.max_blocks {
+                    let excess = self.blocks.len() - self.max_blocks;
+                    self.blocks.drain(..excess);
+                }
                 None
             }
             Mark::InputStart => {
@@ -112,6 +190,7 @@ impl BlockIndex {
                 b.exit_code = exit_code;
                 b.end_line = Some(line);
                 b.state = BlockState::Finished;
+                self.finished += 1;
                 Some((idx, exit_code))
             }
         }
@@ -226,6 +305,80 @@ mod tests {
         idx.apply(Mark::PromptStart, 0, None);
         assert_eq!(idx.len(), 1);
         assert_eq!(idx.commands().count(), 0);
+    }
+
+    #[test]
+    fn block_count_stays_bounded() {
+        // Regression: unbounded growth made `apply` quadratic, because a
+        // prompt scans every retained block and nothing trims the index once
+        // the scrollback caps.
+        let mut idx = BlockIndex::with_max_blocks(64);
+        for i in 0..5_000usize {
+            let p = i * 4;
+            idx.apply(Mark::PromptStart, p, None);
+            idx.apply(Mark::InputStart, p, None);
+            idx.apply(Mark::CommandExecuted, p + 1, None);
+            idx.apply(Mark::CommandFinished { exit_code: Some(0) }, p + 2, None);
+            assert!(idx.len() <= 64, "grew past the bound at {i}: {}", idx.len());
+        }
+        assert_eq!(idx.len(), 64);
+        // The lifetime count is unaffected by the bound.
+        assert_eq!(idx.finished_commands(), 5_000);
+        // The newest block is always the one kept.
+        let last = idx.last_command().expect("newest retained");
+        assert_eq!(last.prompt_line, 4 * 4_999);
+    }
+
+    #[test]
+    fn default_bound_is_finite() {
+        let mut idx = BlockIndex::default();
+        for i in 0..(DEFAULT_MAX_BLOCKS + 500) {
+            let p = i * 4;
+            idx.apply(Mark::PromptStart, p, None);
+            idx.apply(Mark::InputStart, p, None);
+            idx.apply(Mark::CommandExecuted, p + 1, None);
+            idx.apply(Mark::CommandFinished { exit_code: Some(0) }, p + 2, None);
+        }
+        assert_eq!(idx.len(), DEFAULT_MAX_BLOCKS);
+        assert_eq!(idx.finished_commands(), DEFAULT_MAX_BLOCKS + 500);
+    }
+
+    #[test]
+    fn finished_count_survives_pruning() {
+        let mut idx = BlockIndex::default();
+        for start in [0, 4, 8] {
+            idx.apply(Mark::PromptStart, start, None);
+            idx.apply(Mark::CommandExecuted, start + 1, None);
+            idx.apply(
+                Mark::CommandFinished { exit_code: Some(0) },
+                start + 3,
+                None,
+            );
+        }
+        assert_eq!(idx.finished_commands(), 3);
+        assert_eq!(idx.last_command().unwrap().prompt_line, 8);
+        // Scrollback trims the first two blocks; the counter must not go back.
+        idx.remove_top_lines(8);
+        assert_eq!(idx.len(), 1);
+        assert_eq!(
+            idx.finished_commands(),
+            3,
+            "pruning must not rewind the count"
+        );
+        assert_eq!(idx.last_command().unwrap().prompt_line, 0);
+    }
+
+    #[test]
+    fn last_command_ignores_empty_prompts() {
+        let mut idx = BlockIndex::default();
+        idx.apply(Mark::PromptStart, 0, None);
+        idx.apply(Mark::InputStart, 0, None);
+        idx.apply(Mark::CommandExecuted, 1, None);
+        idx.apply(Mark::CommandFinished { exit_code: Some(0) }, 2, None);
+        // A fresh prompt with nothing typed is not a command.
+        idx.apply(Mark::PromptStart, 3, None);
+        idx.apply(Mark::InputStart, 3, None);
+        assert_eq!(idx.last_command().unwrap().prompt_line, 0);
     }
 
     #[test]

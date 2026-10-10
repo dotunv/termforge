@@ -8,7 +8,7 @@
 
 mod shells;
 
-pub use shells::{discover_shells, ShellKind, ShellProfile};
+pub use shells::{discover_shells, discover_ssh_hosts, ssh_profile, ShellKind, ShellProfile};
 
 use std::io::{Read, Write};
 use std::path::Path;

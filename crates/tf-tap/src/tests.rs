@@ -49,11 +49,17 @@ fn offset_points_just_past_terminator() {
 fn cwd_from_osc7_windows_and_posix() {
     assert_eq!(
         kinds(b"\x1b]7;file://HOST/C:/Users/Dotun/My%20Code\x07"),
-        vec![TapEvent::Cwd("C:/Users/Dotun/My Code".into())]
+        vec![TapEvent::Cwd(WorkingDirectory {
+            host: Some("HOST".into()),
+            path: "C:/Users/Dotun/My Code".into(),
+        })]
     );
     assert_eq!(
         kinds(b"\x1b]7;file://box/home/dotun\x1b\\"),
-        vec![TapEvent::Cwd("/home/dotun".into())]
+        vec![TapEvent::Cwd(WorkingDirectory {
+            host: Some("box".into()),
+            path: "/home/dotun".into(),
+        })]
     );
 }
 
@@ -61,11 +67,17 @@ fn cwd_from_osc7_windows_and_posix() {
 fn cwd_from_osc9_9_quoted_and_unquoted() {
     assert_eq!(
         kinds(b"\x1b]9;9;\"C:\\Users\\dotun\"\x07"),
-        vec![TapEvent::Cwd("C:\\Users\\dotun".into())]
+        vec![TapEvent::Cwd(WorkingDirectory {
+            host: None,
+            path: "C:\\Users\\dotun".into(),
+        })]
     );
     assert_eq!(
         kinds(b"\x1b]9;9;D:\\src\x07"),
-        vec![TapEvent::Cwd("D:\\src".into())]
+        vec![TapEvent::Cwd(WorkingDirectory {
+            host: None,
+            path: "D:\\src".into(),
+        })]
     );
 }
 
@@ -110,6 +122,33 @@ fn progress() {
             },
         ]
     );
+}
+
+#[test]
+fn osc7501_program_status_and_query() {
+    assert_eq!(
+        kinds(b"\x1b]7501;state=blocked:kind=question:app=codex:id=review/tests:progress=42:msg=TmVlZHMgaW5wdXQ=\x1b\\\x1b]7501;?\x1b\\"),
+        vec![
+            TapEvent::ProgramStatus(ProgramStatusReport {
+                state: ProgramState::Blocked,
+                id: Some("review/tests".into()),
+                kind: Some(BlockedKind::Question),
+                progress: Some(42),
+                app: Some("codex".into()),
+                title: None,
+                message: Some("Needs input".into()),
+            }),
+            TapEvent::ProgramStatusQuery,
+        ]
+    );
+}
+
+#[test]
+fn osc7501_rejects_unsafe_or_invalid_reports() {
+    assert!(kinds(b"\x1b]7501;state=working:id=bad//id\x1b\\").is_empty());
+    assert!(kinds(b"\x1b]7501;state=future\x1b\\").is_empty());
+    assert!(kinds(b"\x1b]7501;state=done:msg=bGluZQpuZXh0\x1b\\").is_empty());
+    assert!(kinds(b"\x1b]7501;state=done:msg=TQ=\x1b\\").is_empty());
 }
 
 #[test]

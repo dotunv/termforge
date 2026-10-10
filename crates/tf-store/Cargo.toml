@@ -1,6 +1,6 @@
 [package]
 name = "tf-store"
-description = "Local SQLite store: projects, command history, workspace state"
+description = "Local SQLite store: projects, tasks, sessions, history and workspace state"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

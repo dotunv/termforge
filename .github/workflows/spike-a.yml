@@ -1,0 +1,79 @@
+name: Slow gates (Spike A + latency)
+
+# The build plan's risk spike: prove OSC 133 marks stay ordered relative to
+# output over 10,000 real commands. Warp had to fork ConPTY after finding it
+# emitted OSC out of order and kept its own cached grid state, so this is a
+# phase gate, not a nice-to-have.
+#
+# Too slow for the per-PR matrix, so it runs on main, nightly, and on demand.
+# Shells that are not installed skip themselves; the job still fails if every
+# supported shell was unavailable, so a green run always means real coverage.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Sunday 04:17 UTC. Off the hour to avoid the scheduler stampede.
+    - cron: "17 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      commands:
+        description: Commands per shell
+        default: "10000"
+      shells:
+        description: Comma-separated shell kinds (blank = all supported)
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spike-a-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  TF_SPIKE_COMMANDS: ${{ inputs.commands || '10000' }}
+  TF_SPIKE_SHELLS: ${{ inputs.shells }}
+
+jobs:
+  ordering:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: spike-a-${{ matrix.os }}
+      - name: Spike A ordering harness
+        # PowerShell prompts are far slower than POSIX shells, so the default
+        # 6h job timeout is the binding constraint, not the test's own budget.
+        timeout-minutes: 300
+        run: cargo xtask spike-a
+
+  latency:
+    name: latency (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: latency-${{ matrix.os }}
+      - name: Keystroke to visible output
+        # Release only: the budget is meaningless in a debug build.
+        timeout-minutes: 60
+        run: cargo xtask latency

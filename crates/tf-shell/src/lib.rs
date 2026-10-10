@@ -38,10 +38,27 @@ pub fn install(dir: &Path) -> io::Result<()> {
 
 /// Return a copy of `profile` whose arguments load the integration script
 /// from `dir`, or `None` when automatic injection isn't supported for that
-/// shell (zsh and fish are sourced from the user's rc file for now).
+/// shell.
+///
+/// `None` means the shell will run but emit no OSC 133 marks, so it gets no
+/// command blocks, no exit status and no cwd tracking. `zsh` and `fish` are
+/// sourced from the user's rc file instead, and `cmd.exe` has no script at
+/// all. `wsl.exe` is launchable but injects nothing: the script lives at a
+/// Windows path that is not readable from inside the distro, and translating
+/// it needs `wslpath` at spawn time. Callers should tell the user rather than
+/// let them conclude the product is broken.
 pub fn inject(profile: &ShellProfile, dir: &Path) -> Option<ShellProfile> {
     let script = |name: &str| -> PathBuf { dir.join(name) };
     let mut p = profile.clone();
+    debug_assert_eq!(
+        profile.supports_integration(),
+        matches!(
+            profile.kind,
+            ShellKind::Pwsh | ShellKind::WindowsPowerShell | ShellKind::Bash | ShellKind::GitBash
+        ),
+        "supports_integration() disagrees with inject() for {:?}",
+        profile.kind
+    );
     match profile.kind {
         ShellKind::Pwsh | ShellKind::WindowsPowerShell => {
             let path = script("termforge.ps1");
@@ -101,6 +118,34 @@ mod tests {
             std::fs::read_dir(dir.path()).unwrap().count(),
             SCRIPTS.len()
         );
+    }
+
+    #[test]
+    fn inject_covers_exactly_the_shells_that_claim_support() {
+        let dir = Path::new("/tmp/tf");
+        for kind in [
+            ShellKind::Pwsh,
+            ShellKind::WindowsPowerShell,
+            ShellKind::Cmd,
+            ShellKind::GitBash,
+            ShellKind::Wsl,
+            ShellKind::Bash,
+            ShellKind::Zsh,
+            ShellKind::Fish,
+            ShellKind::Other,
+        ] {
+            let p = ShellProfile {
+                name: "x".into(),
+                kind,
+                program: "p".into(),
+                args: vec![],
+            };
+            assert_eq!(
+                inject(&p, dir).is_some(),
+                p.supports_integration(),
+                "{kind:?}: inject() and supports_integration() disagree"
+            );
+        }
     }
 
     #[test]

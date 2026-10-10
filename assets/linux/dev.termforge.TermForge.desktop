@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=TermForge
+Comment=Persistent project workspace for software builders
+Exec=termforge
+Icon=dev.termforge.TermForge
+Terminal=false
+Categories=Development;TerminalEmulator;
+StartupWMClass=dev.termforge.TermForge
+Keywords=terminal;development;workspace;shell;
