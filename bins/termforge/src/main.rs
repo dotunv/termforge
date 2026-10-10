@@ -8,7 +8,9 @@
 
 mod fonts;
 mod paint;
+mod panes;
 mod remote_session;
+mod suggest;
 mod terminal_view;
 mod workspace;
 

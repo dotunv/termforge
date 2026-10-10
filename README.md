@@ -21,6 +21,7 @@ crates/
   tf-store    SQLite (WAL) with versioned migrations
   tf-shell    shell integration scripts (pwsh, bash, zsh, fish) + injection
   tf-ui       framework-free design tokens and OKLCH theme generator
+  tf-update   signed update-manifest verification (no I/O)
 xtask/        cargo xtask conpty | ci
 docs/adr/     architecture decision records
 ```
@@ -38,6 +39,10 @@ Key decisions are recorded in [`docs/adr`](docs/adr):
 7. [Input editor: defer to the shell](docs/adr/0007-input-editor.md)
 8. [Storage and config](docs/adr/0008-storage-and-config.md)
 9. [Rendering the grid](docs/adr/0009-rendering.md)
+10. [Program status (OSC 7501)](docs/adr/0010-program-status.md)
+11. [Remote workspaces](docs/adr/0011-remote-workspaces.md)
+12. [Split panes](docs/adr/0012-split-panes.md) (proposed)
+13. [Signed updates](docs/adr/0013-signed-updates.md)
 
 ## Building
 

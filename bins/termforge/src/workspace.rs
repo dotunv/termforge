@@ -60,6 +60,18 @@ pub struct SavedTab {
     pub session: String,
     pub pinned: bool,
     pub name: Option<String>,
+    /// Split panes, when the workspace has more than one.
+    pub panes: Option<SavedPanes>,
+}
+
+/// A pane tree whose leaves are positions in `sessions`, so the layout file
+/// does not depend on runtime pane ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedPanes {
+    pub tree: String,
+    pub sessions: Vec<String>,
+    /// Index into `sessions` of the focused pane.
+    pub focus: usize,
 }
 
 /// Order, names and pins of the workspaces in a window.
@@ -117,6 +129,15 @@ impl Layout {
                 u8::from(tab.pinned),
                 escape(tab.name.as_deref().unwrap_or_default())
             ));
+            // Applies to the preceding `T` line; older builds skip it.
+            if let Some(panes) = &tab.panes {
+                out.push_str(&format!(
+                    "S\t{}\t{}\t{}\n",
+                    panes.tree,
+                    panes.focus,
+                    panes.sessions.join(",")
+                ));
+            }
         }
         out
     }
@@ -143,7 +164,24 @@ impl Layout {
                         session: id.to_owned(),
                         pinned,
                         name,
+                        panes: None,
                     });
+                }
+                (Some("S"), Some(tree)) => {
+                    let focus = fields.next().and_then(|f| f.parse().ok());
+                    let sessions: Vec<String> = fields
+                        .next()
+                        .map(|list| list.split(',').map(str::to_owned).collect())
+                        .unwrap_or_default();
+                    if let (Some(tab), Some(focus)) = (layout.tabs.last_mut(), focus) {
+                        if focus < sessions.len() {
+                            tab.panes = Some(SavedPanes {
+                                tree: tree.to_owned(),
+                                sessions,
+                                focus,
+                            });
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -164,16 +202,40 @@ mod tests {
                     session: "a".into(),
                     pinned: true,
                     name: Some("tab\tone\\ \nnext".into()),
+                    panes: Some(SavedPanes {
+                        tree: "h0.500(0,1)".into(),
+                        sessions: vec!["a".into(), "c".into()],
+                        focus: 1,
+                    }),
                 },
                 SavedTab {
                     session: "b".into(),
                     pinned: false,
                     name: None,
+                    panes: None,
                 },
             ],
             active: Some("b".into()),
         };
         assert_eq!(Layout::decode(&layout.encode()), layout);
+    }
+
+    #[test]
+    fn pane_lines_are_validated_and_optional() {
+        let header = "termforge-layout 1\n";
+        // A version-1 file (no S lines) still loads, as single-pane tabs.
+        let v1 = Layout::decode(&format!("{header}T\ta\t0\t\n"));
+        assert_eq!(v1.tabs.len(), 1);
+        assert!(v1.tabs[0].panes.is_none());
+        // S before any T, a focus past the end, and a missing focus are ignored.
+        for bad in [
+            "S\th0.500(0,1)\t0\ta,b\n",
+            "T\ta\t0\t\nS\th0.500(0,1)\t5\ta,b\n",
+            "T\ta\t0\t\nS\th0.500(0,1)\tx\ta,b\n",
+        ] {
+            let layout = Layout::decode(&format!("{header}{bad}"));
+            assert!(layout.tabs.iter().all(|t| t.panes.is_none()), "{bad:?}");
+        }
     }
 
     #[test]
