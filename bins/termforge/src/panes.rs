@@ -48,6 +48,17 @@ impl Rect {
     }
 }
 
+/// A draggable boundary between two panes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Divider {
+    /// Route from the root to the split (`false` = first child).
+    pub path: Vec<bool>,
+    pub axis: Axis,
+    /// The split's own rectangle, in the same units as the layout area.
+    pub parent: Rect,
+    pub ratio: f32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum Node {
     Leaf(PaneId),
@@ -284,6 +295,66 @@ impl PaneTree {
         go(&mut self.root, id, axis, in_a, delta)
     }
 
+    /// Every divider with the rectangle of the split it belongs to, so a
+    /// drag can turn a pointer position back into a ratio.
+    pub fn dividers(&self, area: Rect) -> Vec<Divider> {
+        fn go(n: &Node, r: Rect, path: &mut Vec<bool>, out: &mut Vec<Divider>) {
+            let Node::Split { axis, ratio, a, b } = n else {
+                return;
+            };
+            out.push(Divider {
+                path: path.clone(),
+                axis: *axis,
+                parent: r,
+                ratio: *ratio,
+            });
+            let (ra, rb) = match axis {
+                Axis::Horizontal => {
+                    let wa = r.w * ratio;
+                    (
+                        Rect::new(r.x, r.y, wa, r.h),
+                        Rect::new(r.x + wa, r.y, r.w - wa, r.h),
+                    )
+                }
+                Axis::Vertical => {
+                    let ha = r.h * ratio;
+                    (
+                        Rect::new(r.x, r.y, r.w, ha),
+                        Rect::new(r.x, r.y + ha, r.w, r.h - ha),
+                    )
+                }
+            };
+            path.push(false);
+            go(a, ra, path, out);
+            path.pop();
+            path.push(true);
+            go(b, rb, path, out);
+            path.pop();
+        }
+        let mut out = Vec::new();
+        go(&self.root, area, &mut Vec::new(), &mut out);
+        out
+    }
+
+    /// Set the ratio of the split at `path` (as reported by
+    /// [`dividers`](Self::dividers)), clamped so neither side vanishes.
+    pub fn set_ratio(&mut self, path: &[bool], ratio: f32) -> bool {
+        let mut node = &mut self.root;
+        for step in path {
+            let Node::Split { a, b, .. } = node else {
+                return false;
+            };
+            node = if *step { b } else { a };
+        }
+        match node {
+            Node::Split { ratio: r, .. } if ratio.is_finite() => {
+                *r = ratio.clamp(MIN_RATIO, 1.0 - MIN_RATIO);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// The same shape with every pane id passed through `f`. Used to turn
     /// runtime ids into stable positions for the layout file and back.
     pub fn remap(&self, f: impl Fn(PaneId) -> PaneId) -> Self {
@@ -470,6 +541,30 @@ mod tests {
         assert_eq!(back.ids(), t.ids());
         assert_eq!(back.layout(AREA), t.layout(AREA));
         assert_eq!(back.focused(), 1);
+    }
+
+    #[test]
+    fn dividers_report_their_split_rectangle() {
+        let t = sample();
+        let d = t.dividers(AREA);
+        assert_eq!(d.len(), 2);
+        assert_eq!(d[0].path, Vec::<bool>::new());
+        assert_eq!(d[0].parent, AREA);
+        assert_eq!(d[1].path, vec![true]);
+        assert_eq!(d[1].axis, Axis::Vertical);
+        assert_eq!(d[1].parent, Rect::new(500.0, 0.0, 500.0, 600.0));
+    }
+
+    #[test]
+    fn set_ratio_follows_paths_and_clamps() {
+        let mut t = sample();
+        assert!(t.set_ratio(&[true], 0.25));
+        assert_eq!(t.layout(AREA)[1].1.h, 150.0);
+        assert!(t.set_ratio(&[], 0.0));
+        assert!((t.layout(AREA)[0].1.w - 100.0).abs() < 0.01);
+        assert!(!t.set_ratio(&[false], 0.5), "a leaf has no ratio");
+        assert!(!t.set_ratio(&[true, true, true], 0.5));
+        assert!(!t.set_ratio(&[], f32::NAN));
     }
 
     #[test]

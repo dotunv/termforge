@@ -241,6 +241,17 @@ struct PaneSlot {
     history: usize,
     font_size: f32,
     scroll_offset: usize,
+    /// Why this pane wants a look, shown on its border until focused.
+    attention: Option<Attention>,
+}
+
+/// A divider being dragged with the mouse.
+#[derive(Debug, Clone)]
+struct DividerDrag {
+    path: Vec<bool>,
+    axis: Axis,
+    /// The split's rectangle as fractions of the pane area.
+    parent: PaneRect,
 }
 
 /// A mouse press forwarded to the program (mouse tracking on).
@@ -376,6 +387,9 @@ pub struct TerminalView {
     active_tab: usize,
     next_tab_id: u64,
     next_pane_id: PaneId,
+    divider_drag: Option<DividerDrag>,
+    /// Bounds of the area the panes tile, from the last paint.
+    pane_area: Bounds<Pixels>,
     wake: tf_session::Waker,
     /// Scrollback length at the last output, to notice clears.
     history: usize,
@@ -470,6 +484,8 @@ impl TerminalView {
             active_tab: 0,
             next_tab_id: 1,
             next_pane_id: 1,
+            divider_drag: None,
+            pane_area: Bounds::default(),
             wake,
             history: 0,
             grid_bounds: Bounds::default(),
@@ -519,6 +535,22 @@ impl TerminalView {
                         this.mouse_down(ev, window, cx);
                     }
                 });
+            }
+        });
+        let v = view.clone();
+        window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
+            if phase == DispatchPhase::Bubble {
+                v.update(cx, |this, cx| {
+                    if this.divider_drag.is_some() {
+                        this.drag_divider(ev.position, cx);
+                    }
+                });
+            }
+        });
+        let v = view.clone();
+        window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+            if phase == DispatchPhase::Bubble {
+                v.update(cx, |this, cx| this.end_divider_drag(cx));
             }
         });
         let v = view.clone();
@@ -778,18 +810,36 @@ impl Render for TerminalView {
             .filter(|tab| tab.layout.len() > 1)
             .map(|tab| {
                 let rects = tab.layout.layout(PaneRect::new(0.0, 0.0, 1.0, 1.0));
-                let parked: Vec<(PaneId, Option<Arc<SessionHandle>>)> = tab
+                let parked: Vec<(PaneId, Option<Arc<SessionHandle>>, Option<Attention>)> = tab
                     .panes
                     .iter()
-                    .map(|(id, slot)| (*id, slot.session.clone()))
+                    .map(|(id, slot)| (*id, slot.session.clone(), slot.attention))
                     .collect();
-                (rects, tab.layout.focused(), parked)
+                let dividers = tab.layout.dividers(PaneRect::new(0.0, 0.0, 1.0, 1.0));
+                (rects, tab.layout.focused(), parked, dividers)
             });
         let (single_content, split_content) = match split_layout {
             None => (Some((grid_canvas, error, exit_overlay)), None),
-            Some((rects, focused_id, parked)) => {
+            Some((rects, focused_id, parked, dividers)) => {
                 let mut focused_content = Some((grid_canvas, error, exit_overlay));
-                let mut panes = Vec::new();
+                let mut panes: Vec<gpui::AnyElement> = Vec::new();
+                // Records where the panes tile so a divider drag can turn the
+                // pointer position into a ratio.
+                let area_probe = canvas(|_, _, _| (), {
+                    let view = view.clone();
+                    move |bounds, (), _, cx| {
+                        view.update(cx, |v, _| v.pane_area = bounds);
+                    }
+                })
+                .absolute()
+                .size_full();
+                panes.push(
+                    div()
+                        .absolute()
+                        .size_full()
+                        .child(area_probe)
+                        .into_any_element(),
+                );
                 for (id, rect) in rects {
                     let mut pane = div()
                         .absolute()
@@ -805,11 +855,13 @@ impl Render for TerminalView {
                             pane = pane.child(grid).children(error).children(exit);
                         }
                     } else {
-                        let parked_session = parked
+                        let (parked_session, attention) = parked
                             .iter()
-                            .find(|(pane_id, _)| *pane_id == id)
-                            .and_then(|(_, session)| session.clone());
-                        let border = hsla(theme.border);
+                            .find(|(pane_id, ..)| *pane_id == id)
+                            .map_or((None, None), |(_, session, attention)| {
+                                (session.clone(), *attention)
+                            });
+                        let border = hsla(attention.map_or(theme.border, |a| a.color(&theme)));
                         let (view, theme, font) = (view.clone(), Arc::clone(&theme), font.clone());
                         let plain = canvas(
                             move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
@@ -852,9 +904,49 @@ impl Render for TerminalView {
                                     this.focus_pane(id, cx);
                                 }),
                             )
+                            .on_scroll_wheel(cx.listener(
+                                move |this, ev: &ScrollWheelEvent, window, cx| {
+                                    this.scroll_parked(id, ev, window, cx);
+                                    // Do not also scroll the focused pane.
+                                    cx.stop_propagation();
+                                },
+                            ))
                             .child(plain);
                     }
-                    panes.push(pane);
+                    panes.push(pane.into_any_element());
+                }
+                // Grab handles sit on top of the panes, centred on each split.
+                const GRAB: f32 = 6.0;
+                for (index, divider) in dividers.into_iter().enumerate() {
+                    let p = divider.parent;
+                    let handle = div().id(("pane-divider", index)).absolute();
+                    let handle = match divider.axis {
+                        Axis::Horizontal => handle
+                            .left(relative(p.x + p.w * divider.ratio))
+                            .ml(px(-GRAB / 2.0))
+                            .w(px(GRAB))
+                            .top(relative(p.y))
+                            .h(relative(p.h))
+                            .cursor_col_resize(),
+                        Axis::Vertical => handle
+                            .top(relative(p.y + p.h * divider.ratio))
+                            .mt(px(-GRAB / 2.0))
+                            .h(px(GRAB))
+                            .left(relative(p.x))
+                            .w(relative(p.w))
+                            .cursor_row_resize(),
+                    };
+                    panes.push(
+                        handle
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                    this.begin_divider_drag(&divider);
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .into_any_element(),
+                    );
                 }
                 (None, Some(panes))
             }

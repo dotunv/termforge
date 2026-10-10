@@ -406,6 +406,13 @@ impl TerminalView {
                         SessionEvent::Output(_) => {}
                     }
                 }
+                if let Some(slot) = tab.panes.get_mut(&id) {
+                    for (level, _) in &raised {
+                        if slot.attention.is_none_or(|current| *level >= current) {
+                            slot.attention = Some(*level);
+                        }
+                    }
+                }
                 if index != active {
                     for (level, note) in raised {
                         Self::raise_attention(tab, level, note);
@@ -697,6 +704,15 @@ impl TerminalView {
                 .iter()
                 .map(|id| running(id).cloned())
                 .collect::<Option<Vec<_>>>()?;
+            // Decide before attaching anything: a half-restored split would
+            // strand the panes that did attach.
+            if infos.iter().any(|info| {
+                info.ssh_host
+                    .as_deref()
+                    .is_some_and(|host| tf_pty::ssh_profile(host).is_none())
+            }) {
+                return None;
+            }
             let mut tree = tree;
             tree.set_focus(panes.focus as PaneId);
             Some((tree, infos))

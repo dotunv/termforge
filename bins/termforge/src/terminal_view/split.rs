@@ -25,6 +25,7 @@ impl PaneSlot {
             history: tab.history,
             font_size: tab.font_size,
             scroll_offset: tab.scroll_offset,
+            attention: None,
         }
     }
 
@@ -45,6 +46,7 @@ impl PaneSlot {
                 .session
                 .as_ref()
                 .map_or(0, |s| s.with(|p| p.engine().display_offset())),
+            attention: None,
         }
     }
 
@@ -174,6 +176,79 @@ impl TerminalView {
         self.load_tab_state(tab);
         self.on_output(cx);
         self.persist_layout();
+    }
+
+    /// Wheel over a pane that is not focused scrolls that pane's scrollback.
+    /// Full-screen programs in it are not sent keys; focus the pane for that.
+    pub(super) fn scroll_parked(
+        &mut self,
+        id: PaneId,
+        ev: &ScrollWheelEvent,
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(session) = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|tab| tab.panes.get(&id))
+            .and_then(|slot| slot.session.clone())
+        else {
+            return;
+        };
+        let line_h = self.metrics(window).line_h;
+        self.scroll_accum += ev.delta.pixel_delta(line_h).y / line_h;
+        let lines = self.scroll_accum.trunc() as i32;
+        if lines == 0 {
+            return;
+        }
+        self.scroll_accum -= lines as f32;
+        session.with_mut(|p| p.engine_mut().scroll(Scroll::Lines(lines * 3)));
+        cx.notify();
+    }
+
+    /// Start dragging a divider (from `PaneTree::dividers`).
+    pub(super) fn begin_divider_drag(&mut self, divider: &crate::panes::Divider) {
+        self.divider_drag = Some(DividerDrag {
+            path: divider.path.clone(),
+            axis: divider.axis,
+            parent: divider.parent,
+        });
+    }
+
+    /// Move the dragged divider under the pointer.
+    pub(super) fn drag_divider(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(drag) = &self.divider_drag else {
+            return;
+        };
+        let area = self.pane_area;
+        if area.size.width <= px(1.0) || area.size.height <= px(1.0) {
+            return;
+        }
+        // Pointer as a fraction of the whole pane area, then of the split.
+        let fx = (position.x - area.origin.x) / area.size.width;
+        let fy = (position.y - area.origin.y) / area.size.height;
+        let ratio = match drag.axis {
+            Axis::Horizontal => (fx - drag.parent.x) / drag.parent.w,
+            Axis::Vertical => (fy - drag.parent.y) / drag.parent.h,
+        };
+        let path = drag.path.clone();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            if tab.layout.set_ratio(&path, ratio) {
+                cx.notify();
+            }
+        }
+    }
+
+    /// Finish a divider drag and remember the result.
+    pub(super) fn end_divider_drag(&mut self, cx: &mut Context<'_, Self>) {
+        if self.divider_drag.take().is_some() {
+            self.persist_layout();
+            cx.notify();
+        }
     }
 
     /// Grow the focused pane towards `dir` by a small step.

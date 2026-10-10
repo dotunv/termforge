@@ -51,12 +51,25 @@ test watcher side by side without creating three workspaces.
   Ctrl+Alt+Arrows move focus, Ctrl+Alt+Shift+Arrows resize. A cap of 8 panes
   applies.
 
+## Pointer and attention behaviour
+
+- Dividers are 6px grab handles centred on each split; dragging converts the
+  pointer position into the split's ratio (clamped to 10%..90%) using the
+  bounds recorded from the last paint. The layout is saved when the drag ends.
+- The wheel scrolls the pane under the pointer. For a parked pane this is
+  scrollback only: full-screen programs there are not sent keys or mouse
+  reports until the pane is focused.
+- A parked pane's border takes the colour of its highest pending attention
+  level until it is focused, including in the active workspace.
+- A split restores only if every pane's session is running and reachable from
+  this machine, decided before anything is attached, so a failed restore
+  degrades to separate workspaces rather than stranding sessions.
+
 ## Known gaps
 
-- Dragging dividers with the mouse; resize is keyboard-only.
-- Mouse wheel scrolls the focused pane, not the pane under the pointer.
-- Attention raised by a parked pane of the *active* workspace is not shown.
 - Search, rename and the palette act on the focused pane/workspace only.
+- A pane that fails to reattach for a reason other than a missing SSH client
+  would still be left running in the daemon without a workspace.
 
 ## Consequences
 
