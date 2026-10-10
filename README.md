@@ -2,7 +2,17 @@
 
 A Windows-first, GPU-rendered terminal workspace where every repo is a workspace: shells, services, agents and history, organised per project.
 
-> Status: Phase 2 foundation. One GPU-rendered terminal per window with shell integration, command blocks and OSC 7501 program status. Selection, search, links and mouse reporting work. `forged` owns authenticated sessions, bounded output replay, and durable project tasks with context summaries. The UI reconnects to a hosted session for the current canonical project and can start the bundled daemon automatically. Project shells, their latest working directories, dimensions, and task association are recreated after a daemon restart. Not yet a daily driver: integrated task UI, tabs, splits and settings are unfinished. The previous Go/Electron and native prototypes are preserved under the `archive/go-electron` and `archive/native-v0` tags.
+> Status: Phase 2 foundation. One GPU-rendered terminal per window with shell integration, command blocks and OSC 7501 program status. Selection, search, links and mouse reporting work. `forged` owns authenticated sessions, bounded output replay, and durable project tasks with context summaries. The UI reconnects to a hosted session for the current canonical project and can start the bundled daemon automatically. Project shells, their latest working directories, dimensions, and task association are recreated after a daemon restart. Not yet a daily driver. Split panes exist but are untested in the running app and have known gaps (below); there is no in-app updater and release artifacts are unsigned unless signing secrets are configured. The previous Go/Electron and native prototypes are preserved under the `archive/go-electron` and `archive/native-v0` tags.
+
+### Known gaps
+
+- **Split panes** ([ADR 0012](docs/adr/0012-split-panes.md)): dividers cannot be dragged
+  (resize with Ctrl+Alt+Shift+Arrows); the mouse wheel scrolls the focused pane rather than
+  the one under the pointer; attention raised by an unfocused pane of the active workspace
+  is not shown; a pane that fails to reattach on restore leaves an orphaned daemon session.
+- **Updates** ([ADR 0013](docs/adr/0013-signed-updates.md)): manifests are verified by
+  `tf-update`, but nothing in the app fetches one and no public key is embedded yet.
+- **Release signing** has not been exercised against real certificates.
 
 ## Architecture
 
