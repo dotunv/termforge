@@ -7,9 +7,12 @@
 
 mod blocks;
 mod live;
+mod program_status;
 
 pub use blocks::{Block, BlockIndex, BlockState};
 pub use live::{LiveSession, SpawnOptions, Waker};
+pub use program_status::{ProgramStatusIndex, ProgramStatusRecord};
+pub use tf_tap::{BlockedKind, ProgramState, ProgramStatusReport, WorkingDirectory};
 
 use tf_engine::TerminalEngine;
 use tf_tap::{Located, Tap, TapEvent};
@@ -17,7 +20,10 @@ use tf_tap::{Located, Tap, TapEvent};
 /// Side effects produced by [`Processor::process`] for the owner to act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEvent {
-    Cwd(String),
+    /// Raw PTY bytes, preserved exactly so a remote renderer can feed the
+    /// same stream into its terminal engine without corrupting split UTF-8.
+    Output(Vec<u8>),
+    Cwd(WorkingDirectory),
     Notify {
         title: Option<String>,
         body: String,
@@ -30,6 +36,7 @@ pub enum SessionEvent {
         index: usize,
         exit_code: Option<i32>,
     },
+    ProgramStatusChanged,
 }
 
 /// Pure, PTY-free processing pipeline. Owners feed it PTY output; it keeps
@@ -38,9 +45,10 @@ pub struct Processor<E: TerminalEngine> {
     engine: E,
     tap: Tap,
     blocks: BlockIndex,
-    cwd: Option<String>,
+    cwd: Option<WorkingDirectory>,
     scratch: Vec<Located>,
     history: usize,
+    program_status: ProgramStatusIndex,
 }
 
 impl<E: TerminalEngine> std::fmt::Debug for Processor<E> {
@@ -61,6 +69,7 @@ impl<E: TerminalEngine> Processor<E> {
             cwd: None,
             scratch: Vec::new(),
             history: 0,
+            program_status: ProgramStatusIndex::default(),
         }
     }
 
@@ -74,13 +83,18 @@ impl<E: TerminalEngine> Processor<E> {
         self.scratch.clear();
         self.tap.feed(chunk, &mut self.scratch);
         let mut start = 0;
+        let mut replies = Vec::new();
         for located in std::mem::take(&mut self.scratch) {
             self.feed_engine(&chunk[start..located.offset]);
             start = located.offset;
+            if matches!(located.event, TapEvent::ProgramStatusQuery) {
+                replies.extend_from_slice(b"\x1b]7501;?\x1b\\");
+            }
             self.apply(located.event, events);
         }
         self.feed_engine(&chunk[start..]);
-        self.engine.take_replies()
+        replies.extend(self.engine.take_replies());
+        replies
     }
 
     fn feed_engine(&mut self, bytes: &[u8]) {
@@ -105,9 +119,20 @@ impl<E: TerminalEngine> Processor<E> {
 
     fn apply(&mut self, event: TapEvent, events: &mut Vec<SessionEvent>) {
         match event {
+            TapEvent::FullReset => {
+                if self.program_status.clear() {
+                    events.push(SessionEvent::ProgramStatusChanged);
+                }
+            }
             TapEvent::Mark(mark) => {
+                if matches!(mark, tf_tap::Mark::PromptStart)
+                    && self.program_status.clear_transient()
+                {
+                    events.push(SessionEvent::ProgramStatusChanged);
+                }
                 let line = self.engine.cursor_line_abs();
-                if let Some((index, exit_code)) = self.blocks.apply(mark, line, self.cwd.clone()) {
+                let cwd = self.cwd.as_ref().map(|cwd| cwd.path.clone());
+                if let Some((index, exit_code)) = self.blocks.apply(mark, line, cwd) {
                     events.push(SessionEvent::BlockFinished { index, exit_code });
                 }
             }
@@ -117,6 +142,11 @@ impl<E: TerminalEngine> Processor<E> {
             }
             TapEvent::Notify { title, body } => events.push(SessionEvent::Notify { title, body }),
             TapEvent::Progress { .. } => {}
+            TapEvent::ProgramStatus(report) => {
+                self.program_status.apply(report);
+                events.push(SessionEvent::ProgramStatusChanged);
+            }
+            TapEvent::ProgramStatusQuery => {}
         }
     }
 
@@ -132,7 +162,22 @@ impl<E: TerminalEngine> Processor<E> {
         &self.blocks
     }
 
-    pub fn cwd(&self) -> Option<&str> {
-        self.cwd.as_deref()
+    pub fn cwd(&self) -> Option<&WorkingDirectory> {
+        self.cwd.as_ref()
+    }
+
+    pub fn program_status(&self) -> &ProgramStatusIndex {
+        &self.program_status
+    }
+
+    pub fn replace_program_status(
+        &mut self,
+        reports: impl IntoIterator<Item = ProgramStatusReport>,
+    ) {
+        self.program_status.replace(reports);
+    }
+
+    pub fn process_exited(&mut self) -> bool {
+        self.program_status.clear_transient()
     }
 }

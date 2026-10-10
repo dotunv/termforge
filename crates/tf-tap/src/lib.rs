@@ -16,6 +16,7 @@
 //! | `OSC 9 ; text` | Notification (iTerm2) |
 //! | `OSC 777 ; notify ; title ; body` | Notification (rxvt / Ghostty) |
 //! | `OSC 99 ; meta ; payload` | Notification (kitty, single chunk subset) |
+//! | `OSC 7501 ; key=value:...` | Program status |
 //!
 //! The parser is a small byte-at-a-time state machine. It is resumable
 //! across arbitrary chunk boundaries and bounded in memory: payloads longer
@@ -52,11 +53,52 @@ pub enum ProgressState {
     Paused,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramState {
+    Idle,
+    Working,
+    Done,
+    Blocked,
+    Error,
+    Clear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockedKind {
+    Permission,
+    Question,
+    Auth,
+}
+
+/// A validated OSC 7501 report. Missing optional keys are represented by
+/// `None`; unknown keys have already been ignored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramStatusReport {
+    pub state: ProgramState,
+    pub id: Option<String>,
+    pub kind: Option<BlockedKind>,
+    pub progress: Option<u8>,
+    pub app: Option<String>,
+    pub title: Option<String>,
+    pub message: Option<String>,
+}
+
+/// A working directory reported by the terminal stream. OSC 7 supplies a
+/// hostname; OSC 9;9 does not. Keeping the host prevents remote paths from
+/// being mistaken for paths on the machine running TermForge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkingDirectory {
+    pub host: Option<String>,
+    pub path: String,
+}
+
 /// Something the tap recognised in the stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TapEvent {
+    /// Full terminal reset (RIS, `ESC c`).
+    FullReset,
     Mark(Mark),
-    Cwd(String),
+    Cwd(WorkingDirectory),
     Notify {
         title: Option<String>,
         body: String,
@@ -65,6 +107,8 @@ pub enum TapEvent {
         state: ProgressState,
         percent: Option<u8>,
     },
+    ProgramStatus(ProgramStatusReport),
+    ProgramStatusQuery,
 }
 
 /// A recognised event plus the offset, within the chunk passed to
@@ -135,6 +179,13 @@ impl Tap {
                     b']' => {
                         self.buf.clear();
                         State::OscBody
+                    }
+                    b'c' => {
+                        out.push(Located {
+                            offset,
+                            event: TapEvent::FullReset,
+                        });
+                        State::Ground
                     }
                     ESC => State::Escape,
                     _ => State::Ground,

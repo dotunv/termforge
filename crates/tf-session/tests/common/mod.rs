@@ -83,6 +83,7 @@ impl RealShell {
         let session = LiveSession::spawn(
             SpawnOptions {
                 profile: profile.clone(),
+                ssh_host: None,
                 cwd: Some(dir.path().to_path_buf()),
                 size,
                 env: vec![
@@ -259,7 +260,7 @@ pub fn drive(
         }
         // Long runs are otherwise opaque: a stall at 9,000 commands looks the
         // same as a slow one until you wait out the whole budget.
-        if count >= 2_000 && sent % 1_000 == 0 && sent != last_reported {
+        if count >= 2_000 && sent.is_multiple_of(1_000) && sent != last_reported {
             last_reported = sent;
             eprintln!(
                 "  {}: {sent}/{count} at {:.1}s",

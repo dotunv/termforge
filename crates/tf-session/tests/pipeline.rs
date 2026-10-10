@@ -6,6 +6,7 @@ mod common;
 use common::RealShell;
 use tf_engine::{AlacrittyEngine, GridSize, TerminalEngine};
 use tf_session::{BlockState, Processor, SessionEvent};
+use tf_tap::ProgramState;
 
 #[test]
 fn synthetic_shell_output_produces_anchored_blocks() {
@@ -16,7 +17,12 @@ fn synthetic_shell_output_produces_anchored_blocks() {
     for b in stream {
         p.process(std::slice::from_ref(b), &mut ev);
     }
-    assert!(ev.contains(&SessionEvent::Cwd("C:\\src".into())));
+    assert!(
+        ev.contains(&SessionEvent::Cwd(tf_session::WorkingDirectory {
+            host: None,
+            path: "C:\\src".into(),
+        }))
+    );
     assert!(ev.contains(&SessionEvent::BlockFinished {
         index: 0,
         exit_code: Some(0)
@@ -66,6 +72,55 @@ fn alternate_screen_does_not_move_blocks() {
     p.process(b"\x1b]133;A\x07$ ", &mut ev);
     let lines: Vec<_> = p.blocks().iter().map(|b| b.prompt_line).collect();
     assert_eq!(lines, vec![0, 21, 22], "{:?}", p.blocks());
+}
+
+#[test]
+fn program_status_is_stateful_and_prompt_clears_transient_records() {
+    let mut p = Processor::new(AlacrittyEngine::new(GridSize::new(40, 5)));
+    let mut events = Vec::new();
+    let reply = p.process(
+        b"\x1b]7501;?\x1b\\\x1b]7501;state=working:app=codex:id=task\x1b\\\x1b]7501;state=done:id=result\x1b\\",
+        &mut events,
+    );
+    assert_eq!(reply, b"\x1b]7501;?\x1b\\");
+    assert_eq!(p.program_status().len(), 2);
+
+    p.process(b"\x1b]133;A\x1b\\", &mut events);
+    let records: Vec<_> = p.program_status().iter().collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].report.state, ProgramState::Done);
+    assert!(events.contains(&SessionEvent::ProgramStatusChanged));
+}
+
+#[test]
+fn program_status_clear_removes_descendants() {
+    let mut p = Processor::new(AlacrittyEngine::new(GridSize::new(40, 5)));
+    let mut events = Vec::new();
+    p.process(
+        b"\x1b]7501;state=working:id=deploy\x1b\\\x1b]7501;state=blocked:id=deploy/eu\x1b\\\x1b]7501;state=done:id=other\x1b\\\x1b]7501;state=clear:id=deploy\x1b\\",
+        &mut events,
+    );
+    let ids: Vec<_> = p
+        .program_status()
+        .iter()
+        .map(|record| record.report.id.as_deref())
+        .collect();
+    assert_eq!(ids, vec![Some("other")]);
+}
+
+#[test]
+fn full_reset_clears_program_status_but_soft_reset_does_not() {
+    let mut p = Processor::new(AlacrittyEngine::new(GridSize::new(40, 5)));
+    let mut events = Vec::new();
+    p.process(
+        b"\x1b]7501;state=working:id=agent\x1b\\\x1b[!p",
+        &mut events,
+    );
+    assert_eq!(p.program_status().len(), 1);
+
+    p.process(b"\x1bc", &mut events);
+    assert!(p.program_status().is_empty());
+    assert!(events.contains(&SessionEvent::ProgramStatusChanged));
 }
 
 /// Real shell, real PTY, real integration script. Each command must produce
