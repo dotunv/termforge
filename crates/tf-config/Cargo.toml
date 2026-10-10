@@ -1,0 +1,30 @@
+[package]
+name = "tf-config"
+description = "TermForge configuration: TOML with JSON schema, hot reload, validation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
+schemars = "0.8"
+thiserror = { workspace = true }
+notify = "6"
+tokio = { features = ["fs", "macros", "rt", "sync", "time"], version = "1.36" }
+tracing = { workspace = true }
+directories = { workspace = true }
+tf-ui = { workspace = true, optional = true }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+default = ["tf-ui"]
+tf-ui = ["dep:tf-ui"]
