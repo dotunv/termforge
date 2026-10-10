@@ -19,7 +19,19 @@ keeping. It also had bugs, so the schema is a rewrite rather than a port.
 **Storage.** SQLite via `rusqlite` in WAL mode, one database per user, owned by
 the session host (`forged`). Schema changes are append-only migrations tracked
 with `PRAGMA user_version`, each run inside a transaction. The current v1 schema
-has `projects`, `command_history` and `workspace_state`.
+has `projects`, `command_history` and `workspace_state`. The append-only v2
+migration adds restorable session metadata. This recreates the shell, latest
+working directory and dimensions after a daemon restart; it does not claim to
+resurrect a process that died with the daemon.
+
+The UI never opens the database. It saves and loads its workspace layout
+document (workspace order, names and pins; the daemon treats it as opaque text)
+through the `SaveWorkspaceState` and `LoadWorkspaceState` requests, which store
+it in `workspace_state` keyed by project. This is protocol v6.
+
+The append-only v3 migration adds project-scoped tasks with a lifecycle state
+and bounded context summary. Sessions may reference a task, making the reason a
+shell exists durable alongside its technical launch metadata.
 
 **Project identity.** A project is keyed by `dunce::canonicalize` of its root,
 stored as plain text. Never a hash, and never re-derived differently on two
