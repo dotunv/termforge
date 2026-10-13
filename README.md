@@ -97,6 +97,30 @@ Linux builds of the app need `libxkbcommon-dev libxcb1-dev libfontconfig-dev lib
 
 ## Using the app
 
+### Client and account contexts
+
+Assign a visible Git/GitHub identity to each project from the context badge in
+the header or sidebar. Create and manage profiles under **Settings → Accounts**.
+Profiles live in `config.toml` and can select separate
+Git author details, GitHub CLI config directories and global Git config files:
+
+```toml
+[[contexts]]
+id = "client-a"
+name = "Client A"
+color = "#168aad"
+git_name = "Your Name"
+git_email = "you@client-a.example"
+github_host = "github.com"
+gh_config_dir = "/home/you/.config/gh-client-a"
+git_config_global = "/home/you/.config/git/client-a"
+```
+
+TermForge does not store credentials. OpenSSH, Git credential helpers and
+GitHub CLI remain responsible for authentication. Context changes apply to new
+or restarted shells, and the UI warns when the repository's effective Git
+email or origin host does not match the selected context.
+
 | Action | Shortcut |
 |---|---|
 | Select | drag; double-click for a word, triple-click for a line; `Shift`+click extends |

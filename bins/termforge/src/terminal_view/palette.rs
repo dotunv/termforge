@@ -9,6 +9,28 @@ impl TerminalView {
             .as_ref()
             .map(|palette| palette.query.to_ascii_lowercase())
             .unwrap_or_default();
+        if let Some(palette) = self
+            .palette
+            .as_ref()
+            .filter(|palette| palette.mode != PickerMode::Commands)
+        {
+            let mode = palette.mode;
+            return palette
+                .items
+                .iter()
+                .filter(|item| query.is_empty() || item.label.to_ascii_lowercase().contains(&query))
+                .map(|item| {
+                    let action = match mode {
+                        PickerMode::Themes => PaletteAction::SetTheme(item.value.clone()),
+                        PickerMode::MonoFonts => PaletteAction::SetMonoFont(item.value.clone()),
+                        PickerMode::UiFonts => PaletteAction::SetUiFont(item.value.clone()),
+                        PickerMode::Contexts => PaletteAction::SetContext(item.value.clone()),
+                        PickerMode::Commands => unreachable!("command mode handled above"),
+                    };
+                    (action, item.label.clone(), item.hint.clone())
+                })
+                .collect();
+        }
         let mut commands: Vec<_> = PALETTE_COMMANDS
             .iter()
             .cloned()
@@ -20,6 +42,13 @@ impl TerminalView {
                 "Workspace: switch to local".into(),
                 String::new(),
             ));
+            if let Some(host) = self.spawn.ssh_host.clone() {
+                commands.push((
+                    PaletteAction::CopyRemoteIntegration(host),
+                    "SSH: copy Bash integration bootstrap".into(),
+                    String::new(),
+                ));
+            }
         }
         for (index, shell) in self.shells.iter().enumerate() {
             commands.push((
@@ -59,8 +88,15 @@ impl TerminalView {
         let Some(palette) = &mut self.palette else {
             return false;
         };
+        let picker = palette.mode != PickerMode::Commands;
         match key {
-            "escape" => self.palette = None,
+            "escape" => {
+                self.palette = None;
+                if picker {
+                    // Discard the live preview.
+                    self.apply_appearance(cx);
+                }
+            }
             "up" if count > 0 => palette.selected = (palette.selected + count - 1) % count,
             "down" if count > 0 => palette.selected = (palette.selected + 1) % count,
             "enter" if count > 0 => {
@@ -81,6 +117,9 @@ impl TerminalView {
                 }
             }
             _ => return false,
+        }
+        if picker {
+            self.preview_picker(cx);
         }
         cx.notify();
         true
@@ -103,18 +142,13 @@ impl TerminalView {
             PaletteAction::Paste => self.paste(cx),
             PaletteAction::FontIncrease => self.font_size = (self.font_size + 1.0).min(32.0),
             PaletteAction::FontDecrease => self.font_size = (self.font_size - 1.0).max(8.0),
-            PaletteAction::FontReset => self.font_size = 14.0,
+            PaletteAction::FontReset => {
+                self.font_size = self.appearance.config.terminal.font_size;
+            }
             PaletteAction::ScrollTop => self.scroll(Scroll::Top, cx),
             PaletteAction::ScrollBottom => self.scroll(Scroll::Bottom, cx),
             PaletteAction::CopyDiagnostics => {
-                let text = format!(
-                    "TermForge {} · protocol v{} · shell={} · cwd={}",
-                    env!("CARGO_PKG_VERSION"),
-                    tf_proto::PROTOCOL_VERSION,
-                    self.spawn.profile.name,
-                    self.cwd.as_deref().unwrap_or("unknown")
-                );
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                cx.write_to_clipboard(ClipboardItem::new_string(self.diagnostics_text()));
             }
             PaletteAction::NextAttention => self.jump_to_attention(cx),
             PaletteAction::RenameWorkspace => self.begin_rename(self.active_tab, cx),
@@ -132,6 +166,24 @@ impl TerminalView {
             PaletteAction::StatusClear => self.write(b"tf status clear\r"),
             PaletteAction::DaemonDoctor => self.write(b"forged doctor\r"),
             PaletteAction::ConnectSsh(host) => self.new_ssh_tab(host, cx),
+            PaletteAction::CopyRemoteIntegration(host) => {
+                let command = format!(
+                    "tf shell-integration bash | ssh -- {host} 'umask 077; mkdir -p ~/.config/termforge && cat > ~/.config/termforge/termforge.bash'\n# Then, on {host}: source ~/.config/termforge/termforge.bash"
+                );
+                cx.write_to_clipboard(ClipboardItem::new_string(command));
+            }
+            PaletteAction::PickTheme => self.open_picker(PickerMode::Themes, cx),
+            PaletteAction::PickMonoFont => self.open_picker(PickerMode::MonoFonts, cx),
+            PaletteAction::PickUiFont => self.open_picker(PickerMode::UiFonts, cx),
+            PaletteAction::SetTheme(name) => self.set_theme(&name, cx),
+            PaletteAction::SetMonoFont(family) => self.set_mono_font(&family, cx),
+            PaletteAction::SetUiFont(family) => self.set_ui_font(&family, cx),
+            PaletteAction::ReloadAppearance => self.reload_appearance(cx),
+            PaletteAction::RevealThemes => self.reveal_dir(true, cx),
+            PaletteAction::RevealFonts => self.reveal_dir(false, cx),
+            PaletteAction::ExportTheme => self.export_theme(cx),
+            PaletteAction::PickContext => self.open_picker(PickerMode::Contexts, cx),
+            PaletteAction::SetContext(id) => self.set_context(&id, cx),
             PaletteAction::SwitchLocal => {
                 if let Some(index) = self
                     .tabs
@@ -153,8 +205,9 @@ impl TerminalView {
         let command_count = commands.len();
         let visible_start = palette.selected.saturating_sub(7);
         let t = &self.theme;
+        let mode = palette.mode;
         let query = if palette.query.is_empty() {
-            "Type a command…".to_owned()
+            mode.placeholder().to_owned()
         } else {
             palette.query.clone()
         };
@@ -185,8 +238,15 @@ impl TerminalView {
                                 .justify_between()
                                 .text_size(px(tokens::text::XS))
                                 .text_color(hsla(t.text_faint))
-                                .child("COMMAND PALETTE")
-                                .child(SharedString::from(format!("{command_count} actions"))),
+                                .child(mode.title())
+                                .child(SharedString::from(format!(
+                                    "{command_count} {}",
+                                    if mode == PickerMode::Commands {
+                                        "actions"
+                                    } else {
+                                        "choices"
+                                    }
+                                ))),
                         )
                         .child(
                             div()
@@ -220,6 +280,10 @@ impl TerminalView {
                                         .when(index != palette.selected, |d| {
                                             d.text_color(hsla(t.text_muted))
                                         })
+                                        .when(
+                                            mode.is_font() && !label.starts_with("Automatic"),
+                                            |d| d.font_family(SharedString::from(label.clone())),
+                                        )
                                         .child(SharedString::from(label.clone()))
                                         .child(
                                             div()

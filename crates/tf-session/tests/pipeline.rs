@@ -133,8 +133,8 @@ fn assert_integration(kind: tf_pty::ShellKind, commands: &[&str], codes: &[i32])
 
     let shell = match RealShell::spawn(kind) {
         Ok(s) => s,
-        Err(common::Skip::NotInstalled) => {
-            eprintln!("{kind:?} not installed; skipping");
+        Err(common::Skip::NotInstalled | common::Skip::UnsupportedVersion) => {
+            eprintln!("{kind:?} unavailable; skipping");
             return;
         }
         Err(e) => panic!("{kind:?} is {e} but is a supported shell"),

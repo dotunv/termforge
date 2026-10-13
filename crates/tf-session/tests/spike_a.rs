@@ -127,6 +127,9 @@ fn wanted_shells() -> Vec<ShellKind> {
     let Ok(filter) = std::env::var("TF_SPIKE_SHELLS") else {
         return all;
     };
+    if filter.trim().is_empty() {
+        return all;
+    }
     let named: Vec<String> = filter.split(',').map(|s| s.trim().to_lowercase()).collect();
     all.into_iter()
         .filter(|k| named.contains(&format!("{k:?}").to_lowercase()))
@@ -153,8 +156,8 @@ fn osc_marks_stay_ordered_over_ten_thousand_commands() {
     for kind in shells {
         let shell = match RealShell::spawn(kind) {
             Ok(s) => s,
-            Err(Skip::NotInstalled) => {
-                eprintln!("  {:<20} skip (not installed)", format!("{kind:?}"));
+            Err(Skip::NotInstalled | Skip::UnsupportedVersion) => {
+                eprintln!("  {:<20} skip (unavailable)", format!("{kind:?}"));
                 continue;
             }
             Err(e) => {
@@ -203,8 +206,8 @@ fn marks_stay_ordered_for_a_handful_of_commands() {
     for kind in harness::testable_shells() {
         let shell = match RealShell::spawn(kind) {
             Ok(s) => s,
-            Err(Skip::NotInstalled) => {
-                eprintln!("{kind:?} not installed; skipping");
+            Err(Skip::NotInstalled | Skip::UnsupportedVersion) => {
+                eprintln!("{kind:?} unavailable; skipping");
                 continue;
             }
             Err(e) => panic!("{kind:?} is {e} but is a supported shell"),

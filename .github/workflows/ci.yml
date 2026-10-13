@@ -96,6 +96,8 @@ jobs:
           key: app
       - name: clippy
         run: cargo clippy -p termforge --locked -- -D warnings
+      - name: test
+        run: cargo test -p termforge --locked
       - name: build
         if: runner.os == 'Windows'
         run: cargo build -p termforge --release --locked

@@ -187,6 +187,9 @@ impl TerminalView {
         window: &Window,
         cx: &mut Context<'_, Self>,
     ) {
+        if self.settings.is_some() {
+            return;
+        }
         let Some(session) = self
             .tabs
             .get(self.active_tab)

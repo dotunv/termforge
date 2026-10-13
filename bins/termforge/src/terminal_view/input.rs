@@ -13,7 +13,7 @@ impl TerminalView {
             .unwrap_or(px(self.font_size * 0.6));
         Metrics {
             cell_w,
-            line_h: px((self.font_size * 1.35).round()),
+            line_h: px((self.font_size * self.line_height).round()),
         }
     }
 
@@ -79,8 +79,17 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
+        if self.account_editor_key(ev, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.renaming.is_some() {
             self.rename_key(ev, cx);
+            cx.stop_propagation();
+            return;
+        }
+        // A picker opened from settings owns the keyboard until it closes.
+        if self.settings.is_some() && self.palette.is_some() && self.palette_key(ev, cx) {
             cx.stop_propagation();
             return;
         }
@@ -167,7 +176,7 @@ impl TerminalView {
         } else if m.control && !m.alt && !m.shift && matches!(key, "=" | "+" | "-" | "0") {
             self.font_size = match key {
                 "-" => (self.font_size - 1.0).max(8.0),
-                "0" => 14.0,
+                "0" => self.appearance.config.terminal.font_size,
                 _ => (self.font_size + 1.0).min(32.0),
             };
             cx.notify();
@@ -204,6 +213,13 @@ impl TerminalView {
         } else {
             if key == "enter" && !m.control && !m.alt && !m.shift {
                 self.note_enter();
+            }
+            // Printable text is delivered through GPUI's native input
+            // handler, which is also where IME commits arrive. Sending the
+            // key event too would duplicate ordinary characters and composed
+            // text on platforms that emit both events.
+            if !m.control && !m.alt && ks.key_char.is_some() {
+                return;
             }
             self.send_key(ev, mods, window, cx);
             return;
@@ -506,6 +522,11 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        // Settings owns wheel input while it is open. Its scrollable body may
+        // still let the event bubble to the terminal element underneath.
+        if self.settings.is_some() {
+            return;
+        }
         let line_h = self.metrics(window).line_h;
         self.scroll_accum += ev.delta.pixel_delta(line_h).y / line_h;
         let lines = self.scroll_accum.trunc() as i32;

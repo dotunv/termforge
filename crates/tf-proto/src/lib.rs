@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped on any incompatible change to the types in this crate.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Stable identifier for a PTY session owned by `forged`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -128,6 +128,15 @@ pub enum Request {
     LoadWorkspaceState {
         project_root: PathBuf,
     },
+    /// Read the client/account context assigned to a project.
+    GetProjectContext {
+        project_root: PathBuf,
+    },
+    /// Assign a context profile id, or clear it with `None`.
+    SetProjectContext {
+        project_root: PathBuf,
+        context_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +150,9 @@ pub struct CreateSession {
     /// Canonical root of the project this session belongs to.
     pub project_root: Option<PathBuf>,
     pub task: Option<TaskId>,
+    /// Validated identity-selection environment for this session. Credentials
+    /// themselves stay in external Git/SSH/GitHub CLI stores.
+    pub context_env: Vec<(String, String)>,
     pub size: TermSize,
 }
 
@@ -182,6 +194,7 @@ pub enum Response {
     TaskCreated(TaskId),
     /// The stored layout document, if one was saved for the project.
     WorkspaceState(Option<String>),
+    ProjectContext(Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +248,9 @@ pub struct SessionInfo {
     pub task: Option<TaskId>,
     pub size: TermSize,
     pub running: bool,
+    /// The daemon recreated this shell from durable metadata after restarting.
+    /// Its process and scrollback are new even though its project context is not.
+    pub restored: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

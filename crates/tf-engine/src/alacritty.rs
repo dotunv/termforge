@@ -178,6 +178,10 @@ impl TerminalEngine for AlacrittyEngine {
         }
     }
 
+    fn synchronized_output(&self) -> bool {
+        self.parser.sync_timeout().sync_timeout().is_some()
+    }
+
     fn line(&self, abs: usize) -> Option<Vec<Cell>> {
         let grid = self.term.grid();
         let history = grid.history_size();
@@ -328,6 +332,15 @@ mod tests {
         assert!(e.snapshot().modes.alt_screen);
         e.feed(b"\x1b[?1049l");
         assert!(!e.snapshot().modes.alt_screen);
+    }
+
+    #[test]
+    fn synchronized_output_is_exposed_until_reset() {
+        let mut e = AlacrittyEngine::new(GridSize::new(80, 24));
+        e.feed(b"\x1b[?2026hpartial");
+        assert!(e.synchronized_output());
+        e.feed(b" frame\x1b[?2026l");
+        assert!(!e.synchronized_output());
     }
 
     #[test]

@@ -6,25 +6,28 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod appearance;
+mod contexts;
+mod diagnostics;
 mod fonts;
 mod paint;
 mod panes;
+mod perf;
 mod remote_session;
 mod suggest;
 mod terminal_view;
+mod updates;
 mod workspace;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use gpui::{
     px, size, App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions,
 };
 use tf_engine::GridSize;
 use tf_session::SpawnOptions;
-use tf_ui::{Theme, ThemeInput};
 
-use crate::fonts::MonoFont;
+use crate::appearance::Appearance;
 use crate::terminal_view::TerminalView;
 
 fn data_dir() -> Option<PathBuf> {
@@ -89,6 +92,8 @@ fn project_root(cwd: Option<&std::path::Path>) -> Option<PathBuf> {
 }
 
 fn main() {
+    perf::mark_process_start();
+    diagnostics::install_local_crash_log(data_dir());
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("TERMFORGE_LOG")
@@ -111,8 +116,7 @@ fn main() {
     };
 
     Application::new().run(move |cx: &mut App| {
-        let theme = Arc::new(Theme::generate(ThemeInput::DARK));
-        let font = MonoFont::detect(cx);
+        let appearance = Appearance::load(cx);
         let bounds = Bounds::centered(None, size(px(1100.0), px(720.0)), cx);
         let opened = cx.open_window(
             WindowOptions {
@@ -126,7 +130,7 @@ fn main() {
                 ..Default::default()
             },
             |window, cx| {
-                cx.new(|cx| TerminalView::new(spawn, project_root, theme, font, window, cx))
+                cx.new(|cx| TerminalView::new(spawn, project_root, appearance, window, cx))
             },
         );
         if let Err(e) = opened {

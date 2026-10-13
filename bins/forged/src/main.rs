@@ -112,6 +112,8 @@ struct HostedSession {
     task: Option<TaskId>,
     size: TermSize,
     log: Arc<Mutex<EventLog>>,
+    restored: bool,
+    context_env: Vec<(String, String)>,
 }
 
 #[derive(Debug, Default)]
@@ -205,12 +207,13 @@ impl SessionHost {
                 cwd: record.cwd.filter(|path| path.is_dir()),
                 project_root: record.project_root.filter(|path| path.is_dir()),
                 task: record.task_id.and_then(|id| id.parse().ok()),
+                context_env: record.context_env,
                 size: TermSize {
                     cols: record.cols,
                     rows: record.rows,
                 },
             };
-            match self.create(create) {
+            match self.create_with_origin(create, true) {
                 Ok(id) => tracing::info!(%id, "restored project shell after daemon restart"),
                 Err(error) => tracing::warn!(%error, "could not restore project shell"),
             }
@@ -278,6 +281,27 @@ impl SessionHost {
                     .map(Response::WorkspaceState)
                     .map_err(internal)
             }
+            Request::GetProjectContext { project_root } => {
+                let project = lock(&self.store)
+                    .open_project(&project_root)
+                    .map_err(internal)?;
+                Ok(Response::ProjectContext(project.context_id))
+            }
+            Request::SetProjectContext {
+                project_root,
+                context_id,
+            } => {
+                if context_id
+                    .as_deref()
+                    .is_some_and(|id| !valid_context_id(id))
+                {
+                    return Err(ProtoError::Internal("invalid context id".into()));
+                }
+                lock(&self.store)
+                    .set_project_context(&project_root, context_id.as_deref())
+                    .map_err(internal)?;
+                Ok(Response::Ok)
+            }
             Request::Subscribe { .. } | Request::Unsubscribe { .. } => Err(ProtoError::Internal(
                 "subscriptions are handled by the connection".into(),
             )),
@@ -285,6 +309,15 @@ impl SessionHost {
     }
 
     fn create(&self, create: CreateSession) -> Result<SessionId, ProtoError> {
+        self.create_with_origin(create, false)
+    }
+
+    fn create_with_origin(
+        &self,
+        create: CreateSession,
+        restored: bool,
+    ) -> Result<SessionId, ProtoError> {
+        validate_context_env(&create.context_env)?;
         let profile = match create.ssh_host.as_deref() {
             Some(host) => tf_pty::ssh_profile(host).ok_or_else(|| {
                 ProtoError::Internal(format!("invalid SSH host or ssh not found: {host}"))
@@ -333,13 +366,15 @@ impl SessionHost {
         let wake: Waker = Arc::new(move || {
             let _ = wake_tx.send(());
         });
+        let mut env = tool_env();
+        env.extend(create.context_env.iter().cloned());
         let session = LiveSession::spawn(
             SpawnOptions {
                 profile,
                 ssh_host: create.ssh_host.clone(),
                 cwd: launch_cwd.map(PathBuf::from),
                 size: GridSize::new(size.cols, size.rows),
-                env: tool_env(),
+                env,
                 integration_dir: Some(self.integration_dir.clone()),
             },
             wake,
@@ -362,6 +397,8 @@ impl SessionHost {
                 task: create.task,
                 size,
                 log: Arc::clone(&log),
+                restored,
+                context_env: create.context_env,
             },
         );
         if let Err(error) = self.persist(id) {
@@ -394,6 +431,7 @@ impl SessionHost {
             cols: entry.size.cols,
             rows: entry.size.rows,
             task_id: entry.task.map(|task| task.to_string()),
+            context_env: entry.context_env.clone(),
         };
         drop(sessions);
         lock(&self.store)
@@ -425,6 +463,7 @@ impl SessionHost {
                     task: entry.task,
                     size: entry.size,
                     running: entry.session.exit_status().is_none(),
+                    restored: entry.restored,
                 }
             })
             .collect()
@@ -714,6 +753,42 @@ fn tool_env() -> Vec<(String, String)> {
     std::env::join_paths(paths)
         .map(|path| vec![("PATH".to_owned(), path.to_string_lossy().into_owned())])
         .unwrap_or_default()
+}
+
+fn valid_context_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 48
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Only identity-selection variables are accepted over IPC. This prevents a
+/// client from using the session API as an arbitrary process-environment
+/// injection mechanism while still supporting separate Git/GitHub accounts.
+fn validate_context_env(env: &[(String, String)]) -> Result<(), ProtoError> {
+    const ALLOWED: &[&str] = &[
+        "TERMFORGE_CONTEXT",
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        "GIT_CONFIG_GLOBAL",
+        "GH_CONFIG_DIR",
+    ];
+    if env.len() > ALLOWED.len()
+        || env.iter().any(|(key, value)| {
+            !ALLOWED.contains(&key.as_str())
+                || key.as_bytes().contains(&0)
+                || value.as_bytes().contains(&0)
+                || value.len() > 4096
+        })
+    {
+        return Err(ProtoError::Internal(
+            "invalid context environment for session".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn internal(error: impl std::fmt::Display) -> ProtoError {
@@ -1119,5 +1194,16 @@ mod tests {
         };
         assert_eq!(local_cwd(false, &cwd), Some(PathBuf::from("/srv/project")));
         assert_eq!(local_cwd(true, &cwd), None);
+    }
+
+    #[test]
+    fn context_environment_is_strictly_allowlisted() {
+        assert!(validate_context_env(&[
+            ("TERMFORGE_CONTEXT".into(), "client-a".into()),
+            ("GH_CONFIG_DIR".into(), "/accounts/client-a".into()),
+        ])
+        .is_ok());
+        assert!(validate_context_env(&[("PATH".into(), "/tmp/evil".into())]).is_err());
+        assert!(validate_context_env(&[("LD_PRELOAD".into(), "payload.so".into())]).is_err());
     }
 }

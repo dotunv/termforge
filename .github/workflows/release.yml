@@ -29,6 +29,8 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      # Public (not secret): compiled into the app for manifest verification.
+      TERMFORGE_UPDATE_PUBLIC_KEY: ${{ vars.TF_UPDATE_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

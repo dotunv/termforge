@@ -95,6 +95,7 @@ impl TerminalView {
                                     .text_color(hsla(t.text))
                                     .child(SharedString::from(self.project_name())),
                             )
+                            .child(self.context_badge("header-context-badge", cx))
                             .child(
                                 div()
                                     .text_size(px(tokens::text::XS))
@@ -366,6 +367,16 @@ impl TerminalView {
             }
         }
         let mut right = String::new();
+        if let Some(host) = self.spawn.ssh_host.as_deref() {
+            right.push_str("SSH ");
+            right.push_str(host);
+            right.push_str("  ·  remote integration is profile-managed  ·  ");
+        }
+        if let Some(warning) = self.identity_check.warnings.first() {
+            right.push_str("Identity warning: ");
+            right.push_str(warning);
+            right.push_str("  ·  ");
+        }
         if self.hover_link.is_some() {
             right.push_str("Ctrl+click to open  ·  ");
         }
@@ -450,15 +461,5 @@ impl TerminalView {
             self.select_tab(index, cx);
             self.close_active_tab(cx);
         }
-    }
-
-    pub(super) fn set_dark_theme(&mut self, dark: bool, cx: &mut Context<'_, Self>) {
-        let input = if dark {
-            ThemeInput::DARK
-        } else {
-            ThemeInput::LIGHT
-        };
-        self.theme = Arc::new(Theme::generate(input));
-        cx.notify();
     }
 }

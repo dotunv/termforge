@@ -401,6 +401,7 @@ fn ci() -> Result<()> {
         "warnings",
     ])?;
     step(&["test", "--locked"])?;
+    step(&["test", "-p", "termforge", "--locked"])?;
     Ok(())
 }
 

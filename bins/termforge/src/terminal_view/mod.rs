@@ -18,10 +18,12 @@ use std::sync::Arc;
 use futures::StreamExt;
 use gpui::{
     canvas, div, prelude::*, px, relative, App, Bounds, ClickEvent, ClipboardItem, Context,
-    CursorStyle, DispatchPhase, ElementId, Entity, FocusHandle, Hitbox, HitboxBehavior,
-    KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    ScrollWheelEvent, SharedString, Subscription, Task, Window,
+    CursorStyle, DispatchPhase, ElementId, ElementInputHandler, Entity, FocusHandle, Hitbox,
+    HitboxBehavior, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, ScrollWheelEvent, SharedString, Subscription, Task, Window,
+    WindowBackgroundAppearance,
 };
+use tf_config::{ContextConfig, CursorStyleConfig};
 use tf_engine::text::{find_all, is_openable, link_at, Link, Match};
 use tf_engine::{
     GridSize, MouseTracking, Scroll, Selection, SelectionKind, Snapshot, TerminalEngine,
@@ -31,17 +33,24 @@ use tf_input::{
     MouseButton as TMouse, Tracking,
 };
 use tf_session::{SessionEvent, SpawnOptions};
-use tf_ui::{tokens, Rgb, Theme, ThemeInput};
+use tf_ui::{tokens, Rgb, Theme};
 
-use crate::fonts::{detect_ui_family, MonoFont};
-use crate::paint::{hsla, paint_grid, BlockMark, Metrics, Overlay, PaintArgs};
+use crate::appearance::Appearance;
+use crate::fonts::{ui_family, MonoFont};
+use crate::paint::{hsla, paint_grid, with_alpha, BlockMark, Metrics, Overlay, PaintArgs};
 use crate::panes::{Axis, Dir, PaneId, PaneTree, Rect as PaneRect};
 use crate::remote_session::{self, Attach, SessionHandle};
+use crate::updates::UpdateNotice;
 use crate::workspace::{self, Layout, SavedPanes, SavedTab};
 
+mod accounts;
 mod chrome;
+mod customize;
+mod ime;
 mod input;
 mod palette;
+#[cfg(test)]
+mod pane_tests;
 mod search;
 mod settings;
 mod sidebar;
@@ -63,10 +72,56 @@ struct SearchState {
     stale: bool,
 }
 
+/// What the palette overlay is choosing between.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum PickerMode {
+    #[default]
+    Commands,
+    Themes,
+    MonoFonts,
+    UiFonts,
+    Contexts,
+}
+
+impl PickerMode {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Commands => "COMMAND PALETTE",
+            Self::Themes => "THEME",
+            Self::MonoFonts => "TERMINAL FONT",
+            Self::UiFonts => "INTERFACE FONT",
+            Self::Contexts => "CLIENT CONTEXT",
+        }
+    }
+
+    fn placeholder(self) -> &'static str {
+        match self {
+            Self::Commands => "Type a command…",
+            Self::Themes => "Search themes…",
+            Self::MonoFonts | Self::UiFonts => "Search fonts…",
+            Self::Contexts => "Search clients and accounts…",
+        }
+    }
+
+    fn is_font(self) -> bool {
+        matches!(self, Self::MonoFonts | Self::UiFonts)
+    }
+}
+
+/// One choice in a picker: the value to apply, its label and a hint.
+#[derive(Debug, Clone)]
+struct PickerItem {
+    value: String,
+    label: String,
+    hint: String,
+}
+
 #[derive(Debug, Default)]
 struct PaletteState {
     query: String,
     selected: usize,
+    mode: PickerMode,
+    items: Vec<PickerItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,7 +161,20 @@ enum PaletteAction {
     StatusClear,
     DaemonDoctor,
     ConnectSsh(String),
+    CopyRemoteIntegration(String),
     SwitchLocal,
+    PickTheme,
+    PickMonoFont,
+    PickUiFont,
+    SetTheme(String),
+    SetMonoFont(String),
+    SetUiFont(String),
+    ReloadAppearance,
+    RevealThemes,
+    RevealFonts,
+    ExportTheme,
+    PickContext,
+    SetContext(String),
 }
 
 const PALETTE_COMMANDS: &[(PaletteAction, &str, &str)] = &[
@@ -187,6 +255,42 @@ const PALETTE_COMMANDS: &[(PaletteAction, &str, &str)] = &[
         "Ctrl Shift B",
     ),
     (PaletteAction::OpenSettings, "Settings: open", "Ctrl ,"),
+    (PaletteAction::PickTheme, "Appearance: choose theme…", ""),
+    (
+        PaletteAction::PickMonoFont,
+        "Appearance: choose terminal font…",
+        "",
+    ),
+    (
+        PaletteAction::PickUiFont,
+        "Appearance: choose interface font…",
+        "",
+    ),
+    (
+        PaletteAction::ReloadAppearance,
+        "Appearance: reload config, themes and fonts",
+        "",
+    ),
+    (
+        PaletteAction::RevealThemes,
+        "Appearance: open themes folder",
+        "",
+    ),
+    (
+        PaletteAction::RevealFonts,
+        "Appearance: open fonts folder",
+        "",
+    ),
+    (
+        PaletteAction::ExportTheme,
+        "Appearance: save current theme to themes folder",
+        "",
+    ),
+    (
+        PaletteAction::PickContext,
+        "Project: choose client or account context…",
+        "",
+    ),
     (PaletteAction::NewTask, "Tasks: new task", ""),
     (PaletteAction::ListTasks, "Tasks: list project tasks", ""),
     (PaletteAction::StatusWorking, "Status: mark working", ""),
@@ -342,6 +446,7 @@ enum SettingsPage {
     #[default]
     General,
     Appearance,
+    Accounts,
     Keybindings,
     Advanced,
 }
@@ -349,8 +454,15 @@ enum SettingsPage {
 const SETTINGS_PAGES: &[(SettingsPage, &str)] = &[
     (SettingsPage::General, "General"),
     (SettingsPage::Appearance, "Appearance"),
+    (SettingsPage::Accounts, "Accounts"),
     (SettingsPage::Keybindings, "Keybindings"),
     (SettingsPage::Advanced, "Advanced"),
+];
+
+/// Accent swatches offered in settings. The empty entry keeps the theme's own.
+const ACCENTS: &[&str] = &[
+    "", "#5e6ad2", "#3b82f6", "#14b8a6", "#22c55e", "#f59e0b", "#f97316", "#ef4444", "#ec4899",
+    "#8b5cf6",
 ];
 
 /// Sidebar widths offered in settings.
@@ -369,12 +481,20 @@ pub struct TerminalView {
     /// Proportional family for interface chrome.
     ui_font: SharedString,
     font_size: f32,
+    /// Row height as a multiple of the font size.
+    line_height: f32,
+    cursor_style: CursorStyleConfig,
+    /// Persisted appearance settings plus user themes and fonts.
+    appearance: Appearance,
     scroll_accum: f32,
     cwd: Option<String>,
     title: Option<String>,
     last_exit: Option<i32>,
     commands: usize,
     error: Option<String>,
+    /// Native IME preedit text. It is deliberately not sent to the PTY until
+    /// the platform commits it.
+    ime_preedit: String,
 
     selection: Option<Selection>,
     selecting: bool,
@@ -411,6 +531,8 @@ pub struct TerminalView {
     show_status_bar: bool,
     settings: Option<SettingsPage>,
     renaming: Option<RenameState>,
+    account_editor: Option<accounts::AccountEditor>,
+    pending_context_delete: Option<String>,
     /// Project tasks, the new-task form and command suggestions.
     tasks: tasks::TasksState,
     /// Shells found on this machine, for the picker and settings.
@@ -418,20 +540,38 @@ pub struct TerminalView {
     shell_menu: bool,
     /// Last layout handed to the daemon, to skip redundant saves.
     saved_layout: String,
+    /// Honest continuity message when `forged` recreated shells rather than
+    /// preserving their original processes.
+    recovery_notice: Option<String>,
+    update_notice: Option<UpdateNotice>,
+    /// Client/account identity assigned to the local project.
+    context_id: Option<String>,
+    identity_check: crate::contexts::IdentityCheck,
 
     _pump: Option<Task<()>>,
+    _update_check: Option<Task<()>>,
+    /// Polls the config, themes and fonts for outside edits.
+    _appearance_watch: Option<Task<()>>,
     _focus_subs: Vec<Subscription>,
 }
 
 impl TerminalView {
     pub fn new(
-        spawn: SpawnOptions,
+        mut spawn: SpawnOptions,
         project_root: Option<PathBuf>,
-        theme: Arc<Theme>,
-        font: MonoFont,
+        appearance: Appearance,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
+        let terminal = &appearance.config.terminal;
+        let theme = Arc::new(appearance.theme());
+        let font = MonoFont::new(cx, &terminal.font_family, terminal.ligatures);
+        let ui_font = ui_family(cx, &appearance.config.ui.font_family, &font.family);
+        let (font_size, line_height, cursor_style) = (
+            terminal.font_size,
+            terminal.line_height,
+            terminal.cursor_style,
+        );
         let focus = cx.focus_handle();
         window.focus(&focus);
         let subs = vec![
@@ -440,6 +580,31 @@ impl TerminalView {
                 this.focus_changed(false, cx);
             }),
         ];
+        let stored_context = project_root
+            .clone()
+            .and_then(remote_session::project_context);
+        let context_id = stored_context.or_else(|| {
+            appearance
+                .config
+                .contexts
+                .first()
+                .map(|context| context.id.clone())
+        });
+        let context = context_id.as_deref().and_then(|id| {
+            appearance
+                .config
+                .contexts
+                .iter()
+                .find(|context| context.id == id)
+        });
+        crate::contexts::apply_to_env(&mut spawn.env, context);
+        let identity_check = crate::contexts::inspect(project_root.as_deref(), context);
+        if let (Some(root), Some(id)) = (&project_root, &context_id) {
+            if let Err(error) = remote_session::set_project_context(root.clone(), Some(id.clone()))
+            {
+                tracing::debug!(%error, "could not persist default project context");
+            }
+        }
         let local_spawn = if spawn.ssh_host.is_none() {
             spawn.clone()
         } else {
@@ -464,15 +629,19 @@ impl TerminalView {
             ssh_hosts: tf_pty::discover_ssh_hosts(),
             focus,
             theme,
-            ui_font: detect_ui_family(cx, &font.family),
+            ui_font,
             font,
-            font_size: 14.0,
+            font_size,
+            line_height,
+            cursor_style,
+            appearance,
             scroll_accum: 0.0,
             cwd: None,
             title: None,
             last_exit: None,
             commands: 0,
             error: None,
+            ime_preedit: String::new(),
             selection: None,
             selecting: false,
             reported: None,
@@ -500,11 +669,19 @@ impl TerminalView {
             show_status_bar: true,
             settings: None,
             renaming: None,
+            account_editor: None,
+            pending_context_delete: None,
             tasks: tasks::TasksState::default(),
             shells: tf_pty::discover_shells(),
             shell_menu: false,
             saved_layout: String::new(),
+            recovery_notice: None,
+            update_notice: None,
+            context_id,
+            identity_check,
             _pump: None,
+            _update_check: None,
+            _appearance_watch: None,
             _focus_subs: subs,
         };
         view.restore_workspace(cx);
@@ -517,6 +694,35 @@ impl TerminalView {
                     break;
                 }
             }
+        }));
+        view._appearance_watch = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
+            let alive = this.update(cx, |view, cx| {
+                // A picker's live preview must not be thrown away.
+                let picking = view
+                    .palette
+                    .as_ref()
+                    .is_some_and(|p| p.mode != PickerMode::Commands);
+                if !picking && view.appearance.changed_on_disk() {
+                    view.reload_appearance(cx);
+                }
+            });
+            if alive.is_err() {
+                break;
+            }
+        }));
+        let update = cx.background_spawn(async { crate::updates::check() });
+        view._update_check = Some(cx.spawn(async move |this, cx| match update.await {
+            Ok(Some(notice)) => {
+                let _ = this.update(cx, |view, cx| {
+                    view.update_notice = Some(notice);
+                    cx.notify();
+                });
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "update check failed"),
         }));
         view
     }
@@ -644,6 +850,14 @@ impl Render for TerminalView {
         let metrics = self.metrics(window);
         let font = self.font.clone();
         let font_size = px(self.font_size);
+        let cursor_style = self.cursor_style;
+        let accent_bold = self.appearance.config.terminal.accent_bold;
+        let window_opacity = self.appearance.config.ui.opacity.clamp(0.5, 1.0);
+        window.set_background_appearance(if window_opacity < 0.999 {
+            WindowBackgroundAppearance::Transparent
+        } else {
+            WindowBackgroundAppearance::Opaque
+        });
         let focused = self.focus.is_focused(window);
         let session = self.session.clone();
         let _grid = session.as_ref().map(|s| s.with(|p| p.engine().size()));
@@ -758,7 +972,10 @@ impl Render for TerminalView {
                 let theme = Arc::clone(&theme);
                 let font = font.clone();
                 move |bounds, frame, window, cx| {
+                    let paint_started = std::time::Instant::now();
                     Self::register_mouse_listeners(&view, window);
+                    let focus = view.read(cx).focus.clone();
+                    window.handle_input(&focus, ElementInputHandler::new(bounds, view.clone()), cx);
                     let Some(frame) = frame else { return };
                     view.update(cx, |v, _| {
                         v.grid_bounds = bounds;
@@ -793,10 +1010,13 @@ impl Render for TerminalView {
                             font_size,
                             metrics,
                             focused,
+                            cursor_style,
+                            accent_bold,
                         },
                         window,
                         cx,
                     );
+                    crate::perf::record_grid_paint(paint_started.elapsed());
                 }
             },
         )
@@ -889,6 +1109,8 @@ impl Render for TerminalView {
                                         font_size,
                                         metrics,
                                         focused: false,
+                                        cursor_style,
+                                        accent_bold,
                                     },
                                     window,
                                     cx,
@@ -955,11 +1177,15 @@ impl Render for TerminalView {
         let search_overlay = self.search_bar();
         let palette_overlay = self.command_palette();
         let settings_overlay = self.settings_panel(cx);
+        let account_editor_overlay = self.account_editor_overlay(cx);
         let task_form_overlay = self.task_form_overlay(cx);
         let shell_menu_overlay = self.shell_menu_overlay(cx);
+        let recovery_notice = self.recovery_notice.clone();
+        let update_notice = self.update_notice.clone();
 
         div()
             .size_full()
+            .opacity(window_opacity)
             .flex()
             .relative()
             .bg(hsla(self.theme.bg_app))
@@ -967,6 +1193,113 @@ impl Render for TerminalView {
             .text_size(px(tokens::text::MD))
             .text_color(hsla(self.theme.text))
             .when(self.show_sidebar, |d| d.child(self.workspace_sidebar(cx)))
+            .child(
+                div()
+                    .id("workspace-main")
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .bg(hsla(self.theme.term_bg))
+                    .child(self.header(cx))
+                    .children(recovery_notice.map(|notice| {
+                        div()
+                            .id("recovery-notice")
+                            .h(px(34.0))
+                            .px(px(tokens::space::MD))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .bg(hsla(self.theme.bg_panel))
+                            .border_b_1()
+                            .border_color(hsla(self.theme.border))
+                            .text_size(px(tokens::text::SM))
+                            .text_color(hsla(self.theme.text_muted))
+                            .child(SharedString::from(notice))
+                            .child(
+                                div()
+                                    .id("dismiss-recovery-notice")
+                                    .px(px(tokens::space::SM))
+                                    .cursor_pointer()
+                                    .text_color(hsla(self.theme.text_faint))
+                                    .hover(|style| style.text_color(hsla(self.theme.text)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.recovery_notice = None;
+                                        cx.notify();
+                                    }))
+                                    .child("Dismiss"),
+                            )
+                    }))
+                    .children(update_notice.map(|notice| {
+                        let url = notice.url.clone();
+                        div()
+                            .id("update-notice")
+                            .h(px(36.0))
+                            .px(px(tokens::space::MD))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .bg(hsla(self.theme.bg_panel))
+                            .border_b_1()
+                            .border_color(hsla(self.theme.border))
+                            .text_size(px(tokens::text::SM))
+                            .text_color(hsla(self.theme.text_muted))
+                            .child(SharedString::from(format!(
+                                "TermForge {} is available · {}",
+                                notice.version,
+                                notice.notes.lines().next().unwrap_or("Verified release")
+                            )))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(tokens::space::MD))
+                                    .child(
+                                        div()
+                                            .id("download-update")
+                                            .cursor_pointer()
+                                            .text_color(hsla(self.theme.accent))
+                                            .on_click(move |_, _, cx| cx.open_url(&url))
+                                            .child("Download"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("dismiss-update")
+                                            .cursor_pointer()
+                                            .text_color(hsla(self.theme.text_faint))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.update_notice = None;
+                                                cx.notify();
+                                            }))
+                                            .child("Dismiss"),
+                                    ),
+                            )
+                    }))
+                    .child(
+                        div()
+                            .id("terminal")
+                            .relative()
+                            .flex_1()
+                            .overflow_hidden()
+                            .track_focus(&self.focus)
+                            .on_key_down(cx.listener(Self::key_down))
+                            .on_scroll_wheel(cx.listener(Self::scroll_wheel))
+                            .on_modifiers_changed(cx.listener(
+                                |this, ev: &gpui::ModifiersChangedEvent, window, cx| {
+                                    let at =
+                                        this.hit(window.mouse_position(), window).map(|(_, p)| p);
+                                    this.update_hover(ev.modifiers, at, cx);
+                                },
+                            ))
+                            .when_some(single_content, |d, (grid, error, exit)| {
+                                d.child(grid).children(error).children(exit)
+                            })
+                            .children(split_content.into_iter().flatten()),
+                    )
+                    .when(self.show_status_bar, |d| {
+                        d.child(self.status_bar(self.computed_grid_size))
+                    }),
+            )
+            // Absolute overlays must be painted after the workspace so their
+            // hitboxes stay above its full-window terminal canvas.
             .when(!self.show_sidebar && self.sidebar_hover, |d| {
                 if self.sidebar_peek {
                     d.child(
@@ -1003,43 +1336,12 @@ impl Render for TerminalView {
                     )
                 }
             })
-            .child(
-                div()
-                    .id("workspace-main")
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .bg(hsla(self.theme.term_bg))
-                    .child(self.header(cx))
-                    .child(
-                        div()
-                            .id("terminal")
-                            .relative()
-                            .flex_1()
-                            .overflow_hidden()
-                            .track_focus(&self.focus)
-                            .on_key_down(cx.listener(Self::key_down))
-                            .on_scroll_wheel(cx.listener(Self::scroll_wheel))
-                            .on_modifiers_changed(cx.listener(
-                                |this, ev: &gpui::ModifiersChangedEvent, window, cx| {
-                                    let at =
-                                        this.hit(window.mouse_position(), window).map(|(_, p)| p);
-                                    this.update_hover(ev.modifiers, at, cx);
-                                },
-                            ))
-                            .when_some(single_content, |d, (grid, error, exit)| {
-                                d.child(grid).children(error).children(exit)
-                            })
-                            .children(split_content.into_iter().flatten()),
-                    )
-                    .when(self.show_status_bar, |d| {
-                        d.child(self.status_bar(self.computed_grid_size))
-                    }),
-            )
             .children(search_overlay)
-            .children(palette_overlay)
             .children(shell_menu_overlay)
             .children(task_form_overlay)
             .children(settings_overlay)
+            .children(account_editor_overlay)
+            // Painted last so a picker opened from settings is on top.
+            .children(palette_overlay)
     }
 }

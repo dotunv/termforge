@@ -175,6 +175,12 @@ async fn connect_and_subscribe(
                 cwd: spawn.cwd.clone(),
                 project_root: project_root.cloned(),
                 task: None,
+                context_env: spawn
+                    .env
+                    .iter()
+                    .filter(|(key, _)| is_context_env(key))
+                    .cloned()
+                    .collect(),
                 size: TermSize {
                     cols: spawn.size.cols,
                     rows: spawn.size.rows,
@@ -188,6 +194,19 @@ async fn connect_and_subscribe(
     };
     client.subscribe(session).await?;
     Ok((client, session))
+}
+
+fn is_context_env(key: &str) -> bool {
+    matches!(
+        key,
+        "TERMFORGE_CONTEXT"
+            | "GIT_AUTHOR_NAME"
+            | "GIT_AUTHOR_EMAIL"
+            | "GIT_COMMITTER_NAME"
+            | "GIT_COMMITTER_EMAIL"
+            | "GIT_CONFIG_GLOBAL"
+            | "GH_CONFIG_DIR"
+    )
 }
 
 fn matching_running_session(
@@ -566,6 +585,7 @@ mod tests {
             task: None,
             size: TermSize::default(),
             running,
+            restored: false,
         };
         let sessions = vec![
             session(wrong_id, other, true),
@@ -594,6 +614,7 @@ mod tests {
             task: None,
             size: TermSize::default(),
             running: true,
+            restored: false,
         };
         let sessions = vec![session(wrong, "other"), session(expected, "devbox")];
         assert_eq!(
@@ -692,6 +713,38 @@ pub fn save_workspace_state(project_root: PathBuf, state: String) {
     if let Err(error) = spawned {
         tracing::debug!("could not start layout save thread: {error}");
     }
+}
+
+/// Context profile id assigned to this project by the daemon store.
+pub fn project_context(project_root: PathBuf) -> Option<String> {
+    blocking_ipc(move |mut client| async move {
+        match client
+            .request(Request::GetProjectContext { project_root })
+            .await?
+        {
+            Response::ProjectContext(context) => Ok(context),
+            response => anyhow::bail!("unexpected project context response: {response:?}"),
+        }
+    })
+    .map_err(|error| tracing::debug!("could not load project context: {error:#}"))
+    .ok()
+    .flatten()
+}
+
+/// Persist a project's selected context profile id.
+pub fn set_project_context(project_root: PathBuf, context_id: Option<String>) -> Result<()> {
+    blocking_ipc(move |mut client| async move {
+        match client
+            .request(Request::SetProjectContext {
+                project_root,
+                context_id,
+            })
+            .await?
+        {
+            Response::Ok => Ok(()),
+            response => anyhow::bail!("unexpected set-context response: {response:?}"),
+        }
+    })
 }
 
 /// Tasks for a project, fetched from the daemon. Blocking; call it from a

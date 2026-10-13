@@ -9,12 +9,14 @@ publish.workspace = true
 
 [dependencies]
 tf-ui.workspace = true
+tf-config = { path = "../../crates/tf-config" }
 tf-input.workspace = true
 tf-engine.workspace = true
 tf-session.workspace = true
 tf-pty.workspace = true
 tf-proto.workspace = true
 tf-ipc = { path = "../../crates/tf-ipc" }
+tf-update.workspace = true
 gpui.workspace = true
 futures.workspace = true
 anyhow.workspace = true
@@ -24,6 +26,12 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio = { version = "1.36", features = ["rt", "sync", "time"] }
 serde_json = "1"
+toml.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3.0"

@@ -5,6 +5,7 @@ use gpui::{
     fill, point, px, size, App, Bounds, Font, FontStyle, FontWeight, Hsla, Pixels, SharedString,
     StrikethroughStyle, TextRun, UnderlineStyle, Window,
 };
+use tf_config::CursorStyleConfig;
 use tf_engine::{text::in_range, Cell, CellFlags, Color, Point, Snapshot};
 use tf_session::BlockState;
 use tf_ui::{Rgb, Theme};
@@ -77,6 +78,7 @@ pub struct Overlay {
 struct Painter<'a> {
     theme: &'a Theme,
     font: &'a MonoFont,
+    accent_bold: bool,
 }
 
 impl Painter<'_> {
@@ -91,7 +93,14 @@ impl Painter<'_> {
 
     /// Effective (fg, bg) after inverse/dim/hidden.
     fn colors(&self, cell: &Cell) -> (Hsla, Option<Hsla>) {
-        let mut fg = self.resolve(cell.fg);
+        let mut fg = if self.accent_bold
+            && cell.fg == Color::DefaultFg
+            && cell.flags.contains(CellFlags::BOLD)
+        {
+            self.theme.accent
+        } else {
+            self.resolve(cell.fg)
+        };
         let mut bg = self.resolve(cell.bg);
         let mut bg_set = cell.bg != Color::DefaultBg;
         if cell.flags.contains(CellFlags::INVERSE) {
@@ -163,6 +172,8 @@ pub struct PaintArgs<'a> {
     pub font_size: Pixels,
     pub metrics: Metrics,
     pub focused: bool,
+    pub cursor_style: CursorStyleConfig,
+    pub accent_bold: bool,
 }
 
 pub fn paint_grid(a: PaintArgs<'_>, window: &mut Window, cx: &mut App) {
@@ -176,8 +187,14 @@ pub fn paint_grid(a: PaintArgs<'_>, window: &mut Window, cx: &mut App) {
         font_size,
         metrics: m,
         focused,
+        cursor_style,
+        accent_bold,
     } = a;
-    let p = Painter { theme, font };
+    let p = Painter {
+        theme,
+        font,
+        accent_bold,
+    };
     let origin = Metrics::origin(bounds);
     let cell_origin = |row: usize, col: usize| {
         point(
@@ -351,7 +368,20 @@ pub fn paint_grid(a: PaintArgs<'_>, window: &mut Window, cx: &mut App) {
                 .is_some_and(|c| c.flags.contains(CellFlags::WIDE));
             let w = if wide { m.cell_w * 2.0 } else { m.cell_w };
             let rect = Bounds::new(cell_origin(row, col), size(w, m.line_h));
-            if focused {
+            if focused && cursor_style != CursorStyleConfig::Block {
+                // Bar and underline leave the glyph under the cursor alone.
+                let thickness = px(2.0);
+                let thin = match cursor_style {
+                    CursorStyleConfig::Bar => {
+                        Bounds::new(rect.origin, size(thickness, rect.size.height))
+                    }
+                    _ => Bounds::new(
+                        point(rect.origin.x, rect.origin.y + rect.size.height - thickness),
+                        size(rect.size.width, thickness),
+                    ),
+                };
+                window.paint_quad(fill(thin, cursor));
+            } else if focused {
                 window.paint_quad(fill(rect, cursor));
                 if let Some(cell) = snap.lines[row].get(col).filter(|c| c.ch != ' ') {
                     let text = SharedString::from(cell.ch.to_string());

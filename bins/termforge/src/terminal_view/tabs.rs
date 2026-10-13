@@ -36,6 +36,7 @@ impl TerminalView {
         self.search = None;
         self.palette = None;
         self.history = 0;
+        self.refresh_task_suggestions();
     }
 
     pub(super) fn start(&mut self, cx: &mut Context<'_, Self>) {
@@ -142,6 +143,7 @@ impl TerminalView {
         self.error = tab.error;
         self.history = tab.history;
         self.font_size = tab.font_size;
+        self.refresh_task_suggestions();
         self.selection = None;
         self.search = None;
         self.palette = None;
@@ -259,10 +261,12 @@ impl TerminalView {
                 match event {
                     SessionEvent::Output(_) => {}
                     SessionEvent::Cwd(cwd) => {
+                        let suggestion_root = cwd.host.is_none().then(|| PathBuf::from(&cwd.path));
                         self.cwd = Some(match cwd.host {
                             Some(host) => format!("{host}:{}", cwd.path),
                             None => cwd.path,
                         });
+                        self.tasks.set_suggestion_root(suggestion_root.as_deref());
                         let branch = self.discover_branch();
                         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                             tab.branch = branch;
@@ -669,12 +673,50 @@ impl TerminalView {
             split: Option<(PaneTree, Vec<tf_proto::SessionInfo>)>,
         }
 
-        let Some(root) = self.local_project_root.clone() else {
+        let Some(known) = remote_session::load_workspace(None) else {
             return false;
+        };
+        let requested_root = self.local_project_root.clone();
+        let requested_is_running = requested_root.as_ref().is_some_and(|root| {
+            known
+                .sessions
+                .iter()
+                .any(|session| session.running && session.project_root.as_ref() == Some(root))
+        });
+        let root = if requested_is_running {
+            requested_root.expect("checked above")
+        } else {
+            // Desktop launchers usually start applications in the home
+            // directory. Find the saved project instead of treating that
+            // incidental launch directory as an empty workspace.
+            let mut roots = known
+                .sessions
+                .iter()
+                .filter(|session| session.running)
+                .filter_map(|session| session.project_root.clone())
+                .collect::<Vec<_>>();
+            roots.sort();
+            roots.dedup();
+            let Some(root) = roots.into_iter().max_by_key(|root| {
+                known
+                    .sessions
+                    .iter()
+                    .filter(|session| {
+                        session.running && session.project_root.as_ref() == Some(root)
+                    })
+                    .count()
+            }) else {
+                return false;
+            };
+            root
         };
         let Some(stored) = remote_session::load_workspace(Some(root.clone())) else {
             return false;
         };
+        if self.local_project_root.as_ref() != Some(&root) {
+            self.local_project_root = Some(root.clone());
+            self.local_spawn.cwd = Some(root.clone());
+        }
         let layout = stored
             .layout
             .as_deref()
@@ -749,6 +791,19 @@ impl TerminalView {
         if plan.is_empty() {
             return false;
         }
+        let restored_count = plan
+            .iter()
+            .map(|planned| match &planned.split {
+                Some((_, infos)) => infos.iter().filter(|info| info.restored).count(),
+                None => usize::from(planned.info.restored),
+            })
+            .sum::<usize>();
+        if restored_count > 0 {
+            self.recovery_notice = Some(format!(
+                "Recovered {restored_count} shell{} after the session host restarted. Layout and working directories were restored; processes and scrollback were restarted.",
+                if restored_count == 1 { "" } else { "s" }
+            ));
+        }
         let mut active_index = 0;
         for planned in plan {
             let Planned {
@@ -760,6 +815,7 @@ impl TerminalView {
             let mut parked: HashMap<PaneId, PaneSlot> = HashMap::new();
             let mut layout_tree = None;
             let mut complete = true;
+            let mut split_fallbacks = Vec::new();
             if let Some((tree, infos)) = split {
                 // Attach every pane but the focused one first and park it;
                 // the focused pane is attached last so it is what the view
@@ -778,6 +834,9 @@ impl TerminalView {
                     parked.insert(base + index as PaneId, PaneSlot::from_view(self));
                 }
                 layout_tree = complete.then(|| tree.remap(|index| base + index));
+                if !complete {
+                    split_fallbacks.extend(infos.into_iter().filter(|pane| pane.id != info.id));
+                }
             }
             if !self.attach_saved_session(&info) {
                 // Dropping the handles detaches; the daemon keeps the shells.
@@ -794,6 +853,15 @@ impl TerminalView {
                 active_index = self.tabs.len();
             }
             self.tabs.push(tab);
+            // A split is all-or-nothing. If any pane failed to attach, keep
+            // every surviving daemon session visible as its own workspace
+            // instead of silently orphaning it.
+            for pane in split_fallbacks {
+                if self.attach_saved_session(&pane) {
+                    let fallback = self.current_tab();
+                    self.tabs.push(fallback);
+                }
+            }
         }
         if self.tabs.is_empty() {
             return false;

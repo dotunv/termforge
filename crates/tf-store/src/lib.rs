@@ -20,6 +20,8 @@ pub enum StoreError {
     Path(PathBuf, std::io::Error),
     #[error("database schema version {found} is newer than this build supports ({supported})")]
     TooNew { found: i64, supported: i64 },
+    #[error("stored session environment: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -88,6 +90,15 @@ const MIGRATIONS: &[&str] = &[
     r"
     ALTER TABLE tasks ADD COLUMN command TEXT;
     ",
+    // v6: client/account context selected for a project. Profiles themselves
+    // live in config.toml so they are portable; the store owns assignment.
+    r"
+    ALTER TABLE projects ADD COLUMN context_id TEXT;
+    ",
+    // v7: preserve identity selection when forged recreates a shell.
+    r"
+    ALTER TABLE restorable_sessions ADD COLUMN context_env TEXT NOT NULL DEFAULT '[]';
+    ",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +107,7 @@ pub struct Project {
     pub root: PathBuf,
     pub name: String,
     pub last_opened_at: i64,
+    pub context_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +130,7 @@ pub struct RestorableSession {
     pub cols: u16,
     pub rows: u16,
     pub task_id: Option<String>,
+    pub context_env: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,7 +217,7 @@ impl Store {
             params![root_str, name, now],
         )?;
         Ok(self.conn.query_row(
-            "SELECT id, root, name, last_opened_at FROM projects WHERE root = ?1",
+            "SELECT id, root, name, last_opened_at, context_id FROM projects WHERE root = ?1",
             params![root_str],
             row_to_project,
         )?)
@@ -212,11 +225,25 @@ impl Store {
 
     pub fn recent_projects(&self, limit: usize) -> Result<Vec<Project>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, root, name, last_opened_at FROM projects
+            "SELECT id, root, name, last_opened_at, context_id FROM projects
              ORDER BY last_opened_at DESC, id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], row_to_project)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Assign a portable context profile id to a canonical project.
+    pub fn set_project_context(&self, root: &Path, context_id: Option<&str>) -> Result<Project> {
+        let project = self.open_project(root)?;
+        self.conn.execute(
+            "UPDATE projects SET context_id = ?1 WHERE id = ?2",
+            params![context_id, project.id],
+        )?;
+        Ok(self.conn.query_row(
+            "SELECT id, root, name, last_opened_at, context_id FROM projects WHERE id = ?1",
+            params![project.id],
+            row_to_project,
+        )?)
     }
 
     pub fn record_command(&self, project_id: Option<i64>, rec: &CommandRecord) -> Result<()> {
@@ -269,8 +296,8 @@ impl Store {
     pub fn save_restorable_session(&self, session: &RestorableSession) -> Result<()> {
         self.conn.execute(
             "INSERT INTO restorable_sessions
-                (id, project_root, profile, cwd, cols, rows, updated_at, task_id, ssh_host)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                (id, project_root, profile, cwd, cols, rows, updated_at, task_id, ssh_host, context_env)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                 project_root = excluded.project_root,
                 profile = excluded.profile,
@@ -279,7 +306,8 @@ impl Store {
                 rows = excluded.rows,
                 updated_at = excluded.updated_at,
                 task_id = excluded.task_id,
-                ssh_host = excluded.ssh_host",
+                ssh_host = excluded.ssh_host,
+                context_env = excluded.context_env",
             params![
                 session.id,
                 session
@@ -296,6 +324,7 @@ impl Store {
                 now_ms(),
                 session.task_id,
                 session.ssh_host,
+                serde_json::to_string(&session.context_env)?,
             ],
         )?;
         Ok(())
@@ -303,7 +332,7 @@ impl Store {
 
     pub fn restorable_sessions(&self) -> Result<Vec<RestorableSession>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, project_root, profile, cwd, cols, rows, task_id, ssh_host
+            "SELECT id, project_root, profile, cwd, cols, rows, task_id, ssh_host, context_env
              FROM restorable_sessions ORDER BY updated_at, id",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -316,6 +345,13 @@ impl Store {
                 rows: row.get(5)?,
                 task_id: row.get(6)?,
                 ssh_host: row.get(7)?,
+                context_env: serde_json::from_str(&row.get::<_, String>(8)?).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -336,12 +372,14 @@ impl Store {
     }
 
     pub fn create_task(&self, task: &TaskRecord) -> Result<()> {
+        let project_root = dunce::canonicalize(&task.project_root)
+            .map_err(|error| StoreError::Path(task.project_root.clone(), error))?;
         self.conn.execute(
             "INSERT INTO tasks (id, project_root, title, context, state, created_at, updated_at, command)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
             params![
                 task.id,
-                task.project_root.to_string_lossy(),
+                project_root.to_string_lossy(),
                 task.title,
                 task.context,
                 task_state_name(task.state),
@@ -437,6 +475,7 @@ fn row_to_project(r: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
         root: PathBuf::from(r.get::<_, String>(1)?),
         name: r.get(2)?,
         last_opened_at: r.get(3)?,
+        context_id: r.get(4)?,
     })
 }
 
@@ -490,6 +529,28 @@ mod tests {
     }
 
     #[test]
+    fn project_context_assignment_is_durable_and_clearable() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.open_project(dir.path()).unwrap().context_id, None);
+        assert_eq!(
+            s.set_project_context(dir.path(), Some("client-a"))
+                .unwrap()
+                .context_id
+                .as_deref(),
+            Some("client-a")
+        );
+        assert_eq!(
+            s.open_project(dir.path()).unwrap().context_id.as_deref(),
+            Some("client-a")
+        );
+        assert_eq!(
+            s.set_project_context(dir.path(), None).unwrap().context_id,
+            None
+        );
+    }
+
+    #[test]
     fn history_and_workspace_state() {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::open_in_memory().unwrap();
@@ -537,6 +598,7 @@ mod tests {
             cols: 100,
             rows: 30,
             task_id: None,
+            context_env: vec![("TERMFORGE_CONTEXT".into(), "client-a".into())],
         };
         store.save_restorable_session(&session).unwrap();
         session.cwd = Some(PathBuf::from("/project/tests"));
@@ -567,6 +629,7 @@ mod tests {
             cols: 120,
             rows: 30,
             task_id: None,
+            context_env: Vec::new(),
         };
         store.save_restorable_session(&session).unwrap();
         assert_eq!(store.restorable_sessions().unwrap(), vec![session]);

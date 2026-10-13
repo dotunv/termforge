@@ -19,7 +19,7 @@ pub enum ShellKind {
 /// interpreted by a shell.
 pub fn ssh_profile(host: &str) -> Option<ShellProfile> {
     let host = host.trim();
-    if host.is_empty() || host.starts_with('-') || host.chars().any(char::is_whitespace) {
+    if !safe_ssh_target(host) {
         return None;
     }
     let program = which(if cfg!(windows) { "ssh.exe" } else { "ssh" })?;
@@ -29,6 +29,14 @@ pub fn ssh_profile(host: &str) -> Option<ShellProfile> {
         program,
         args: vec![host.to_owned()],
     })
+}
+
+fn safe_ssh_target(host: &str) -> bool {
+    !host.is_empty()
+        && !host.starts_with('-')
+        && host.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '@' | '%' | '+' | '-')
+        })
 }
 
 /// Discover concrete aliases declared by `Host` directives in the user's
@@ -333,6 +341,8 @@ mod tests {
         assert!(ssh_profile("").is_none());
         assert!(ssh_profile("-oProxyCommand=bad").is_none());
         assert!(ssh_profile("host extra").is_none());
+        assert!(ssh_profile("host;touch-pwned").is_none());
+        assert!(ssh_profile("host'quoted").is_none());
         if let Some(profile) = ssh_profile("devbox") {
             assert_eq!(profile.kind, ShellKind::Ssh);
             assert_eq!(profile.args, ["devbox"]);

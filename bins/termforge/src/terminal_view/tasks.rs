@@ -4,6 +4,8 @@
 //! Tasks live in the daemon (`forged`). Every daemon call here runs on a
 //! background thread so a slow or absent daemon never stalls the UI.
 
+use std::path::{Path, PathBuf};
+
 use tf_proto::{TaskInfo, TaskState};
 
 use super::*;
@@ -35,15 +37,26 @@ pub(super) struct TasksState {
     form: Option<TaskForm>,
     /// Project-detected common commands.
     suggestions: Vec<Suggestion>,
+    /// Directory the project-detected suggestions describe.
+    suggestion_root: Option<PathBuf>,
     typed: Frequency,
 }
 
 impl TasksState {
-    pub(super) fn for_project(root: Option<&std::path::Path>) -> Self {
+    pub(super) fn for_project(root: Option<&Path>) -> Self {
         Self {
             suggestions: root.map(suggest::for_project).unwrap_or_default(),
+            suggestion_root: root.map(Path::to_path_buf),
             ..Self::default()
         }
+    }
+
+    pub(super) fn set_suggestion_root(&mut self, root: Option<&Path>) {
+        if self.suggestion_root.as_deref() == root {
+            return;
+        }
+        self.suggestions = root.map(suggest::for_project).unwrap_or_default();
+        self.suggestion_root = root.map(Path::to_path_buf);
     }
 }
 
@@ -57,6 +70,21 @@ fn state_glyph(state: TaskState) -> &'static str {
 }
 
 impl TerminalView {
+    /// Recompute file-based suggestions for the directory visible in the
+    /// focused local terminal. OSC 7 cwd events and focus changes call this.
+    pub(super) fn refresh_task_suggestions(&mut self) {
+        let root = if self.spawn.ssh_host.is_some() {
+            None
+        } else {
+            self.cwd
+                .as_deref()
+                .map(workspace::local_path)
+                .or_else(|| self.spawn.cwd.clone())
+                .or_else(|| self.project_root.clone())
+        };
+        self.tasks.set_suggestion_root(root.as_deref());
+    }
+
     // ---- daemon access ---------------------------------------------------
 
     pub(super) fn refresh_tasks(&mut self, cx: &mut Context<'_, Self>) {
@@ -690,5 +718,50 @@ impl TaskForm {
             TaskField::Title => &mut self.title,
             TaskField::Command => &mut self.command,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suggestions_follow_the_active_directory() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let base = std::env::temp_dir().join(format!(
+            "tf-task-context-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let rust = base.join("rust");
+        let node = base.join("node");
+        std::fs::create_dir_all(&rust).expect("create Rust fixture");
+        std::fs::create_dir_all(&node).expect("create Node fixture");
+        std::fs::write(rust.join("Cargo.toml"), "[package]\nname = \"demo\"\n")
+            .expect("write Cargo manifest");
+        std::fs::write(node.join("package.json"), r#"{"scripts":{"dev":"vite"}}"#)
+            .expect("write package manifest");
+
+        let mut state = TasksState::for_project(Some(&rust));
+        assert!(state
+            .suggestions
+            .iter()
+            .any(|item| item.command == "cargo build"));
+
+        state.set_suggestion_root(Some(&node));
+        assert!(state
+            .suggestions
+            .iter()
+            .any(|item| item.command == "npm run dev"));
+        assert!(!state
+            .suggestions
+            .iter()
+            .any(|item| item.command == "cargo build"));
+
+        state.set_suggestion_root(None);
+        assert!(state.suggestions.is_empty());
+        let _ = std::fs::remove_dir_all(base);
     }
 }

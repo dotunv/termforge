@@ -31,6 +31,7 @@ tf-store = { path = "crates/tf-store" }
 tf-shell = { path = "crates/tf-shell" }
 tf-ui = { path = "crates/tf-ui" }
 tf-input = { path = "crates/tf-input" }
+tf-update = { path = "crates/tf-update" }
 
 # terminal
 alacritty_terminal = "0.26"

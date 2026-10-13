@@ -3,6 +3,41 @@
 use super::*;
 
 impl TerminalView {
+    pub(super) fn context_badge(
+        &self,
+        id: &'static str,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let t = &self.theme;
+        let context = self.active_context();
+        let label = context.map_or("No context", |context| context.name.as_str());
+        let color = context
+            .and_then(|context| Rgb::from_hex(&context.color))
+            .unwrap_or(t.accent);
+        let warning = !self.identity_check.warnings.is_empty();
+        div()
+            .id(id)
+            .px(px(7.0))
+            .py(px(2.0))
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .rounded_full()
+            .cursor_pointer()
+            .bg(with_alpha(hsla(color), 0.16))
+            .border_1()
+            .border_color(hsla(if warning { t.warning } else { color }))
+            .text_size(px(tokens::text::XS))
+            .text_color(hsla(if warning { t.warning } else { t.text }))
+            .hover(|style| style.bg(with_alpha(hsla(color), 0.26)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.open_picker(PickerMode::Contexts, cx);
+            }))
+            .child(div().size(px(6.0)).rounded_full().bg(hsla(color)))
+            .child(SharedString::from(label.to_owned()))
+            .when(warning, |d| d.child("!"))
+    }
+
     pub(super) fn icon_button(
         &self,
         id: &'static str,
@@ -451,6 +486,7 @@ impl TerminalView {
                                     .child(SharedString::from(branch_hint)),
                             ),
                     )
+                    .child(self.context_badge("sidebar-context-badge", cx))
                     .children((attention_count > 0).then(|| {
                         div()
                             .id("sidebar-attention")

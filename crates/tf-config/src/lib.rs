@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "tf-ui")]
+pub mod theme;
+
 use directories::ProjectDirs;
 use notify::{
     Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
@@ -39,7 +42,7 @@ pub enum ConfigError {
 pub type Result<T> = std::result::Result<T, ConfigError>;
 
 /// Global configuration for TermForge.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Terminal appearance settings
@@ -52,6 +55,26 @@ pub struct Config {
     pub ui: UiConfig,
     /// Performance settings
     pub performance: PerformanceConfig,
+    /// Client/account identities that can be assigned to projects
+    #[serde(default = "default_contexts")]
+    pub contexts: Vec<ContextConfig>,
+}
+
+fn default_contexts() -> Vec<ContextConfig> {
+    vec![ContextConfig::default()]
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            terminal: TerminalConfig::default(),
+            keys: KeyConfig::default(),
+            shell: ShellConfig::default(),
+            ui: UiConfig::default(),
+            performance: PerformanceConfig::default(),
+            contexts: default_contexts(),
+        }
+    }
 }
 
 impl Config {
@@ -102,8 +125,26 @@ impl Config {
         Ok(config)
     }
 
+    /// Load synchronously, for callers that have no async runtime (the GUI).
+    pub fn load_sync(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path).map_err(ConfigError::Read)?;
+        Self::parse(&content)
+    }
+
+    /// Save synchronously. Writes a sibling temp file and renames it so a
+    /// watcher or a crash never observes a half-written config.
+    pub fn save_sync(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(ConfigError::Write)?;
+        }
+        let content = toml::to_string_pretty(self).map_err(ConfigError::Serialize)?;
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, content).map_err(ConfigError::Write)?;
+        std::fs::rename(&tmp, path).map_err(ConfigError::Write)
+    }
+
     /// Validate the configuration.
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if self.terminal.font_size < 6.0 || self.terminal.font_size > 72.0 {
             return Err(ConfigError::Validation(
                 "font_size must be between 6 and 72".into(),
@@ -114,11 +155,70 @@ impl Config {
                 "scrollback_limit must be > 0".into(),
             ));
         }
+        if !(1.0..=2.5).contains(&self.terminal.line_height) {
+            return Err(ConfigError::Validation(
+                "line_height must be between 1.0 and 2.5".into(),
+            ));
+        }
+        if !self.ui.accent.is_empty() && tf_ui_hex(&self.ui.accent).is_none() {
+            return Err(ConfigError::Validation(
+                "ui.accent must be empty or #rrggbb".into(),
+            ));
+        }
+        if self.ui.contrast.is_some_and(|c| c > 100) {
+            return Err(ConfigError::Validation(
+                "ui.contrast must be between 0 and 100".into(),
+            ));
+        }
+        if !(0.5..=1.0).contains(&self.ui.opacity) {
+            return Err(ConfigError::Validation(
+                "ui.opacity must be between 0.5 and 1.0".into(),
+            ));
+        }
+        let mut ids = std::collections::HashSet::new();
+        for context in &self.contexts {
+            if !valid_context_id(&context.id) {
+                return Err(ConfigError::Validation(format!(
+                    "context id `{}` must contain only lowercase letters, digits and hyphens",
+                    context.id
+                )));
+            }
+            if !ids.insert(context.id.as_str()) {
+                return Err(ConfigError::Validation(format!(
+                    "duplicate context id `{}`",
+                    context.id
+                )));
+            }
+            if context.name.trim().is_empty() || context.name.len() > 80 {
+                return Err(ConfigError::Validation(format!(
+                    "context `{}` must have a name of at most 80 characters",
+                    context.id
+                )));
+            }
+            if !context.color.is_empty() && tf_ui_hex(&context.color).is_none() {
+                return Err(ConfigError::Validation(format!(
+                    "context `{}` color must be empty or #rrggbb",
+                    context.id
+                )));
+            }
+            for (key, value) in context.shell_env() {
+                if key.as_bytes().contains(&0) || value.as_bytes().contains(&0) {
+                    return Err(ConfigError::Validation(format!(
+                        "context `{}` environment contains NUL",
+                        context.id
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
-    /// Get the default config directory.
-    fn config_dir() -> Result<PathBuf> {
+    /// Get the default config directory. `TERMFORGE_CONFIG_DIR` overrides it,
+    /// which keeps tests and portable installs off the user's real config.
+    pub fn config_dir() -> Result<PathBuf> {
+        if let Some(dir) = std::env::var_os("TERMFORGE_CONFIG_DIR") {
+            return Ok(PathBuf::from(dir));
+        }
         ProjectDirs::from("dev", "TermForge", "TermForge")
             .map(|d| d.config_local_dir().to_path_buf())
             .ok_or(ConfigError::NoConfigDir)
@@ -127,6 +227,16 @@ impl Config {
     /// Get the default config file path.
     pub fn config_path() -> Result<PathBuf> {
         Ok(Self::config_dir()?.join("config.toml"))
+    }
+
+    /// Directory scanned for `*.toml` theme files.
+    pub fn themes_dir() -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join("themes"))
+    }
+
+    /// Directory scanned for `.ttf`, `.otf` and `.ttc` font files.
+    pub fn fonts_dir() -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join("fonts"))
     }
 
     /// Get the JSON schema path.
@@ -144,7 +254,93 @@ impl Config {
         let json = serde_json::to_string_pretty(&schema)
             .map_err(|e| ConfigError::Validation(e.to_string()))?;
         std::fs::write(path, json).map_err(ConfigError::Write)?;
+        #[cfg(feature = "tf-ui")]
+        {
+            let theme = schemars::schema_for!(theme::ThemeSpec);
+            let json = serde_json::to_string_pretty(&theme)
+                .map_err(|e| ConfigError::Validation(e.to_string()))?;
+            std::fs::write(Self::config_dir()?.join("theme.schema.json"), json)
+                .map_err(ConfigError::Write)?;
+        }
         Ok(())
+    }
+}
+
+/// `#rrggbb` check that does not need the optional `tf-ui` dependency.
+fn tf_ui_hex(s: &str) -> Option<()> {
+    let digits = s.strip_prefix('#').unwrap_or(s);
+    (digits.len() == 6 && digits.bytes().all(|b| b.is_ascii_hexdigit())).then_some(())
+}
+
+fn valid_context_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 48
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// A client/account identity. Secrets and credentials remain in Git, SSH and
+/// GitHub CLI; TermForge stores only paths and expected public identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ContextConfig {
+    /// Stable identifier persisted with projects.
+    pub id: String,
+    /// Human-readable name shown prominently in the UI.
+    pub name: String,
+    /// Badge colour as `#rrggbb`.
+    pub color: String,
+    /// Expected and injected Git author/committer name.
+    pub git_name: String,
+    /// Expected and injected Git author/committer email.
+    pub git_email: String,
+    /// Expected host in the repository's origin URL, such as github.com.
+    pub github_host: String,
+    /// Optional GitHub CLI config directory for this account.
+    pub gh_config_dir: Option<PathBuf>,
+    /// Optional dedicated global Git config for this identity.
+    pub git_config_global: Option<PathBuf>,
+}
+
+impl ContextConfig {
+    /// Environment applied to newly-created shells. Authentication remains in
+    /// external credential managers; these values only select an identity.
+    pub fn shell_env(&self) -> Vec<(String, String)> {
+        let mut env = vec![("TERMFORGE_CONTEXT".into(), self.id.clone())];
+        if !self.git_name.is_empty() {
+            env.push(("GIT_AUTHOR_NAME".into(), self.git_name.clone()));
+            env.push(("GIT_COMMITTER_NAME".into(), self.git_name.clone()));
+        }
+        if !self.git_email.is_empty() {
+            env.push(("GIT_AUTHOR_EMAIL".into(), self.git_email.clone()));
+            env.push(("GIT_COMMITTER_EMAIL".into(), self.git_email.clone()));
+        }
+        if let Some(path) = &self.gh_config_dir {
+            env.push(("GH_CONFIG_DIR".into(), path.to_string_lossy().into_owned()));
+        }
+        if let Some(path) = &self.git_config_global {
+            env.push((
+                "GIT_CONFIG_GLOBAL".into(),
+                path.to_string_lossy().into_owned(),
+            ));
+        }
+        env
+    }
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            id: "personal".into(),
+            name: "Personal".into(),
+            color: "#8b5cf6".into(),
+            git_name: String::new(),
+            git_email: String::new(),
+            github_host: "github.com".into(),
+            gh_config_dir: None,
+            git_config_global: None,
+        }
     }
 }
 
@@ -274,6 +470,8 @@ pub struct TerminalConfig {
     pub scrollback_limit: usize,
     /// Enable ligatures
     pub ligatures: bool,
+    /// Tint default-colour bold text with the active theme accent
+    pub accent_bold: bool,
     /// Cursor style
     pub cursor_style: CursorStyleConfig,
     /// Cursor blink
@@ -289,7 +487,10 @@ impl Default for TerminalConfig {
             font_size: 14.0,
             line_height: 1.35,
             scrollback_limit: 10000,
-            ligatures: true,
+            // The terminal grid has always drawn without ligatures; keep
+            // that unless the user opts in.
+            ligatures: false,
+            accent_bold: true,
             cursor_style: CursorStyleConfig::Block,
             cursor_blink: true,
             bell: BellConfig::default(),
@@ -383,8 +584,16 @@ impl Default for ShellConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct UiConfig {
-    /// Theme mode
+    /// Theme mode, used when `theme_name` is empty or not found
     pub theme: ThemeMode,
+    /// Name of a built-in or user theme (empty = follow `theme`)
+    pub theme_name: String,
+    /// Accent colour override as `#rrggbb` (empty = the theme's own)
+    pub accent: String,
+    /// Contrast override 0-100 (unset = the theme's own)
+    pub contrast: Option<u8>,
+    /// Interface font family (empty = auto-detect a proportional face)
+    pub font_family: String,
     /// Show tab bar
     pub show_tab_bar: bool,
     /// Show status bar
@@ -399,6 +608,10 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             theme: ThemeMode::System,
+            theme_name: String::new(),
+            accent: String::new(),
+            contrast: None,
+            font_family: String::new(),
             show_tab_bar: true,
             show_status_bar: true,
             opacity: 1.0,
@@ -458,6 +671,43 @@ mod tests {
         config.validate().unwrap();
     }
 
+    #[test]
+    fn contexts_parse_and_build_identity_environment() {
+        let config = Config::parse(
+            r##"
+                [[contexts]]
+                id = "client-a"
+                name = "Client A"
+                color = "#168aad"
+                git_name = "Ada Dev"
+                git_email = "ada@client-a.example"
+                github_host = "github.com"
+                gh_config_dir = "/accounts/client-a/gh"
+            "##,
+        )
+        .unwrap();
+        let context = &config.contexts[0];
+        assert_eq!(context.id, "client-a");
+        assert!(context
+            .shell_env()
+            .contains(&("GIT_AUTHOR_EMAIL".into(), "ada@client-a.example".into())));
+        assert!(context
+            .shell_env()
+            .contains(&("GH_CONFIG_DIR".into(), "/accounts/client-a/gh".into())));
+    }
+
+    #[test]
+    fn contexts_reject_unsafe_or_ambiguous_identity() {
+        assert!(Config::parse("[[contexts]]\nid = \"Client A\"\nname = \"A\"").is_err());
+        assert!(Config::parse(
+            "[[contexts]]\nid = \"same\"\nname = \"A\"\n[[contexts]]\nid = \"same\"\nname = \"B\""
+        )
+        .is_err());
+        assert!(
+            Config::parse("[[contexts]]\nid = \"client\"\nname = \"A\"\ncolor = \"red\"").is_err()
+        );
+    }
+
     #[tokio::test]
     async fn config_round_trip() {
         let dir = tempdir().unwrap();
@@ -484,18 +734,52 @@ mod tests {
 
         let handle = ConfigHandle::new(config, path.clone()).await.unwrap();
         let original_size = handle.get().await.terminal.font_size;
+        let mut changes = handle.subscribe();
 
         // Modify the config file
         let mut new_config = Config::default();
         new_config.terminal.font_size = 18.0;
         new_config.save_to_path(&path).await.unwrap();
 
-        // Wait for reload
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let reloaded = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let config = changes.recv().await.unwrap();
+                if config.terminal.font_size == 18.0 {
+                    break config;
+                }
+            }
+        })
+        .await
+        .expect("config reload timed out");
 
-        let reloaded = handle.get().await;
         assert_eq!(reloaded.terminal.font_size, 18.0);
         assert_ne!(reloaded.terminal.font_size, original_size);
+    }
+
+    #[test]
+    fn appearance_fields_validate() {
+        let ok = Config::parse(
+            "[terminal]\nline_height = 1.5\n[ui]\naccent = \"#ff8800\"\ncontrast = 60\ntheme_name = \"Midnight\"\n",
+        )
+        .unwrap();
+        assert_eq!(ok.ui.theme_name, "Midnight");
+        assert!(Config::parse("[ui]\naccent = \"orange\"").is_err());
+        assert!(Config::parse("[ui]\ncontrast = 101").is_err());
+        assert!(Config::parse("[terminal]\nline_height = 0.5").is_err());
+    }
+
+    #[test]
+    fn sync_save_round_trips_without_leaving_temp_files() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nested").join("config.toml");
+        let mut config = Config::default();
+        config.ui.theme_name = "Forest".into();
+        config.save_sync(&path).unwrap();
+        assert_eq!(Config::load_sync(&path).unwrap().ui.theme_name, "Forest");
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
     }
 
     #[test]

@@ -43,6 +43,8 @@ pub enum Skip {
     NotInstalled,
     /// Installed, but `tf-shell` cannot inject integration into it.
     NoIntegration,
+    /// The shell predates a feature required by its integration script.
+    UnsupportedVersion,
 }
 
 impl std::fmt::Display for Skip {
@@ -50,6 +52,7 @@ impl std::fmt::Display for Skip {
         f.write_str(match self {
             Skip::NotInstalled => "not installed",
             Skip::NoIntegration => "no integration script",
+            Skip::UnsupportedVersion => "unsupported version",
         })
     }
 }
@@ -71,6 +74,10 @@ impl RealShell {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = tempfile::tempdir().expect("tempdir");
         let integration = dir.path().join("shell");
+
+        if !bash_supports_ps0(&profile) {
+            return Err(Skip::UnsupportedVersion);
+        }
 
         // Checked before spawning: a shell we can launch but not instrument
         // would produce no blocks and a baffling timeout later.
@@ -281,13 +288,37 @@ pub fn drive(
 /// rather than quietly reporting success. See
 /// `tf_pty::ShellProfile::supports_integration`.
 pub fn testable_shells() -> Vec<ShellKind> {
-    let mut kinds = vec![
-        ShellKind::Bash,
-        ShellKind::Pwsh,
-        ShellKind::WindowsPowerShell,
-    ];
-    if cfg!(windows) {
-        kinds.push(ShellKind::GitBash);
-    }
+    let mut kinds = tf_pty::discover_shells()
+        .into_iter()
+        .filter(|profile| profile.supports_integration())
+        .filter(bash_supports_ps0)
+        .map(|profile| profile.kind)
+        .collect::<Vec<_>>();
+    kinds.dedup();
     kinds
+}
+
+/// Bash added `PS0` in 4.4. Older macOS Bash can launch the integration but
+/// can never emit the pre-command C mark, so it is not a valid test target.
+fn bash_supports_ps0(profile: &ShellProfile) -> bool {
+    if profile.kind != ShellKind::Bash {
+        return true;
+    }
+    let Ok(output) = std::process::Command::new(&profile.program)
+        .arg("--version")
+        .output()
+    else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let Some(version) = text
+        .split_whitespace()
+        .find(|word| word.chars().next().is_some_and(|c| c.is_ascii_digit()))
+    else {
+        return false;
+    };
+    let mut parts = version
+        .split('.')
+        .filter_map(|part| part.parse::<u32>().ok());
+    matches!((parts.next(), parts.next()), (Some(major), Some(minor)) if (major, minor) >= (4, 4))
 }

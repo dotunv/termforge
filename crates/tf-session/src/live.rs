@@ -37,6 +37,7 @@ struct Shared {
     events: Mutex<Vec<SessionEvent>>,
     exit: Mutex<Option<Option<u32>>>,
     closing: AtomicBool,
+    sync_wake_pending: AtomicBool,
     wake: Waker,
 }
 
@@ -80,13 +81,14 @@ impl LiveSession {
             events: Mutex::new(Vec::new()),
             exit: Mutex::new(None),
             closing: AtomicBool::new(false),
+            sync_wake_pending: AtomicBool::new(false),
             wake,
         });
 
         let s = Arc::clone(&shared);
         thread::Builder::new()
             .name("tf-pty-reader".into())
-            .spawn(move || read_loop(&s, reader))
+            .spawn(move || read_loop(s, reader))
             .context("spawn reader thread")?;
 
         // ConPTY does not signal EOF when the child exits; the pseudoconsole
@@ -165,7 +167,7 @@ impl Drop for LiveSession {
     }
 }
 
-fn read_loop(shared: &Shared, mut reader: Box<dyn Read + Send>) {
+fn read_loop(shared: Arc<Shared>, mut reader: Box<dyn Read + Send>) {
     let mut buf = vec![0u8; 64 * 1024];
     let mut events = Vec::new();
     loop {
@@ -173,7 +175,12 @@ fn read_loop(shared: &Shared, mut reader: Box<dyn Read + Send>) {
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
-        let reply = lock(&shared.processor).process(&buf[..n], &mut events);
+        let (reply, synchronized) = {
+            let mut processor = lock(&shared.processor);
+            let reply = processor.process(&buf[..n], &mut events);
+            let synchronized = processor.engine().synchronized_output();
+            (reply, synchronized)
+        };
         events.insert(0, SessionEvent::Output(buf[..n].to_vec()));
         if !reply.is_empty() {
             if let Some(pty) = lock(&shared.pty).as_mut() {
@@ -183,7 +190,26 @@ fn read_loop(shared: &Shared, mut reader: Box<dyn Read + Send>) {
         if !events.is_empty() {
             lock(&shared.events).append(&mut events);
         }
-        (shared.wake)();
+        if synchronized {
+            // A broken program must not freeze the visible terminal forever.
+            // Alacritty uses the same 150 ms synchronized-update timeout.
+            if shared
+                .sync_wake_pending
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                let delayed = Arc::clone(&shared);
+                let _ = thread::Builder::new()
+                    .name("tf-sync-output-timeout".into())
+                    .spawn(move || {
+                        thread::sleep(Duration::from_millis(150));
+                        delayed.sync_wake_pending.store(false, Ordering::SeqCst);
+                        (delayed.wake)();
+                    });
+            }
+        } else {
+            (shared.wake)();
+        }
     }
     tracing::debug!("pty reader finished");
     (shared.wake)();

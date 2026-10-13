@@ -206,6 +206,11 @@ pub trait TerminalEngine: Send {
     /// Window title set by the running program, if any.
     fn title(&self) -> Option<String>;
     fn modes(&self) -> Modes;
+    /// Whether DEC synchronized output (mode 2026) is currently holding a
+    /// frame. Renderers should wait for the matching reset, with a timeout.
+    fn synchronized_output(&self) -> bool {
+        false
+    }
     fn scroll(&mut self, scroll: Scroll);
     /// Total addressable lines: scrollback plus screen.
     fn total_lines(&self) -> usize {

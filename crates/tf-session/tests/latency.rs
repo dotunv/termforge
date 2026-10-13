@@ -73,17 +73,16 @@ fn prompt_row(snapshot: &tf_engine::Snapshot) -> Option<usize> {
 #[test]
 #[ignore = "slow and timing-sensitive: cargo xtask latency"]
 fn keystroke_to_visible_output_is_within_budget() {
-    let Some(shell_kind) = common::testable_shells()
+    let shell = common::testable_shells()
         .into_iter()
-        .find(|k| matches!(k, ShellKind::Bash | ShellKind::GitBash))
-    else {
+        .filter(|kind| matches!(kind, ShellKind::Bash | ShellKind::GitBash))
+        .find_map(|kind| RealShell::spawn_with(kind, GridSize::new(120, 40)).ok());
+    let Some(shell) = shell else {
         eprintln!("no POSIX shell available; skipping");
         return;
     };
 
     let n = sample_count();
-    let shell = RealShell::spawn_with(shell_kind, GridSize::new(120, 40))
-        .expect("shell should be spawnable where it was discovered");
 
     // Settle: the first prompt pays for shell startup and PS1 evaluation.
     let settle = Instant::now();

@@ -45,3 +45,10 @@ path = "fuzz_targets/config.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "theme"
+path = "fuzz_targets/theme.rs"
+test = false
+doc = false
+bench = false

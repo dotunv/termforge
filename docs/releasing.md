@@ -48,6 +48,11 @@ All are optional; a missing group skips that platform's signing step.
 | `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD` | notarization and stapling |
 | `TF_UPDATE_SIGNING_SEED` | 64 hex chars (`openssl rand -hex 32`); signs `manifest.json` |
 
+Set the public half printed by `cargo xtask update-pubkey` as the repository
+variable `TF_UPDATE_PUBLIC_KEY`. Release builds receive it as
+`TERMFORGE_UPDATE_PUBLIC_KEY`; builds without it make no update request and
+cannot display an unauthenticated update.
+
 Run `TF_UPDATE_SIGNING_SEED=<seed> cargo xtask update-pubkey` to get the public
 key that the application must embed. Keep the seed out of the repository.
 
