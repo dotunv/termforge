@@ -74,11 +74,24 @@ pub struct SavedPanes {
     pub focus: usize,
 }
 
+/// Visibility and size of the dock and right panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedChrome {
+    pub dock_open: bool,
+    pub dock_height: u32,
+    /// `sessions`, `changes` or `output`; unknown values fall back to the default tab.
+    pub dock_tab: String,
+    pub panel_open: bool,
+    pub panel_width: u32,
+}
+
 /// Order, names and pins of the workspaces in a window.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Layout {
     pub tabs: Vec<SavedTab>,
     pub active: Option<String>,
+    /// Dock and panel state; absent in files written by older builds.
+    pub chrome: Option<SavedChrome>,
 }
 
 const HEADER: &str = "termforge-layout 1";
@@ -122,6 +135,16 @@ impl Layout {
         if let Some(active) = &self.active {
             out.push_str(&format!("A\t{active}\n"));
         }
+        if let Some(c) = &self.chrome {
+            out.push_str(&format!(
+                "C\t{}\t{}\t{}\t{}\t{}\n",
+                u8::from(c.dock_open),
+                c.dock_height,
+                c.dock_tab,
+                u8::from(c.panel_open),
+                c.panel_width
+            ));
+        }
         for tab in &self.tabs {
             out.push_str(&format!(
                 "T\t{}\t{}\t{}\n",
@@ -154,6 +177,27 @@ impl Layout {
             let mut fields = line.split('\t');
             match (fields.next(), fields.next()) {
                 (Some("A"), Some(id)) => layout.active = Some(id.to_owned()),
+                (Some("C"), Some(dock_open)) => {
+                    let dock_height = fields.next().and_then(|v| v.parse().ok());
+                    let dock_tab = fields.next().map(str::to_owned);
+                    let panel_open = fields.next().map(|v| v == "1");
+                    let panel_width = fields.next().and_then(|v| v.parse().ok());
+                    if let (
+                        Some(dock_height),
+                        Some(dock_tab),
+                        Some(panel_open),
+                        Some(panel_width),
+                    ) = (dock_height, dock_tab, panel_open, panel_width)
+                    {
+                        layout.chrome = Some(SavedChrome {
+                            dock_open: dock_open == "1",
+                            dock_height,
+                            dock_tab,
+                            panel_open,
+                            panel_width,
+                        });
+                    }
+                }
                 (Some("T"), Some(id)) => {
                     let pinned = fields.next() == Some("1");
                     let name = fields
@@ -216,8 +260,31 @@ mod tests {
                 },
             ],
             active: Some("b".into()),
+            chrome: Some(SavedChrome {
+                dock_open: true,
+                dock_height: 240,
+                dock_tab: "changes".into(),
+                panel_open: false,
+                panel_width: 360,
+            }),
         };
         assert_eq!(Layout::decode(&layout.encode()), layout);
+    }
+
+    #[test]
+    fn chrome_line_is_optional_and_validated() {
+        let header = "termforge-layout 1\n";
+        assert!(Layout::decode(&format!("{header}T\ta\t0\t\n"))
+            .chrome
+            .is_none());
+        assert!(
+            Layout::decode(&format!("{header}C\t1\tx\tchanges\t0\t300\n"))
+                .chrome
+                .is_none()
+        );
+        assert!(Layout::decode(&format!("{header}C\t1\t200\n"))
+            .chrome
+            .is_none());
     }
 
     #[test]

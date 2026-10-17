@@ -449,3 +449,105 @@ async fn changes_dock_lists_files_and_opens_a_diff(cx: &mut TestAppContext) {
     });
     let _ = std::fs::remove_dir_all(&repo);
 }
+
+#[gpui::test]
+async fn dock_and_panel_edges_resize_by_dragging(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    view.update(cx, |v, cx| {
+        v.toggle_utility_dock(cx);
+        v.edge_drag = Some(EdgeDrag {
+            edge: Edge::Dock,
+            pointer: 500.0,
+            size: v.dock_height,
+        });
+    });
+    redraw(cx);
+    cx.simulate_event(MouseMoveEvent {
+        position: point(px(300.0), px(400.0)),
+        pressed_button: Some(MouseButton::Left),
+        modifiers: Modifiers::default(),
+    });
+    redraw(cx);
+    assert_eq!(view.read_with(cx, |v, _| v.dock_height), 268.0);
+
+    view.update(cx, |v, cx| {
+        v.edge_drag = Some(EdgeDrag {
+            edge: Edge::Panel,
+            pointer: 700.0,
+            size: v.panel_width,
+        });
+        v.toggle_context_panel(cx);
+    });
+    cx.simulate_event(MouseMoveEvent {
+        position: point(px(0.0), px(300.0)),
+        pressed_button: Some(MouseButton::Left),
+        modifiers: Modifiers::default(),
+    });
+    redraw(cx);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.panel_width),
+        640.0,
+        "clamped to the maximum"
+    );
+}
+
+#[gpui::test]
+async fn dock_watches_another_session_without_a_new_process(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    view.update(cx, |v, cx| {
+        v.new_local_tab(cx);
+        v.select_tab(0, cx);
+    });
+    let (sessions_before, other) = view.read_with(cx, |v, _| {
+        let ids: Vec<_> = v
+            .tabs
+            .iter()
+            .filter_map(|t| t.session.as_ref().map(|s| s.id()))
+            .collect();
+        (ids, v.tabs[1].id)
+    });
+    view.update(cx, |v, cx| v.watch_in_dock(other, cx));
+    redraw(cx);
+    view.read_with(cx, |v, _| {
+        assert_eq!(v.dock_tab, DockTab::Output);
+        let after: Vec<_> = v
+            .tabs
+            .iter()
+            .filter_map(|t| t.session.as_ref().map(|s| s.id()))
+            .collect();
+        assert_eq!(after, sessions_before, "watching must not spawn sessions");
+    });
+}
+
+#[gpui::test]
+async fn dock_and_panel_state_round_trips_and_is_clamped(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    view.update(cx, |v, cx| {
+        v.toggle_utility_dock(cx);
+        v.dock_height = 300.0;
+        v.dock_tab = DockTab::Output;
+        v.panel_width = 400.0;
+        let saved = v.saved_chrome();
+        assert_eq!(saved.dock_tab, "output");
+
+        v.show_utility_dock = false;
+        v.dock_tab = DockTab::Sessions;
+        v.apply_saved_chrome(&saved);
+        assert!(v.show_utility_dock);
+        assert_eq!(v.dock_height, 300.0);
+        assert_eq!(v.panel_width, 400.0);
+        // Output needs a watched session, which a restart loses.
+        assert_eq!(v.dock_tab, DockTab::Sessions);
+
+        let hostile = SavedChrome {
+            dock_open: true,
+            dock_height: 99_999,
+            dock_tab: "bogus".into(),
+            panel_open: true,
+            panel_width: 1,
+        };
+        v.apply_saved_chrome(&hostile);
+        assert_eq!(v.dock_height, 520.0);
+        assert_eq!(v.panel_width, 240.0);
+    });
+}

@@ -42,7 +42,7 @@ use crate::panes::{Axis, Dir, PaneId, PaneTree, Rect as PaneRect};
 use crate::remote_session::{self, Attach, SessionHandle};
 use crate::surface::{self, DockTab, GitChange, Inspector};
 use crate::updates::UpdateNotice;
-use crate::workspace::{self, Layout, SavedPanes, SavedTab};
+use crate::workspace::{self, Layout, SavedChrome, SavedPanes, SavedTab};
 
 mod accounts;
 mod chrome;
@@ -364,6 +364,21 @@ struct PaneSlot {
 }
 
 /// A divider being dragged with the mouse.
+/// Which edge of a docked region is being dragged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Edge {
+    Dock,
+    Panel,
+}
+
+/// A resize in progress: the pointer position and region size at press time.
+#[derive(Debug, Clone, Copy)]
+struct EdgeDrag {
+    edge: Edge,
+    pointer: f32,
+    size: f32,
+}
+
 #[derive(Debug, Clone)]
 struct DividerDrag {
     path: Vec<bool>,
@@ -575,6 +590,11 @@ pub struct TerminalView {
     dock_tab: DockTab,
     changes: Option<Vec<GitChange>>,
     changes_dir: Option<PathBuf>,
+    dock_height: f32,
+    /// Workspace whose output the dock's Output tab is watching.
+    dock_target: Option<u64>,
+    panel_width: f32,
+    edge_drag: Option<EdgeDrag>,
     worktrees: Vec<surface::Worktree>,
     inspector: Inspector,
     diff_lines: Vec<String>,
@@ -726,6 +746,10 @@ impl TerminalView {
             dock_tab: DockTab::default(),
             changes: None,
             changes_dir: None,
+            dock_height: 168.0,
+            dock_target: None,
+            panel_width: 320.0,
+            edge_drag: None,
             worktrees: Vec::new(),
             inspector: Inspector::default(),
             diff_lines: Vec::new(),
@@ -814,13 +838,21 @@ impl TerminalView {
                     if this.divider_drag.is_some() {
                         this.drag_divider(ev.position, cx);
                     }
+                    if this.edge_drag.is_some() {
+                        this.drag_edge(ev.position, cx);
+                    }
                 });
             }
         });
         let v = view.clone();
         window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
             if phase == DispatchPhase::Bubble {
-                v.update(cx, |this, cx| this.end_divider_drag(cx));
+                v.update(cx, |this, cx| {
+                    if this.edge_drag.take().is_some() {
+                        this.persist_layout();
+                    }
+                    this.end_divider_drag(cx);
+                });
             }
         });
         let v = view.clone();
@@ -1402,6 +1434,7 @@ impl Render for TerminalView {
                             .when(!self.terminal_maximized, |d| {
                                 d.child(self.workbench_inspector(cx))
                             }),
+                            .when(self.show_utility_dock, |d| d.child(self.utility_dock(metrics, cx))),
                     )
                     .when(self.show_status_bar, |d| {
                         d.child(self.status_bar(self.computed_grid_size))

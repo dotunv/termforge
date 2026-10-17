@@ -15,6 +15,8 @@ pub enum DockTab {
     Sessions,
     /// Working-tree changes of the active session's repository.
     Changes,
+    /// Live output of another workspace's session (read-only view).
+    Output,
 }
 
 /// What the optional right panel inspects.

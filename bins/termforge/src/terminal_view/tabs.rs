@@ -616,11 +616,45 @@ impl TerminalView {
             .get(self.active_tab)
             .and_then(|tab| tab.session.as_ref()?.id())
             .map(|id| id.to_string());
-        let encoded = Layout { tabs, active }.encode();
+        let encoded = Layout {
+            tabs,
+            active,
+            chrome: Some(self.saved_chrome()),
+        }
+        .encode();
         if encoded != self.saved_layout {
             self.saved_layout.clone_from(&encoded);
             remote_session::save_workspace_state(root, encoded);
         }
+    }
+
+    pub(super) fn saved_chrome(&self) -> SavedChrome {
+        SavedChrome {
+            dock_open: self.show_utility_dock,
+            dock_height: self.dock_height.round() as u32,
+            dock_tab: match self.dock_tab {
+                DockTab::Sessions => "sessions",
+                DockTab::Changes => "changes",
+                DockTab::Output => "output",
+            }
+            .into(),
+            panel_open: self.show_context_panel,
+            panel_width: self.panel_width.round() as u32,
+        }
+    }
+
+    /// Restore dock and panel state. Sizes are clamped because the file is
+    /// user-editable; the Output tab needs a watched session that does not
+    /// survive a restart, so it reopens as Sessions.
+    pub(super) fn apply_saved_chrome(&mut self, chrome: &SavedChrome) {
+        self.show_utility_dock = chrome.dock_open;
+        self.dock_height = (chrome.dock_height as f32).clamp(96.0, 520.0);
+        self.dock_tab = match chrome.dock_tab.as_str() {
+            "changes" => DockTab::Changes,
+            _ => DockTab::Sessions,
+        };
+        self.show_context_panel = chrome.panel_open;
+        self.panel_width = (chrome.panel_width as f32).clamp(240.0, 640.0);
     }
 
     /// The split layout of a workspace in a form that survives restarts:
@@ -653,6 +687,9 @@ impl TerminalView {
     /// fall back to a single fresh (or matching) session.
     pub(super) fn restore_workspace(&mut self, cx: &mut Context<'_, Self>) {
         let restored = self.restore_from_daemon(cx);
+        if restored && self.dock_tab == DockTab::Changes {
+            self.refresh_changes(cx);
+        }
         if !restored {
             self.start_session(true);
             let tab = self.current_tab();
@@ -739,6 +776,9 @@ impl TerminalView {
             .as_deref()
             .map(Layout::decode)
             .unwrap_or_default();
+        if let Some(chrome) = &layout.chrome {
+            self.apply_saved_chrome(chrome);
+        }
         let running = |id: &str| {
             stored
                 .sessions

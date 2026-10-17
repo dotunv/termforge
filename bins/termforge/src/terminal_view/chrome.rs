@@ -465,11 +465,13 @@ impl TerminalView {
 
     pub(super) fn toggle_context_panel(&mut self, cx: &mut Context<'_, Self>) {
         self.show_context_panel = !self.show_context_panel;
+        self.persist_layout();
         cx.notify();
     }
 
     pub(super) fn toggle_utility_dock(&mut self, cx: &mut Context<'_, Self>) {
         self.show_utility_dock = !self.show_utility_dock;
+        self.persist_layout();
         cx.notify();
     }
 
@@ -479,6 +481,134 @@ impl TerminalView {
             .and_then(|tab| tab.cwd.as_deref())
             .map(crate::workspace::local_path)
             .or_else(|| self.local_project_root.clone())
+    }
+
+    /// Resize the dock or right panel while its edge is dragged.
+    pub(super) fn drag_edge(&mut self, position: gpui::Point<Pixels>, cx: &mut Context<'_, Self>) {
+        let Some(drag) = self.edge_drag else {
+            return;
+        };
+        match drag.edge {
+            Edge::Dock => {
+                let delta = drag.pointer - f32::from(position.y);
+                self.dock_height = (drag.size + delta).clamp(96.0, 520.0);
+            }
+            Edge::Panel => {
+                let delta = drag.pointer - f32::from(position.x);
+                self.panel_width = (drag.size + delta).clamp(240.0, 640.0);
+            }
+        }
+        cx.notify();
+    }
+
+    /// A thin grab strip that starts an edge drag.
+    fn edge_handle(
+        &self,
+        id: &'static str,
+        edge: Edge,
+        cx: &mut Context<'_, Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let handle = div().id(id).absolute();
+        let handle = match edge {
+            Edge::Dock => handle
+                .top(px(-2.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .h(px(5.0))
+                .cursor_row_resize(),
+            Edge::Panel => handle
+                .left(px(-2.0))
+                .top(px(0.0))
+                .bottom(px(0.0))
+                .w(px(5.0))
+                .cursor_col_resize(),
+        };
+        handle
+            .hover(|style| style.bg(with_alpha(hsla(self.theme.accent), 0.5)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                    let (pointer, size) = match edge {
+                        Edge::Dock => (f32::from(ev.position.y), this.dock_height),
+                        Edge::Panel => (f32::from(ev.position.x), this.panel_width),
+                    };
+                    this.edge_drag = Some(EdgeDrag {
+                        edge,
+                        pointer,
+                        size,
+                    });
+                    cx.stop_propagation();
+                }),
+            )
+    }
+
+    pub(super) fn watch_in_dock(&mut self, tab_id: u64, cx: &mut Context<'_, Self>) {
+        self.dock_target = Some(tab_id);
+        self.dock_tab = DockTab::Output;
+        self.show_utility_dock = true;
+        cx.notify();
+    }
+
+    /// Live, read-only view of another workspace's session. It shows the same
+    /// session the sidebar lists: no process is created or restarted.
+    fn dock_output(&self, metrics: Metrics, cx: &mut Context<'_, Self>) -> gpui::AnyElement {
+        let t = &self.theme;
+        let target = self
+            .dock_target
+            .and_then(|id| self.tabs.iter().enumerate().find(|(_, tab)| tab.id == id))
+            .filter(|(index, _)| *index != self.active_tab)
+            .and_then(|(index, tab)| tab.session.clone().map(|session| (index, session)));
+        let Some((index, session)) = target else {
+            return div()
+                .p(px(tokens::space::MD))
+                .text_size(px(tokens::text::SM))
+                .text_color(hsla(t.text_faint))
+                .child("Use \"watch\" on a session in Sessions to follow its output here.")
+                .into_any_element();
+        };
+        let (view, theme, font) = (cx.entity(), Arc::clone(&self.theme), self.font.clone());
+        let (font_size, cursor_style) = (px(self.font_size), self.cursor_style);
+        let accent_bold = self.appearance.config.terminal.accent_bold;
+        let plain = canvas(
+            move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
+                let cols =
+                    ((bounds.size.width - px(crate::paint::PAD_X * 2.0)) / metrics.cell_w).floor();
+                let rows =
+                    ((bounds.size.height - px(crate::paint::PAD_Y * 2.0)) / metrics.line_h).floor();
+                let size = GridSize::new(cols.max(2.0) as u16, rows.max(1.0) as u16);
+                Some(view.read(cx).frame(&session, size, false))
+            },
+            move |bounds, frame, window, cx| {
+                let Some(frame) = frame else { return };
+                paint_grid(
+                    PaintArgs {
+                        snap: &frame.snap,
+                        blocks: &frame.blocks,
+                        overlay: &frame.overlay,
+                        bounds,
+                        theme: &theme,
+                        font: &font,
+                        font_size,
+                        metrics,
+                        focused: false,
+                        cursor_style,
+                        accent_bold,
+                    },
+                    window,
+                    cx,
+                );
+            },
+        )
+        .size_full();
+        div()
+            .id("utility-output")
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_hidden()
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| this.select_tab(index, cx)))
+            .child(plain)
+            .into_any_element()
     }
 
     /// Re-read the worktree list. Called on tab changes, never from render.
@@ -500,6 +630,7 @@ impl TerminalView {
         if tab == DockTab::Changes {
             self.refresh_changes(cx);
         }
+        self.persist_layout();
         cx.notify();
     }
 
@@ -529,13 +660,15 @@ impl TerminalView {
         let back = matches!(self.inspector, Inspector::Diff(_));
         div()
             .id("context-panel")
-            .w(px(320.0))
+            .relative()
+            .w(px(self.panel_width))
             .flex_none()
             .flex()
             .flex_col()
             .bg(hsla(t.bg_panel))
             .border_l_1()
             .border_color(hsla(t.border))
+            .child(self.edge_handle("context-panel-edge", Edge::Panel, cx))
             .child(
                 div()
                     .h(px(34.0))
@@ -663,8 +796,14 @@ impl TerminalView {
 
     /// Bottom dock: Sessions selects existing workspaces (never a second PTY
     /// for a different presentation); Changes lists the working-tree diff.
-    pub(super) fn utility_dock(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    pub(super) fn utility_dock(
+        &self,
+        metrics: Metrics,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
         let t = &self.theme;
+        let edge = self.edge_handle("utility-dock-edge", Edge::Dock, cx);
+        let output = (self.dock_tab == DockTab::Output).then(|| self.dock_output(metrics, cx));
         let change_count = self.changes.as_ref().map_or(0, Vec::len);
         let tab = |id: &'static str, label: String, which: DockTab| {
             let active = self.dock_tab == which;
@@ -710,12 +849,36 @@ impl TerminalView {
                         .child(SharedString::from(label))
                         .child(
                             div()
-                                .text_size(px(tokens::text::XS))
-                                .text_color(hsla(t.text_faint))
-                                .child(SharedString::from(branch)),
+                                .flex()
+                                .items_center()
+                                .gap(px(tokens::space::SM))
+                                .child(
+                                    div()
+                                        .text_size(px(tokens::text::XS))
+                                        .text_color(hsla(t.text_faint))
+                                        .child(SharedString::from(branch)),
+                                )
+                                .when(!active, |d| {
+                                    let tab_id = tab.id;
+                                    d.child(
+                                        div()
+                                            .id(("utility-watch", tab.id as usize))
+                                            .px(px(tokens::space::XS))
+                                            .rounded(px(tokens::radius::SM))
+                                            .text_size(px(tokens::text::XS))
+                                            .text_color(hsla(t.accent))
+                                            .hover(|style| style.bg(with_alpha(hsla(t.text), 0.08)))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.watch_in_dock(tab_id, cx);
+                                            }))
+                                            .child("watch"),
+                                    )
+                                }),
                         )
                 }))
                 .into_any_element(),
+            DockTab::Output => output.unwrap_or_else(|| div().into_any_element()),
             DockTab::Changes => match &self.changes {
                 None => div()
                     .p(px(tokens::space::MD))
@@ -791,13 +954,15 @@ impl TerminalView {
         };
         div()
             .id("utility-dock")
-            .h(px(168.0))
+            .relative()
+            .h(px(self.dock_height))
             .flex_none()
             .flex()
             .flex_col()
             .bg(hsla(t.bg_panel))
             .border_t_1()
             .border_color(hsla(t.border))
+            .child(edge)
             .child(
                 div()
                     .h(px(30.0))
@@ -822,7 +987,8 @@ impl TerminalView {
                                     "Changes".into()
                                 },
                                 DockTab::Changes,
-                            )),
+                            ))
+                            .child(tab("dock-tab-output", "Output".into(), DockTab::Output)),
                     )
                     .child(self.icon_button(
                         "utility-dock-close",
