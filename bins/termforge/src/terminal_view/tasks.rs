@@ -565,7 +565,7 @@ impl TerminalView {
             .child(self.section_header(
                 SidebarSection::Tasks,
                 "section-tasks",
-                "TASKS",
+                "Tasks",
                 Some(("section-tasks-add", "+", add)),
                 cx,
             ))
@@ -607,7 +607,7 @@ impl TerminalView {
                     )
                 })
                 .when(has_suggestions, |d| {
-                    d.child(caption("SUGGESTED"))
+                    d.child(caption("Suggested"))
                         .child(div().flex().flex_col().gap(px(2.0)).children(suggestions))
                 })
             })

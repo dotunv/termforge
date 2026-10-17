@@ -142,6 +142,10 @@ impl TerminalView {
             cx.quit();
         } else if ctrl_shift && key.eq_ignore_ascii_case("b") {
             self.toggle_sidebar(cx);
+        } else if ctrl_shift && key.eq_ignore_ascii_case("i") {
+            self.toggle_context_panel(cx);
+        } else if ctrl_shift && key.eq_ignore_ascii_case("j") {
+            self.toggle_utility_dock(cx);
         } else if ctrl_shift && key.eq_ignore_ascii_case("u") {
             self.jump_to_attention(cx);
         } else if ctrl_shift && key.eq_ignore_ascii_case("r") {

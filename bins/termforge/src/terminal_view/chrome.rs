@@ -64,16 +64,22 @@ impl TerminalView {
     pub(super) fn header(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let t = &self.theme;
         let tab_count = self.tabs.len();
+        let active_title = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|tab| tab.name.clone().or_else(|| tab.title.clone()))
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| "Terminal".into());
         div()
-            .h(px(if self.show_tab_strip { 72.0 } else { 30.0 }))
+            .h(px(if self.show_tab_strip { 68.0 } else { 38.0 }))
             .flex()
             .flex_col()
-            .bg(hsla(t.bg_app))
+            .bg(hsla(t.bg_toolbar))
             .border_b_1()
             .border_color(hsla(t.border))
             .child(
                 div()
-                    .h(px(30.0))
+                    .h(px(38.0))
                     .px(px(tokens::space::MD))
                     .flex()
                     .items_center()
@@ -92,20 +98,20 @@ impl TerminalView {
                             })
                             .child(
                                 div()
-                                    .text_color(hsla(t.text))
+                                    .text_size(px(tokens::text::SM))
+                                    .text_color(hsla(t.text_muted))
                                     .child(SharedString::from(self.project_name())),
                             )
-                            .child(self.context_badge("header-context-badge", cx))
+                            .child(div().text_color(hsla(t.text_faint)).child("/"))
                             .child(
                                 div()
-                                    .text_size(px(tokens::text::XS))
-                                    .text_color(hsla(t.text_faint))
-                                    .child(SharedString::from(
-                                        self.cwd
-                                            .clone()
-                                            .unwrap_or_else(|| "Project workspace".into()),
-                                    )),
-                            ),
+                                    .max_w(px(260.0))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_color(hsla(t.text))
+                                    .child(SharedString::from(active_title)),
+                            )
+                            .child(self.context_badge("header-context-badge", cx)),
                     )
                     .child(
                         div()
@@ -114,10 +120,30 @@ impl TerminalView {
                             .gap(px(tokens::space::SM))
                             .child(
                                 div()
+                                    .id("header-command-palette")
+                                    .px(px(7.0))
+                                    .py(px(3.0))
+                                    .rounded(px(tokens::radius::SM))
+                                    .border_1()
+                                    .border_color(hsla(t.border))
                                     .text_size(px(tokens::text::XS))
                                     .text_color(hsla(t.text_faint))
-                                    .child("Ctrl Shift P  Commands"),
+                                    .hover(|style| {
+                                        style.bg(hsla(t.bg_hover)).text_color(hsla(t.text))
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| this.open_palette(cx)))
+                                    .child("⌕  Commands"),
                             )
+                            .child(self.icon_button(
+                                "header-toggle-context-panel",
+                                "◫",
+                                cx.listener(|this, _, _, cx| this.toggle_context_panel(cx)),
+                            ))
+                            .child(self.icon_button(
+                                "header-toggle-utility-dock",
+                                "▱",
+                                cx.listener(|this, _, _, cx| this.toggle_utility_dock(cx)),
+                            ))
                             .child(
                                 div()
                                     .px(px(6.0))
@@ -141,7 +167,7 @@ impl TerminalView {
             .when(self.show_tab_strip, |header| {
                 header.child(
                     div()
-                        .h(px(42.0))
+                        .h(px(30.0))
                         .px(px(tokens::space::SM))
                         .flex()
                         .items_end()
@@ -156,17 +182,19 @@ impl TerminalView {
                                 && self.drag_state.dragged_index == Some(index);
                             div()
                                 .id(("workspace-tab", tab.id as usize))
-                                .h(px(36.0))
-                                .max_w(px(240.0))
+                                .h(px(30.0))
+                                .max_w(px(220.0))
                                 .px(px(tokens::space::MD))
                                 .flex()
                                 .items_center()
                                 .gap(px(tokens::space::SM))
-                                .rounded(px(tokens::radius::MD))
-                                .when(active, |d| d.bg(hsla(t.bg_panel)).text_color(hsla(t.text)))
+                                .text_size(px(tokens::text::SM))
+                                .border_b_1()
+                                .border_color(hsla(if active { t.accent } else { t.bg_toolbar }))
+                                .when(active, |d| d.text_color(hsla(t.text)))
                                 .when(!active, |d| {
                                     d.text_color(hsla(t.text_muted))
-                                        .hover(|style| style.bg(hsla(t.bg_hover)))
+                                        .hover(|style| style.text_color(hsla(t.text)))
                                 })
                                 .when(is_dragging, |d| d.opacity(0.5).bg(hsla(t.accent)))
                                 .child(
@@ -305,16 +333,17 @@ impl TerminalView {
                         .child(
                             div()
                                 .id("new-workspace-tab")
-                                .h(px(30.0))
+                                .h(px(24.0))
                                 .mb(px(3.0))
                                 .px(px(tokens::space::SM))
                                 .flex()
                                 .items_center()
+                                .text_size(px(tokens::text::SM))
                                 .rounded(px(tokens::radius::MD))
                                 .text_color(hsla(t.text_muted))
                                 .hover(|style| style.bg(hsla(t.bg_hover)).text_color(hsla(t.text)))
                                 .on_click(cx.listener(|this, _, _, cx| this.new_local_tab(cx)))
-                                .child("+  New terminal"),
+                                .child("+"),
                         ),
                 )
             })
@@ -385,15 +414,13 @@ impl TerminalView {
         }
         div()
             .h(px(tokens::layout::STATUSBAR_H))
-            .px(px(tokens::space::MD))
+            .px(px(tokens::space::SM))
             .flex()
             .items_center()
             .justify_between()
             .text_size(px(tokens::text::XS))
             .text_color(hsla(t.text_faint))
             .bg(hsla(t.bg_app))
-            .border_t_1()
-            .border_color(hsla(t.border))
             .child(SharedString::from(left))
             .child(SharedString::from(right))
     }
@@ -434,6 +461,376 @@ impl TerminalView {
         self.show_sidebar = !self.show_sidebar;
         self.sidebar_peek = false;
         cx.notify();
+    }
+
+    pub(super) fn toggle_context_panel(&mut self, cx: &mut Context<'_, Self>) {
+        self.show_context_panel = !self.show_context_panel;
+        cx.notify();
+    }
+
+    pub(super) fn toggle_utility_dock(&mut self, cx: &mut Context<'_, Self>) {
+        self.show_utility_dock = !self.show_utility_dock;
+        cx.notify();
+    }
+
+    pub(super) fn repo_dir(&self) -> Option<PathBuf> {
+        self.tabs
+            .get(self.active_tab)
+            .and_then(|tab| tab.cwd.as_deref())
+            .map(crate::workspace::local_path)
+            .or_else(|| self.local_project_root.clone())
+    }
+
+    /// Re-read the worktree list. Called on tab changes, never from render.
+    pub(super) fn refresh_worktrees(&mut self) {
+        self.worktrees = self
+            .repo_dir()
+            .map(|dir| surface::git_worktrees(&dir))
+            .unwrap_or_default();
+    }
+
+    pub(super) fn refresh_changes(&mut self, cx: &mut Context<'_, Self>) {
+        self.changes_dir = self.repo_dir();
+        self.changes = self.changes_dir.as_deref().and_then(surface::git_changes);
+        cx.notify();
+    }
+
+    pub(super) fn set_dock_tab(&mut self, tab: DockTab, cx: &mut Context<'_, Self>) {
+        self.dock_tab = tab;
+        if tab == DockTab::Changes {
+            self.refresh_changes(cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn open_diff(&mut self, change: &GitChange, cx: &mut Context<'_, Self>) {
+        let untracked = change.kind == surface::ChangeKind::Untracked;
+        // Diff against the directory the list was read from, not wherever the
+        // shell has since moved to.
+        self.diff_lines = self
+            .changes_dir
+            .as_deref()
+            .and_then(|dir| surface::git_diff(dir, &change.path, untracked))
+            .map(|text| text.lines().map(str::to_owned).collect())
+            .unwrap_or_default();
+        self.inspector = Inspector::Diff(change.path.clone());
+        self.show_context_panel = true;
+        cx.notify();
+    }
+
+    /// Right panel. It owns no session state, so opening it cannot duplicate
+    /// or restart a PTY: it only inspects the active session or one diff.
+    pub(super) fn context_panel(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let t = &self.theme;
+        let (title, body) = match &self.inspector {
+            Inspector::Session => ("Session".to_owned(), self.session_inspector()),
+            Inspector::Diff(path) => (path.clone(), self.diff_inspector()),
+        };
+        let back = matches!(self.inspector, Inspector::Diff(_));
+        div()
+            .id("context-panel")
+            .w(px(320.0))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .bg(hsla(t.bg_panel))
+            .border_l_1()
+            .border_color(hsla(t.border))
+            .child(
+                div()
+                    .h(px(34.0))
+                    .px(px(tokens::space::MD))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(tokens::space::SM))
+                    .border_b_1()
+                    .border_color(hsla(t.border))
+                    .text_size(px(tokens::text::SM))
+                    .text_color(hsla(t.text))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(SharedString::from(title)),
+                    )
+                    .when(back, |d| {
+                        d.child(self.icon_button(
+                            "context-panel-back",
+                            "‹",
+                            cx.listener(|this, _, _, cx| {
+                                this.inspector = Inspector::Session;
+                                cx.notify();
+                            }),
+                        ))
+                    })
+                    .child(self.icon_button(
+                        "context-panel-close",
+                        "×",
+                        cx.listener(|this, _, _, cx| this.toggle_context_panel(cx)),
+                    )),
+            )
+            .child(
+                div()
+                    .id("context-panel-body")
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_y_scroll()
+                    .child(body),
+            )
+    }
+
+    fn session_inspector(&self) -> gpui::AnyElement {
+        let t = &self.theme;
+        let location = self.cwd.clone().unwrap_or_else(|| self.project_name());
+        let branch = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|tab| tab.branch.clone())
+            .unwrap_or_else(|| "No branch detected".into());
+        let activity = self
+            .program_status_summary()
+            .and_then(|(_, detail)| detail)
+            .unwrap_or_else(|| "No program status reported".into());
+        let row = |label: &'static str, value: String| {
+            div()
+                .px(px(tokens::space::MD))
+                .py(px(6.0))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_size(px(tokens::text::XS))
+                        .text_color(hsla(t.text_faint))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_size(px(tokens::text::SM))
+                        .text_color(hsla(t.text_muted))
+                        .child(SharedString::from(value)),
+                )
+        };
+        div()
+            .flex()
+            .flex_col()
+            .child(row("Directory", location))
+            .child(row("Branch", branch))
+            .child(row("Activity", activity))
+            .into_any_element()
+    }
+
+    fn diff_inspector(&self) -> gpui::AnyElement {
+        let t = &self.theme;
+        if self.diff_lines.is_empty() {
+            return div()
+                .p(px(tokens::space::MD))
+                .text_size(px(tokens::text::SM))
+                .text_color(hsla(t.text_faint))
+                .child("No textual diff available for this file.")
+                .into_any_element();
+        }
+        div()
+            .py(px(tokens::space::XS))
+            .flex()
+            .flex_col()
+            .font_family(self.font.family.clone())
+            .text_size(px(11.5))
+            .children(self.diff_lines.iter().map(|line| {
+                let (fg, bg) = match surface::classify_diff_line(line) {
+                    surface::DiffLine::Added => {
+                        (t.success, Some(with_alpha(hsla(t.success), 0.10)))
+                    }
+                    surface::DiffLine::Removed => {
+                        (t.danger, Some(with_alpha(hsla(t.danger), 0.10)))
+                    }
+                    surface::DiffLine::Hunk => (t.accent, None),
+                    surface::DiffLine::Header => (t.text_faint, None),
+                    surface::DiffLine::Context => (t.text_muted, None),
+                };
+                div()
+                    .px(px(tokens::space::MD))
+                    .whitespace_nowrap()
+                    .text_color(hsla(fg))
+                    .when_some(bg, |d, bg| d.bg(bg))
+                    .child(SharedString::from(line.clone()))
+            }))
+            .into_any_element()
+    }
+
+    /// Bottom dock: Sessions selects existing workspaces (never a second PTY
+    /// for a different presentation); Changes lists the working-tree diff.
+    pub(super) fn utility_dock(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let t = &self.theme;
+        let change_count = self.changes.as_ref().map_or(0, Vec::len);
+        let tab = |id: &'static str, label: String, which: DockTab| {
+            let active = self.dock_tab == which;
+            div()
+                .id(id)
+                .h(px(22.0))
+                .px(px(tokens::space::SM))
+                .flex()
+                .items_center()
+                .rounded(px(tokens::radius::SM))
+                .text_size(px(tokens::text::SM))
+                .text_color(hsla(if active { t.text } else { t.text_muted }))
+                .when(active, |d| d.bg(with_alpha(hsla(t.text), 0.08)))
+                .hover(|style| style.text_color(hsla(t.text)))
+                .on_click(cx.listener(move |this, _, _, cx| this.set_dock_tab(which, cx)))
+                .child(SharedString::from(label))
+        };
+        let body: gpui::AnyElement = match self.dock_tab {
+            DockTab::Sessions => div()
+                .flex_1()
+                .px(px(tokens::space::SM))
+                .py(px(tokens::space::XS))
+                .flex()
+                .flex_col()
+                .gap(px(1.0))
+                .children(self.tabs.iter().enumerate().map(|(index, tab)| {
+                    let active = index == self.active_tab;
+                    let label = tab.name.clone().unwrap_or_else(|| Self::tab_label(tab));
+                    let branch = tab.branch.clone().unwrap_or_default();
+                    div()
+                        .id(("utility-session", tab.id as usize))
+                        .h(px(24.0))
+                        .px(px(tokens::space::SM))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .rounded(px(tokens::radius::SM))
+                        .text_size(px(tokens::text::SM))
+                        .text_color(hsla(if active { t.text } else { t.text_muted }))
+                        .when(active, |d| d.bg(with_alpha(hsla(t.text), 0.07)))
+                        .hover(|style| style.bg(with_alpha(hsla(t.text), 0.05)))
+                        .on_click(cx.listener(move |this, _, _, cx| this.select_tab(index, cx)))
+                        .child(SharedString::from(label))
+                        .child(
+                            div()
+                                .text_size(px(tokens::text::XS))
+                                .text_color(hsla(t.text_faint))
+                                .child(SharedString::from(branch)),
+                        )
+                }))
+                .into_any_element(),
+            DockTab::Changes => match &self.changes {
+                None => div()
+                    .p(px(tokens::space::MD))
+                    .text_size(px(tokens::text::SM))
+                    .text_color(hsla(t.text_faint))
+                    .child("Not inside a Git repository.")
+                    .into_any_element(),
+                Some(changes) if changes.is_empty() => div()
+                    .p(px(tokens::space::MD))
+                    .text_size(px(tokens::text::SM))
+                    .text_color(hsla(t.text_faint))
+                    .child("Working tree clean.")
+                    .into_any_element(),
+                Some(changes) => div()
+                    .id("utility-changes")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .px(px(tokens::space::SM))
+                    .py(px(tokens::space::XS))
+                    .flex()
+                    .flex_col()
+                    .children(changes.iter().enumerate().map(|(index, change)| {
+                        let color = match change.kind {
+                            surface::ChangeKind::Added | surface::ChangeKind::Untracked => {
+                                t.success
+                            }
+                            surface::ChangeKind::Deleted | surface::ChangeKind::Conflicted => {
+                                t.danger
+                            }
+                            _ => t.warning,
+                        };
+                        let picked = change.clone();
+                        let selected = self.inspector == Inspector::Diff(change.path.clone());
+                        div()
+                            .id(("utility-change", index))
+                            .h(px(22.0))
+                            .px(px(tokens::space::SM))
+                            .flex()
+                            .items_center()
+                            .gap(px(tokens::space::SM))
+                            .rounded(px(tokens::radius::SM))
+                            .text_size(px(tokens::text::SM))
+                            .text_color(hsla(t.text_muted))
+                            .when(selected, |d| d.bg(with_alpha(hsla(t.text), 0.07)))
+                            .hover(|style| style.bg(with_alpha(hsla(t.text), 0.05)))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.open_diff(&picked, cx)),
+                            )
+                            .child(
+                                div()
+                                    .w(px(12.0))
+                                    .text_color(hsla(color))
+                                    .child(change.kind.letter()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .child(SharedString::from(change.path.clone())),
+                            )
+                            .when(change.staged, |d| {
+                                d.child(
+                                    div()
+                                        .text_size(px(tokens::text::XS))
+                                        .text_color(hsla(t.text_faint))
+                                        .child("staged"),
+                                )
+                            })
+                    }))
+                    .into_any_element(),
+            },
+        };
+        div()
+            .id("utility-dock")
+            .h(px(168.0))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .bg(hsla(t.bg_panel))
+            .border_t_1()
+            .border_color(hsla(t.border))
+            .child(
+                div()
+                    .h(px(30.0))
+                    .px(px(tokens::space::SM))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(2.0))
+                            .child(tab(
+                                "dock-tab-sessions",
+                                "Sessions".into(),
+                                DockTab::Sessions,
+                            ))
+                            .child(tab(
+                                "dock-tab-changes",
+                                if change_count > 0 {
+                                    format!("Changes {change_count}")
+                                } else {
+                                    "Changes".into()
+                                },
+                                DockTab::Changes,
+                            )),
+                    )
+                    .child(self.icon_button(
+                        "utility-dock-close",
+                        "×",
+                        cx.listener(|this, _, _, cx| this.toggle_utility_dock(cx)),
+                    )),
+            )
+            .child(body)
     }
 
     pub(super) fn open_settings(&mut self, cx: &mut Context<'_, Self>) {

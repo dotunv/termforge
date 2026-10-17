@@ -41,5 +41,5 @@ pub mod layout {
     pub const TAB_H: f32 = 30.0;
     pub const SIDEBAR_W: f32 = 240.0;
     pub const PALETTE_W: f32 = 640.0;
-    pub const STATUSBAR_H: f32 = 24.0;
+    pub const STATUSBAR_H: f32 = 22.0;
 }

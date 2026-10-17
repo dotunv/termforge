@@ -40,6 +40,7 @@ use crate::fonts::{ui_family, MonoFont};
 use crate::paint::{hsla, paint_grid, with_alpha, BlockMark, Metrics, Overlay, PaintArgs};
 use crate::panes::{Axis, Dir, PaneId, PaneTree, Rect as PaneRect};
 use crate::remote_session::{self, Attach, SessionHandle};
+use crate::surface::{self, DockTab, GitChange, Inspector};
 use crate::updates::UpdateNotice;
 use crate::workspace::{self, Layout, SavedPanes, SavedTab};
 
@@ -147,6 +148,8 @@ enum PaletteAction {
     ScrollBottom,
     CopyDiagnostics,
     ToggleSidebar,
+    ToggleContextPanel,
+    ToggleUtilityDock,
     OpenSettings,
     NewShell(usize),
     SetDefaultShell(usize),
@@ -254,6 +257,16 @@ const PALETTE_COMMANDS: &[(PaletteAction, &str, &str)] = &[
         PaletteAction::ToggleSidebar,
         "View: toggle sidebar",
         "Ctrl Shift B",
+    ),
+    (
+        PaletteAction::ToggleContextPanel,
+        "View: toggle context panel",
+        "Ctrl Shift I",
+    ),
+    (
+        PaletteAction::ToggleUtilityDock,
+        "View: toggle utility dock",
+        "Ctrl Shift J",
     ),
     (PaletteAction::OpenSettings, "Settings: open", "Ctrl ,"),
     (PaletteAction::PickTheme, "Appearance: choose theme…", ""),
@@ -437,8 +450,8 @@ impl Render for DragPreview {
 enum SidebarSection {
     Workspaces,
     SshHosts,
+    Worktrees,
     Tasks,
-    Project,
 }
 
 /// Project artifacts shown in the central workspace. These are deliberately
@@ -486,7 +499,7 @@ const ACCENTS: &[&str] = &[
 ];
 
 /// Sidebar widths offered in settings.
-const SIDEBAR_WIDTHS: &[(f32, &str)] = &[(200.0, "Narrow"), (248.0, "Normal"), (300.0, "Wide")];
+const SIDEBAR_WIDTHS: &[(f32, &str)] = &[(190.0, "Narrow"), (216.0, "Normal"), (260.0, "Wide")];
 
 pub struct TerminalView {
     session: Option<Arc<SessionHandle>>,
@@ -557,6 +570,16 @@ pub struct TerminalView {
     workspace_artifact: WorkspaceArtifact,
     /// Tool currently occupying the bottom dock.
     dock_tool: DockTool,
+    /// Optional inspector; a project opens directly on its working surface.
+    show_context_panel: bool,
+    dock_tab: DockTab,
+    changes: Option<Vec<GitChange>>,
+    changes_dir: Option<PathBuf>,
+    worktrees: Vec<surface::Worktree>,
+    inspector: Inspector,
+    diff_lines: Vec<String>,
+    /// Non-owning session switcher beneath the canvas.
+    show_utility_dock: bool,
     settings: Option<SettingsPage>,
     renaming: Option<RenameState>,
     account_editor: Option<accounts::AccountEditor>,
@@ -688,17 +711,25 @@ impl TerminalView {
             grid_bounds: Bounds::default(),
             computed_grid_size: None,
             drag_state: DragState::default(),
-            collapsed_sections: std::collections::HashSet::new(),
+            collapsed_sections: std::collections::HashSet::from([SidebarSection::Tasks]),
             show_sidebar: true,
             sidebar_hover: true,
             sidebar_peek: false,
-            sidebar_width: 248.0,
+            sidebar_width: 216.0,
             show_tab_strip: false,
             show_status_bar: true,
             terminal_maximized: false,
             dock_collapsed: false,
             workspace_artifact: WorkspaceArtifact::Overview,
             dock_tool: DockTool::Terminal,
+            show_context_panel: false,
+            dock_tab: DockTab::default(),
+            changes: None,
+            changes_dir: None,
+            worktrees: Vec::new(),
+            inspector: Inspector::default(),
+            diff_lines: Vec::new(),
+            show_utility_dock: false,
             settings: None,
             renaming: None,
             account_editor: None,
@@ -745,6 +776,7 @@ impl TerminalView {
                 break;
             }
         }));
+        view.refresh_worktrees();
         let update = cx.background_spawn(async { crate::updates::check() });
         view._update_check = Some(cx.spawn(async move |this, cx| match update.await {
             Ok(Some(notice)) => {
@@ -1232,20 +1264,20 @@ impl Render for TerminalView {
                     .flex()
                     .flex_col()
                     .bg(hsla(self.theme.bg_app))
+                    .min_w(px(0.0))
+                    .bg(hsla(self.theme.bg_app))
                     .child(self.header(cx))
                     .children(recovery_notice.map(|notice| {
                         div()
                             .id("recovery-notice")
-                            .h(px(34.0))
+                            .h(px(26.0))
                             .px(px(tokens::space::MD))
                             .flex()
                             .items_center()
                             .justify_between()
-                            .bg(hsla(self.theme.bg_panel))
-                            .border_b_1()
-                            .border_color(hsla(self.theme.border))
-                            .text_size(px(tokens::text::SM))
-                            .text_color(hsla(self.theme.text_muted))
+                            .bg(hsla(self.theme.bg_toolbar))
+                            .text_size(px(tokens::text::XS))
+                            .text_color(hsla(self.theme.text_faint))
                             .child(SharedString::from(notice))
                             .child(
                                 div()

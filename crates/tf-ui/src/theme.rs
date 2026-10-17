@@ -17,7 +17,7 @@ pub struct ThemeInput {
 impl ThemeInput {
     /// The default dark theme.
     pub const DARK: Self = Self {
-        base: Rgb::new(0x0f, 0x10, 0x11),
+        base: Rgb::new(0x0b, 0x0b, 0x0d),
         accent: Rgb::new(0x5e, 0x6a, 0xd2),
         contrast: 30,
     };
@@ -35,6 +35,10 @@ impl ThemeInput {
 pub struct Theme {
     pub is_dark: bool,
     pub bg_app: Rgb,
+    /// Left navigation surface: a tinted charcoal, distinct from the canvas.
+    pub bg_sidebar: Rgb,
+    /// Integrated toolbar and tab strip.
+    pub bg_toolbar: Rgb,
     pub bg_panel: Rgb,
     pub bg_elevated: Rgb,
     pub bg_hover: Rgb,
@@ -115,6 +119,9 @@ impl Theme {
 
         let bg_app = surface(0.0).to_rgb();
         let bg_panel = surface(0.012).to_rgb();
+        let bg_toolbar = surface(0.02).to_rgb();
+        let bg_sidebar =
+            Oklch::new(base.l + dir * 0.07 * (1.0 + k), 0.014, accent.h + 35.0).to_rgb();
         let bg_elevated = surface(0.03).to_rgb();
         let bg_hover = surface(0.045).to_rgb();
         let bg_selected = surface(0.07).to_rgb();
@@ -168,6 +175,8 @@ impl Theme {
         Self {
             is_dark,
             bg_app,
+            bg_sidebar,
+            bg_toolbar,
             bg_panel,
             bg_elevated,
             bg_hover,

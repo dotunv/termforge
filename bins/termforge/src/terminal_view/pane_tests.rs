@@ -393,3 +393,59 @@ async fn appearance_settings_update_the_live_view(cx: &mut TestAppContext) {
         assert_eq!(v.theme.accent, Rgb::new(0xff, 0x88, 0x00));
     });
 }
+
+#[gpui::test]
+async fn changes_dock_lists_files_and_opens_a_diff(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let repo = std::env::temp_dir().join(format!("tfrepo{}", std::process::id()));
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+    git(&["add", "."]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-qm",
+        "init",
+    ]);
+    std::fs::write(repo.join("a.txt"), "one\nhello\n").unwrap();
+
+    view.update(cx, |v, cx| {
+        let active = v.active_tab;
+        v.tabs[active].cwd = Some(repo.to_string_lossy().into_owned());
+        v.cwd = v.tabs[active].cwd.clone();
+        v.toggle_utility_dock(cx);
+        v.set_dock_tab(DockTab::Changes, cx);
+    });
+    redraw(cx);
+    let change = view.read_with(cx, |v, _| {
+        v.changes.as_ref().and_then(|c| c.first().cloned())
+    });
+    let change = change.expect("a.txt is modified");
+    assert_eq!(change.path, "a.txt");
+
+    view.update(cx, |v, cx| v.open_diff(&change, cx));
+    redraw(cx);
+    view.read_with(cx, |v, _| {
+        assert!(v.show_context_panel);
+        assert_eq!(v.inspector, Inspector::Diff("a.txt".into()));
+        assert!(
+            v.diff_lines.iter().any(|l| l == "+hello"),
+            "{:?}",
+            v.diff_lines
+        );
+    });
+    let _ = std::fs::remove_dir_all(&repo);
+}

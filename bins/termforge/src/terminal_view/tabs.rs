@@ -129,6 +129,7 @@ impl TerminalView {
         self.load_tab_state(tab);
         self.on_output(cx);
         self.persist_layout();
+        self.refresh_worktrees();
     }
 
     /// Make the view show the focused pane described by `tab`'s flat fields.
@@ -164,6 +165,22 @@ impl TerminalView {
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
         self.persist_layout();
+        cx.notify();
+    }
+
+    /// Open a local terminal rooted in another worktree of this repository.
+    pub(super) fn new_worktree_tab(&mut self, path: String, cx: &mut Context<'_, Self>) {
+        self.sync_active_tab();
+        self.spawn = self.local_spawn.clone();
+        let root = PathBuf::from(path);
+        self.spawn.cwd = Some(root.clone());
+        self.project_root = Some(root);
+        self.start_session(false);
+        let tab = self.current_tab();
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+        self.persist_layout();
+        self.refresh_worktrees();
         cx.notify();
     }
 

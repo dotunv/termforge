@@ -15,6 +15,7 @@ mod panes;
 mod perf;
 mod remote_session;
 mod suggest;
+mod surface;
 mod terminal_view;
 mod updates;
 mod workspace;

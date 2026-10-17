@@ -158,6 +158,8 @@ impl TerminalView {
             PaletteAction::NewShell(index) => self.new_shell_tab(index, cx),
             PaletteAction::SetDefaultShell(index) => self.set_default_shell(index, cx),
             PaletteAction::ToggleSidebar => self.toggle_sidebar(cx),
+            PaletteAction::ToggleContextPanel => self.toggle_context_panel(cx),
+            PaletteAction::ToggleUtilityDock => self.toggle_utility_dock(cx),
             PaletteAction::OpenSettings => self.open_settings(cx),
             PaletteAction::NewTask => self.open_task_form("", "", cx),
             PaletteAction::ListTasks => self.write(b"tf task list\r"),

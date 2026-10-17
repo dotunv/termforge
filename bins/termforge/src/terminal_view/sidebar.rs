@@ -69,16 +69,20 @@ impl TerminalView {
         let t = &self.theme;
         div()
             .id(id)
-            .h(px(32.0))
+            .h(px(29.0))
             .px(px(tokens::space::SM))
             .flex()
             .items_center()
             .justify_between()
             .gap(px(tokens::space::MD))
             .rounded(px(tokens::radius::MD))
-            .text_size(px(tokens::text::MD))
+            .text_size(px(tokens::text::SM))
             .text_color(hsla(t.text_muted))
-            .hover(|style| style.bg(hsla(t.bg_hover)).text_color(hsla(t.text)))
+            .hover(|style| {
+                style
+                    .bg(with_alpha(hsla(t.text), 0.06))
+                    .text_color(hsla(t.text))
+            })
             .on_click(on_click)
             .child(
                 div()
@@ -108,7 +112,7 @@ impl TerminalView {
         let t = &self.theme;
         let open = !self.collapsed_sections.contains(&section);
         div()
-            .h(px(26.0))
+            .h(px(22.0))
             .mt(px(tokens::space::SM))
             .px(px(tokens::space::SM))
             .flex()
@@ -125,7 +129,7 @@ impl TerminalView {
                     .text_color(hsla(t.text_faint))
                     .hover(|style| style.text_color(hsla(t.text)))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_section(section, cx)))
-                    .child(if open { "▾" } else { "▸" })
+                    .child(div().text_size(px(9.0)).child(if open { "▾" } else { "▸" }))
                     .child(title),
             )
             .children(action.map(|(action_id, glyph, handler)| {
@@ -234,13 +238,15 @@ impl TerminalView {
             .group(SharedString::from(format!("ws-row-{tab_id}")))
             .relative()
             .px(px(tokens::space::SM))
-            .py(px(6.0))
+            .py(px(5.0))
             .flex()
             .items_start()
             .gap(px(tokens::space::SM))
             .rounded(px(tokens::radius::MD))
-            .when(active, |d| d.bg(hsla(t.bg_selected)))
-            .when(!active, |d| d.hover(|style| style.bg(hsla(t.bg_hover))))
+            .when(active, |d| d.bg(with_alpha(hsla(t.text), 0.09)))
+            .when(!active, |d| {
+                d.hover(|style| style.bg(with_alpha(hsla(t.text), 0.05)))
+            })
             .drag_over::<DraggedWorkspace>(move |style, _, _, _| style.bg(hsla(hover_bg)))
             .on_drag(dragged, |dragged, _, _, cx| {
                 cx.new(|_| DragPreview(dragged.clone()))
@@ -254,16 +260,6 @@ impl TerminalView {
                 } else {
                     this.select_tab(index, cx);
                 }
-            }))
-            .children(ring.map(|color| {
-                div()
-                    .absolute()
-                    .left(px(0.0))
-                    .top(px(6.0))
-                    .bottom(px(6.0))
-                    .w(px(2.0))
-                    .rounded_full()
-                    .bg(hsla(color))
             }))
             .child(
                 div()
@@ -405,8 +401,8 @@ impl TerminalView {
         let workspaces_open = !self
             .collapsed_sections
             .contains(&SidebarSection::Workspaces);
+        let worktrees_open = !self.collapsed_sections.contains(&SidebarSection::Worktrees);
         let hosts_open = !self.collapsed_sections.contains(&SidebarSection::SshHosts);
-        let project_open = !self.collapsed_sections.contains(&SidebarSection::Project);
         let rows: Vec<_> = self
             .tabs
             .iter()
@@ -456,12 +452,11 @@ impl TerminalView {
             .flex_none()
             .flex()
             .flex_col()
-            .bg(hsla(t.bg_app))
-            .border_r_1()
-            .border_color(hsla(t.border))
+            .bg(hsla(t.bg_sidebar))
             .child(
                 div()
-                    .p(px(tokens::space::SM))
+                    .h(px(52.0))
+                    .px(px(tokens::space::SM))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -486,7 +481,6 @@ impl TerminalView {
                                     .child(SharedString::from(branch_hint)),
                             ),
                     )
-                    .child(self.context_badge("sidebar-context-badge", cx))
                     .children((attention_count > 0).then(|| {
                         div()
                             .id("sidebar-attention")
@@ -510,6 +504,7 @@ impl TerminalView {
             .child(
                 div()
                     .px(px(tokens::space::SM))
+                    .pb(px(tokens::space::SM))
                     .flex()
                     .flex_col()
                     .child(
@@ -533,7 +528,7 @@ impl TerminalView {
                     )
                     .child(self.sidebar_row(
                         "sidebar-palette",
-                        "⌘  Command palette",
+                        "⌘  Search",
                         "Ctrl Shift P",
                         cx.listener(|this, _, _, cx| this.open_palette(cx)),
                     )),
@@ -550,7 +545,7 @@ impl TerminalView {
                     .child(self.section_header(
                         SidebarSection::Workspaces,
                         "section-workspaces",
-                        "WORKSPACES",
+                        "Terminals",
                         Some(("section-workspaces-add", "+", new_tab_action)),
                         cx,
                     ))
@@ -560,7 +555,7 @@ impl TerminalView {
                     .child(self.section_header(
                         SidebarSection::SshHosts,
                         "section-hosts",
-                        "SSH HOSTS",
+                        "Connections",
                         Some(("section-hosts-refresh", "↻", refresh_hosts)),
                         cx,
                     ))
@@ -578,41 +573,67 @@ impl TerminalView {
                             d.child(div().flex().flex_col().children(hosts))
                         }
                     })
-                    .child(self.tasks_section(cx))
-                    .child(self.section_header(
-                        SidebarSection::Project,
-                        "section-project",
-                        "PROJECT",
-                        None,
-                        cx,
-                    ))
-                    .when(project_open, |d| {
-                        d.child(self.sidebar_row(
-                            "sidebar-find",
-                            "Find in terminal",
-                            "Ctrl Shift F",
-                            cx.listener(|this, _, _, cx| this.open_search(cx)),
+                    .when(self.worktrees.len() > 1, |d| {
+                        d.child(self.section_header(
+                            SidebarSection::Worktrees,
+                            "section-worktrees",
+                            "Worktrees",
+                            None,
+                            cx,
                         ))
-                        .child(self.sidebar_row(
-                            "sidebar-doctor",
-                            "Daemon diagnostics",
-                            "↗",
-                            cx.listener(|this, _, _, _| this.write(b"forged doctor\r")),
-                        ))
-                    }),
+                        .when(worktrees_open, |d| d.child(self.worktree_rows(cx)))
+                    })
+                    .child(self.tasks_section(cx)),
             )
             .child(
                 div()
-                    .p(px(tokens::space::SM))
-                    .border_t_1()
-                    .border_color(hsla(t.border))
+                    .px(px(tokens::space::SM))
+                    .py(px(6.0))
                     .child(self.sidebar_row(
                         "sidebar-settings",
-                        "⚙  Settings",
+                        "Settings",
                         "Ctrl ,",
                         cx.listener(|this, _, _, cx| this.open_settings(cx)),
                     )),
             )
+    }
+
+    fn worktree_rows(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let t = &self.theme;
+        let here = self
+            .repo_dir()
+            .map(|dir| dir.to_string_lossy().into_owned());
+        div()
+            .flex()
+            .flex_col()
+            .children(self.worktrees.iter().enumerate().map(|(index, wt)| {
+                let path = wt.path.clone();
+                let current = here.as_deref().is_some_and(|dir| dir.starts_with(&wt.path));
+                div()
+                    .id(("sidebar-worktree", index))
+                    .h(px(26.0))
+                    .px(px(tokens::space::SM))
+                    .flex()
+                    .items_center()
+                    .gap(px(tokens::space::SM))
+                    .rounded(px(tokens::radius::MD))
+                    .text_size(px(tokens::text::SM))
+                    .text_color(hsla(if current { t.text } else { t.text_muted }))
+                    .hover(|style| style.bg(with_alpha(hsla(t.text), 0.05)))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.new_worktree_tab(path.clone(), cx)),
+                    )
+                    .child(div().text_color(hsla(t.text_faint)).child("⎇"))
+                    .child(
+                        div().flex_1().overflow_hidden().whitespace_nowrap().child(
+                            SharedString::from(
+                                wt.branch
+                                    .clone()
+                                    .unwrap_or_else(|| Self::short_path(&wt.path)),
+                            ),
+                        ),
+                    )
+            }))
     }
 
     /// Dropdown listing the shells available on this machine.

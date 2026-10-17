@@ -91,6 +91,8 @@ macro_rules! color_slots {
 
 color_slots!(
     bg_app,
+    bg_sidebar,
+    bg_toolbar,
     bg_panel,
     bg_elevated,
     bg_hover,
