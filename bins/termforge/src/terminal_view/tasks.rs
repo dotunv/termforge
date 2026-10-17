@@ -32,7 +32,7 @@ pub(super) struct TaskForm {
 
 #[derive(Debug, Default)]
 pub(super) struct TasksState {
-    items: Vec<TaskInfo>,
+    pub(super) items: Vec<TaskInfo>,
     show_done: bool,
     form: Option<TaskForm>,
     /// Project-detected common commands.
@@ -70,6 +70,28 @@ fn state_glyph(state: TaskState) -> &'static str {
 }
 
 impl TerminalView {
+    pub(super) fn task_summary(&self) -> (usize, usize, usize) {
+        let open = self
+            .tasks
+            .items
+            .iter()
+            .filter(|task| task.state != TaskState::Done)
+            .count();
+        let active = self
+            .tasks
+            .items
+            .iter()
+            .filter(|task| task.state == TaskState::Active)
+            .count();
+        let blocked = self
+            .tasks
+            .items
+            .iter()
+            .filter(|task| task.state == TaskState::Blocked)
+            .count();
+        (open, active, blocked)
+    }
+
     /// Recompute file-based suggestions for the directory visible in the
     /// focused local terminal. OSC 7 cwd events and focus changes call this.
     pub(super) fn refresh_task_suggestions(&mut self) {
@@ -333,7 +355,7 @@ impl TerminalView {
         out
     }
 
-    fn task_row(
+    pub(super) fn task_row(
         &self,
         index: usize,
         task: &TaskInfo,

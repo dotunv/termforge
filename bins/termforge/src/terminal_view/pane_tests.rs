@@ -69,6 +69,33 @@ fn open(cx: &mut TestAppContext) -> (View, &mut VisualTestContext) {
 }
 
 #[gpui::test]
+async fn workbench_starts_project_first_and_terminal_can_maximize(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    view.read_with(cx, |view, _| {
+        assert!(
+            !view.show_tab_strip,
+            "terminal tabs do not masquerade as workspace artifacts"
+        );
+        assert_eq!(view.workspace_artifact, WorkspaceArtifact::Overview);
+        assert_eq!(view.dock_tool, DockTool::Terminal);
+        assert!(!view.dock_collapsed);
+        assert!(!view.terminal_maximized, "project overview is visible");
+    });
+
+    view.update(cx, |view, cx| view.toggle_terminal_maximized(cx));
+    redraw(cx);
+    assert!(view.read_with(cx, |view, _| view.terminal_maximized));
+
+    view.update(cx, |view, cx| view.toggle_terminal_maximized(cx));
+    redraw(cx);
+    assert!(!view.read_with(cx, |view, _| view.terminal_maximized));
+
+    view.update(cx, |view, cx| view.toggle_dock_collapsed(cx));
+    redraw(cx);
+    assert!(view.read_with(cx, |view, _| view.dock_collapsed));
+}
+
+#[gpui::test]
 async fn split_focus_and_close_by_keyboard(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
     let first = focused(&view, cx);

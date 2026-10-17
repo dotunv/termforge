@@ -57,6 +57,7 @@ mod sidebar;
 mod split;
 mod tabs;
 mod tasks;
+mod workbench;
 
 /// Search results beyond this are not collected, so a one-letter query in
 /// a full scrollback cannot stall the UI.
@@ -440,6 +441,25 @@ enum SidebarSection {
     Project,
 }
 
+/// Project artifacts shown in the central workspace. These are deliberately
+/// separate from terminal tabs: a shell session is a tool, not the workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum WorkspaceArtifact {
+    #[default]
+    Overview,
+    Tasks,
+    Sessions,
+}
+
+/// Tools hosted by the dock beneath the active workspace artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DockTool {
+    #[default]
+    Terminal,
+    Problems,
+    Output,
+}
+
 /// Pages of the settings panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum SettingsPage {
@@ -529,6 +549,14 @@ pub struct TerminalView {
     sidebar_width: f32,
     show_tab_strip: bool,
     show_status_bar: bool,
+    /// Give the terminal dock the whole center area without changing sessions.
+    terminal_maximized: bool,
+    /// Hide dock content while leaving its tool strip available.
+    dock_collapsed: bool,
+    /// Artifact currently occupying the project workspace.
+    workspace_artifact: WorkspaceArtifact,
+    /// Tool currently occupying the bottom dock.
+    dock_tool: DockTool,
     settings: Option<SettingsPage>,
     renaming: Option<RenameState>,
     account_editor: Option<accounts::AccountEditor>,
@@ -667,6 +695,10 @@ impl TerminalView {
             sidebar_width: 248.0,
             show_tab_strip: false,
             show_status_bar: true,
+            terminal_maximized: false,
+            dock_collapsed: false,
+            workspace_artifact: WorkspaceArtifact::Overview,
+            dock_tool: DockTool::Terminal,
             settings: None,
             renaming: None,
             account_editor: None,
@@ -1199,7 +1231,7 @@ impl Render for TerminalView {
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .bg(hsla(self.theme.term_bg))
+                    .bg(hsla(self.theme.bg_app))
                     .child(self.header(cx))
                     .children(recovery_notice.map(|notice| {
                         div()
@@ -1275,24 +1307,69 @@ impl Render for TerminalView {
                     }))
                     .child(
                         div()
-                            .id("terminal")
-                            .relative()
                             .flex_1()
-                            .overflow_hidden()
-                            .track_focus(&self.focus)
-                            .on_key_down(cx.listener(Self::key_down))
-                            .on_scroll_wheel(cx.listener(Self::scroll_wheel))
-                            .on_modifiers_changed(cx.listener(
-                                |this, ev: &gpui::ModifiersChangedEvent, window, cx| {
-                                    let at =
-                                        this.hit(window.mouse_position(), window).map(|(_, p)| p);
-                                    this.update_hover(ev.modifiers, at, cx);
-                                },
-                            ))
-                            .when_some(single_content, |d, (grid, error, exit)| {
-                                d.child(grid).children(error).children(exit)
-                            })
-                            .children(split_content.into_iter().flatten()),
+                            .min_h(px(0.0))
+                            .flex()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .flex()
+                                    .flex_col()
+                                    .when(!self.terminal_maximized, |d| {
+                                        d.child(self.workspace_tab_strip(cx))
+                                    })
+                                    .when(!self.terminal_maximized, |d| {
+                                        d.child(self.workspace_artifact_content(cx))
+                                    })
+                                    .child(self.terminal_panel_header(cx))
+                                    .when(!self.dock_collapsed, |d| {
+                                        d.child(
+                                        div()
+                                            .id("terminal")
+                                            .relative()
+                                            .overflow_hidden()
+                                            .bg(hsla(self.theme.term_bg))
+                                            .track_focus(&self.focus)
+                                            .on_key_down(cx.listener(Self::key_down))
+                                            .on_scroll_wheel(cx.listener(Self::scroll_wheel))
+                                            .on_modifiers_changed(cx.listener(
+                                                |this,
+                                                 ev: &gpui::ModifiersChangedEvent,
+                                                 window,
+                                                 cx| {
+                                                    let at = this
+                                                        .hit(window.mouse_position(), window)
+                                                        .map(|(_, p)| p);
+                                                    this.update_hover(ev.modifiers, at, cx);
+                                                },
+                                            ))
+                                            .when(self.terminal_maximized, |d| d.flex_1())
+                                            .when(!self.terminal_maximized, |d| {
+                                                d.h(px(236.0)).flex_none()
+                                            })
+                                            .when(self.dock_tool != DockTool::Terminal, |d| {
+                                                d.h(px(168.0)).flex_none()
+                                            })
+                                            .when_some(single_content, |d, (grid, error, exit)| {
+                                                if self.dock_tool == DockTool::Terminal {
+                                                    d.child(grid).children(error).children(exit)
+                                                } else {
+                                                    d
+                                                }
+                                            })
+                                            .when(self.dock_tool == DockTool::Terminal, |d| {
+                                                d.children(split_content.into_iter().flatten())
+                                            })
+                                            .when(self.dock_tool != DockTool::Terminal, |d| {
+                                                d.child(self.dock_placeholder())
+                                            }),
+                                    )
+                                    }),
+                            )
+                            .when(!self.terminal_maximized, |d| {
+                                d.child(self.workbench_inspector(cx))
+                            }),
                     )
                     .when(self.show_status_bar, |d| {
                         d.child(self.status_bar(self.computed_grid_size))
