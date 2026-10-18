@@ -1500,8 +1500,10 @@ impl Render for TerminalView {
                             )
                             .when(!self.terminal_maximized, |d| {
                                 d.child(self.workbench_inspector(cx))
+                            })
+                            .when(self.show_utility_dock, |d| {
+                                d.child(self.utility_dock(metrics, cx))
                             }),
-                            .when(self.show_utility_dock, |d| d.child(self.utility_dock(metrics, cx))),
                     )
                     .when(self.show_status_bar, |d| {
                         d.child(self.status_bar(self.computed_grid_size))
