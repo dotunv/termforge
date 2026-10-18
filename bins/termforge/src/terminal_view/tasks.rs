@@ -320,7 +320,7 @@ impl TerminalView {
 
     /// Everything to suggest right now: commands run repeatedly first, then
     /// common ones for this project, minus commands that are already tasks.
-    fn current_suggestions(&self) -> Vec<(String, String, String)> {
+    pub(super) fn current_suggestions(&self) -> Vec<(String, String, String)> {
         let existing = |command: &str| {
             self.tasks
                 .items

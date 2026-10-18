@@ -119,14 +119,20 @@ fn main() {
     Application::new().run(move |cx: &mut App| {
         let appearance = Appearance::load(cx);
         let bounds = Bounds::centered(None, size(px(1100.0), px(720.0)), cx);
+        // Linux draws its own titlebar so the toolbar and sidebar can reach
+        // the top edge. TERMFORGE_NATIVE_TITLEBAR=1 keeps the compositor's.
+        let client_decorations =
+            cfg!(target_os = "linux") && std::env::var_os("TERMFORGE_NATIVE_TITLEBAR").is_none();
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 app_id: Some("dev.termforge.TermForge".into()),
                 titlebar: Some(TitlebarOptions {
                     title: Some("TermForge".into()),
+                    appears_transparent: client_decorations,
                     ..Default::default()
                 }),
+                window_decorations: client_decorations.then_some(gpui::WindowDecorations::Client),
                 window_min_size: Some(size(px(360.0), px(220.0))),
                 ..Default::default()
             },

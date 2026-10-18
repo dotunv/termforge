@@ -18,7 +18,7 @@ impl TerminalView {
     }
 
     pub(super) fn write(&self, bytes: &[u8]) {
-        if let Some(s) = &self.session {
+        if let Some(s) = &self.input_session() {
             if let Err(e) = s.write(bytes) {
                 tracing::warn!("write to pty failed: {e:#}");
             }
@@ -26,7 +26,7 @@ impl TerminalView {
     }
 
     pub(super) fn modes(&self) -> tf_engine::Modes {
-        self.session
+        self.input_session()
             .as_ref()
             .map(|s| s.with(|p| p.engine().modes()))
             .unwrap_or_default()
@@ -377,6 +377,7 @@ impl TerminalView {
         cx: &mut Context<'_, Self>,
     ) {
         window.focus(&self.focus);
+        self.dock_focus = false;
         let Some((cell, at)) = self.hit(ev.position, window) else {
             return;
         };

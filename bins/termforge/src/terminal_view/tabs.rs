@@ -73,6 +73,7 @@ impl TerminalView {
             scroll_offset: 0,
             name: None,
             pinned: false,
+            managed: None,
             branch,
             attention: None,
             attention_note: None,
@@ -122,6 +123,12 @@ impl TerminalView {
         }
         self.sync_active_tab();
         self.renaming = None;
+        // Selecting a docked workspace moves it back to the canvas.
+        if self.dock_moved && self.dock_target == Some(self.tabs[index].id) {
+            self.dock_target = None;
+            self.dock_moved = false;
+            self.dock_focus = false;
+        }
         self.tabs[index].attention = None;
         self.tabs[index].attention_note = None;
         let tab = self.tabs[index].clone();
@@ -166,6 +173,153 @@ impl TerminalView {
         self.active_tab = self.tabs.len() - 1;
         self.persist_layout();
         cx.notify();
+    }
+
+    /// Re-read the projects the daemon has sessions for. Does IPC, so it is
+    /// called on project changes, never from render.
+    pub(super) fn refresh_projects(&mut self) {
+        let mut counts: Vec<(PathBuf, usize)> = Vec::new();
+        if let Some(known) = remote_session::load_workspace(None) {
+            for session in known.sessions.iter().filter(|s| s.running) {
+                let Some(root) = &session.project_root else {
+                    continue;
+                };
+                match counts.iter_mut().find(|(r, _)| r == root) {
+                    Some((_, n)) => *n += 1,
+                    None => counts.push((root.clone(), 1)),
+                }
+            }
+        }
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let mut projects: Vec<PathBuf> = counts.into_iter().map(|(root, _)| root).collect();
+        if let Some(current) = &self.local_project_root {
+            projects.retain(|root| root != current);
+            projects.insert(0, current.clone());
+        }
+        projects.truncate(8);
+        self.projects = projects;
+    }
+
+    /// Ask for a folder and make it the current project.
+    pub(super) fn open_project_dialog(&mut self, cx: &mut Context<'_, Self>) {
+        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open project".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else {
+                return;
+            };
+            let Some(root) = paths.first().and_then(|p| crate::project_root(Some(p))) else {
+                return;
+            };
+            let _ = this.update(cx, |view, cx| view.switch_project(root, cx));
+        })
+        .detach();
+    }
+
+    /// Make `root` the current project. Its own workspaces come back as they
+    /// were (live sessions reattached); the project being left keeps running
+    /// in the daemon with its layout saved, so switching back restores it.
+    pub(super) fn switch_project(&mut self, root: PathBuf, cx: &mut Context<'_, Self>) {
+        if self.local_project_root.as_ref() == Some(&root) {
+            return;
+        }
+        self.sync_active_tab();
+        self.persist_layout();
+        // Dropping the handles detaches; the daemon keeps the shells.
+        self.tabs.clear();
+        self.active_tab = 0;
+        self.session = None;
+        self.saved_layout.clear();
+        self.dock_target = None;
+        self.dock_moved = false;
+        self.dock_focus = false;
+        self.changes = None;
+        self.changes_dir = None;
+        self.inspector = Inspector::default();
+        self.diff_lines.clear();
+        self.local_project_root = Some(root.clone());
+        self.local_spawn.cwd = Some(root.clone());
+        self.project_root = Some(root.clone());
+        self.spawn = self.local_spawn.clone();
+        let has_live = remote_session::load_workspace(None).is_some_and(|known| {
+            known
+                .sessions
+                .iter()
+                .any(|s| s.running && s.project_root.as_ref() == Some(&root))
+        });
+        if !(has_live && self.restore_from_daemon(cx)) {
+            self.start_session(true);
+            let tab = self.current_tab();
+            self.tabs.push(tab);
+            self.active_tab = 0;
+        }
+        self.persist_layout();
+        self.refresh_worktrees();
+        self.refresh_projects();
+        self.refresh_tasks(cx);
+        cx.notify();
+    }
+
+    /// Launch `command` in a workspace of its own and track it as managed.
+    /// The command is typed into the shell like a user would; state is then
+    /// read back from the shell's marks, never assumed.
+    pub(super) fn start_managed(
+        &mut self,
+        title: String,
+        command: String,
+        agent: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.new_local_tab(cx);
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.name = Some(title);
+            tab.managed = Some(surface::Managed {
+                command: command.clone(),
+                agent,
+            });
+        }
+        self.write(format!("{command}\r").as_bytes());
+        self.persist_layout();
+        cx.notify();
+    }
+
+    pub(super) fn managed_state(tab: &WorkspaceTab) -> Option<surface::ProcessState> {
+        tab.managed.as_ref()?;
+        let session = tab.session.as_ref()?;
+        let last = session.with(|p| {
+            p.blocks()
+                .iter()
+                .filter(|b| b.output_line.is_some())
+                .last()
+                .map(|b| match b.state {
+                    tf_session::BlockState::Finished => surface::LastCommand::Finished(b.exit_code),
+                    _ => surface::LastCommand::Running,
+                })
+        });
+        Some(surface::process_state(session.exit_status(), last))
+    }
+
+    /// Interrupt a managed process (Ctrl-C into its own shell).
+    pub(super) fn stop_managed(&mut self, index: usize) {
+        if let Some(session) = self.tabs.get(index).and_then(|t| t.session.as_ref()) {
+            let _ = session.write(&[0x03]);
+        }
+    }
+
+    /// Run a managed process's command again. Only offered once the
+    /// previous run is no longer running.
+    pub(super) fn restart_managed(&mut self, index: usize) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        let (Some(managed), Some(session)) = (&tab.managed, &tab.session) else {
+            return;
+        };
+        let _ = session.write(format!("{}\r", managed.command).as_bytes());
     }
 
     /// Open a local terminal rooted in another worktree of this repository.
@@ -636,6 +790,7 @@ impl TerminalView {
                 DockTab::Sessions => "sessions",
                 DockTab::Changes => "changes",
                 DockTab::Output => "output",
+                DockTab::Processes => "processes",
             }
             .into(),
             panel_open: self.show_context_panel,
@@ -651,6 +806,7 @@ impl TerminalView {
         self.dock_height = (chrome.dock_height as f32).clamp(96.0, 520.0);
         self.dock_tab = match chrome.dock_tab.as_str() {
             "changes" => DockTab::Changes,
+            "processes" => DockTab::Processes,
             _ => DockTab::Sessions,
         };
         self.show_context_panel = chrome.panel_open;
@@ -689,6 +845,9 @@ impl TerminalView {
         let restored = self.restore_from_daemon(cx);
         if restored && self.dock_tab == DockTab::Changes {
             self.refresh_changes(cx);
+        }
+        if restored && self.dock_tab == DockTab::Processes {
+            self.set_dock_tab(DockTab::Processes, cx);
         }
         if !restored {
             self.start_session(true);
@@ -856,6 +1015,7 @@ impl TerminalView {
             })
             .sum::<usize>();
         if restored_count > 0 {
+            self.recovery_at = Some(std::time::Instant::now());
             self.recovery_notice = Some(format!(
                 "Recovered {restored_count} shell{} after the session host restarted. Layout and working directories were restored; processes and scrollback were restarted.",
                 if restored_count == 1 { "" } else { "s" }

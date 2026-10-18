@@ -215,6 +215,12 @@ impl TerminalView {
         if self.shells.len() > 1 && !is_ssh {
             subtitle = format!("{}  ·  {subtitle}", tab.spawn.profile.name);
         }
+        if let Some(managed) = &tab.managed {
+            subtitle = format!(
+                "{}  ·  {subtitle}",
+                if managed.agent { "agent" } else { "process" }
+            );
+        }
         let status = Self::tab_status_text(tab);
         let dot = self.tab_status_color(tab, active, t);
         let ring = tab.attention.map(|attention| attention.color(t));
@@ -401,6 +407,7 @@ impl TerminalView {
         let workspaces_open = !self
             .collapsed_sections
             .contains(&SidebarSection::Workspaces);
+        let projects_open = !self.collapsed_sections.contains(&SidebarSection::Projects);
         let worktrees_open = !self.collapsed_sections.contains(&SidebarSection::Worktrees);
         let hosts_open = !self.collapsed_sections.contains(&SidebarSection::SshHosts);
         let rows: Vec<_> = self
@@ -432,6 +439,10 @@ impl TerminalView {
                     .child(div().overflow_hidden().child(label))
             })
             .collect();
+        let open_project_action: ClickHandler = {
+            let view = cx.entity();
+            Box::new(move |_, _, cx| view.update(cx, |this, cx| this.open_project_dialog(cx)))
+        };
         let new_tab_action: ClickHandler = {
             let view = cx.entity();
             Box::new(move |_, _, cx| view.update(cx, |this, cx| this.new_local_tab(cx)))
@@ -455,13 +466,14 @@ impl TerminalView {
             .bg(hsla(t.bg_sidebar))
             .child(
                 div()
-                    .h(px(52.0))
+                    .h(px(56.0))
+                    .pt(px(tokens::space::XS))
                     .px(px(tokens::space::SM))
                     .flex()
                     .items_center()
                     .justify_between()
                     .child(
-                        div()
+                        self.drag_region("sidebar-drag")
                             .flex_1()
                             .min_w(px(0.0))
                             .px(px(tokens::space::SM))
@@ -543,6 +555,14 @@ impl TerminalView {
                     .flex()
                     .flex_col()
                     .child(self.section_header(
+                        SidebarSection::Projects,
+                        "section-projects",
+                        "Projects",
+                        Some(("section-projects-add", "+", open_project_action)),
+                        cx,
+                    ))
+                    .when(projects_open, |d| d.child(self.project_rows(cx)))
+                    .child(self.section_header(
                         SidebarSection::Workspaces,
                         "section-workspaces",
                         "Terminals",
@@ -596,6 +616,46 @@ impl TerminalView {
                         cx.listener(|this, _, _, cx| this.open_settings(cx)),
                     )),
             )
+    }
+
+    fn project_rows(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let t = &self.theme;
+        div()
+            .flex()
+            .flex_col()
+            .children(self.projects.iter().enumerate().map(|(index, root)| {
+                let current = self.local_project_root.as_ref() == Some(root);
+                let name = root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| root.to_string_lossy().into_owned());
+                let target = root.clone();
+                div()
+                    .id(("sidebar-project", index))
+                    .h(px(26.0))
+                    .px(px(tokens::space::SM))
+                    .flex()
+                    .items_center()
+                    .gap(px(tokens::space::SM))
+                    .rounded(px(tokens::radius::MD))
+                    .text_size(px(tokens::text::SM))
+                    .text_color(hsla(if current { t.text } else { t.text_muted }))
+                    .when(current, |d| d.bg(with_alpha(hsla(t.text), 0.09)))
+                    .when(!current, |d| {
+                        d.hover(|style| style.bg(with_alpha(hsla(t.text), 0.05)))
+                    })
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.switch_project(target.clone(), cx)),
+                    )
+                    .child(div().text_color(hsla(t.text_faint)).child("▤"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(SharedString::from(name)),
+                    )
+            }))
     }
 
     fn worktree_rows(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {

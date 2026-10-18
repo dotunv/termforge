@@ -335,6 +335,8 @@ struct WorkspaceTab {
     /// User-chosen name; overrides the terminal title.
     name: Option<String>,
     pinned: bool,
+    /// Set when TermForge launched this workspace to run a command.
+    managed: Option<surface::Managed>,
     branch: Option<String>,
     attention: Option<Attention>,
     attention_note: Option<String>,
@@ -466,6 +468,7 @@ enum SidebarSection {
     Workspaces,
     SshHosts,
     Worktrees,
+    Projects,
     Tasks,
 }
 
@@ -576,6 +579,8 @@ pub struct TerminalView {
     sidebar_peek: bool,
     sidebar_width: f32,
     show_tab_strip: bool,
+    /// The window draws its own titlebar controls (set each render).
+    client_decorated: bool,
     show_status_bar: bool,
     /// Give the terminal dock the whole center area without changing sessions.
     terminal_maximized: bool,
@@ -590,9 +595,17 @@ pub struct TerminalView {
     dock_tab: DockTab,
     changes: Option<Vec<GitChange>>,
     changes_dir: Option<PathBuf>,
+    /// Projects the daemon knows about, current first.
+    projects: Vec<PathBuf>,
     dock_height: f32,
+    /// Agent CLIs found on PATH, read when the Processes tab opens.
+    agent_clis: Vec<(&'static str, &'static str)>,
     /// Workspace whose output the dock's Output tab is watching.
     dock_target: Option<u64>,
+    /// The dock's session was moved there (interactive), not just watched.
+    dock_moved: bool,
+    /// Keystrokes go to the docked session instead of the canvas.
+    dock_focus: bool,
     panel_width: f32,
     edge_drag: Option<EdgeDrag>,
     worktrees: Vec<surface::Worktree>,
@@ -614,6 +627,8 @@ pub struct TerminalView {
     /// Honest continuity message when `forged` recreated shells rather than
     /// preserving their original processes.
     recovery_notice: Option<String>,
+    /// When the notice appeared; it clears itself so it never lingers.
+    recovery_at: Option<std::time::Instant>,
     update_notice: Option<UpdateNotice>,
     /// Client/account identity assigned to the local project.
     context_id: Option<String>,
@@ -736,7 +751,8 @@ impl TerminalView {
             sidebar_hover: true,
             sidebar_peek: false,
             sidebar_width: 216.0,
-            show_tab_strip: false,
+            show_tab_strip: true,
+            client_decorated: false,
             show_status_bar: true,
             terminal_maximized: false,
             dock_collapsed: false,
@@ -746,8 +762,12 @@ impl TerminalView {
             dock_tab: DockTab::default(),
             changes: None,
             changes_dir: None,
+            projects: Vec::new(),
             dock_height: 168.0,
+            agent_clis: Vec::new(),
             dock_target: None,
+            dock_moved: false,
+            dock_focus: false,
             panel_width: 320.0,
             edge_drag: None,
             worktrees: Vec::new(),
@@ -763,6 +783,7 @@ impl TerminalView {
             shell_menu: false,
             saved_layout: String::new(),
             recovery_notice: None,
+            recovery_at: None,
             update_notice: None,
             context_id,
             identity_check,
@@ -795,12 +816,32 @@ impl TerminalView {
                 if !picking && view.appearance.changed_on_disk() {
                     view.reload_appearance(cx);
                 }
+                if view
+                    .recovery_at
+                    .is_some_and(|at| at.elapsed() > std::time::Duration::from_secs(12))
+                {
+                    view.recovery_notice = None;
+                    view.recovery_at = None;
+                    cx.notify();
+                }
+                // Background shells do not notify on output, so poll the
+                // observed process state while it is on screen.
+                if view.show_utility_dock && view.dock_tab == DockTab::Processes {
+                    cx.notify();
+                }
             });
             if alive.is_err() {
                 break;
             }
         }));
         view.refresh_worktrees();
+        view.refresh_projects();
+        // Debug builds only: open chrome states for screenshot checks, e.g.
+        // TERMFORGE_DEBUG_UI=dock:changes,diff or dock:processes,panel.
+        #[cfg(debug_assertions)]
+        if let Ok(spec) = std::env::var("TERMFORGE_DEBUG_UI") {
+            view.debug_open(&spec, cx);
+        }
         let update = cx.background_spawn(async { crate::updates::check() });
         view._update_check = Some(cx.spawn(async move |this, cx| match update.await {
             Ok(Some(notice)) => {
@@ -813,6 +854,28 @@ impl TerminalView {
             Err(error) => tracing::warn!(%error, "update check failed"),
         }));
         view
+    }
+}
+
+#[cfg(debug_assertions)]
+impl TerminalView {
+    fn debug_open(&mut self, spec: &str, cx: &mut Context<'_, Self>) {
+        for part in spec.split(',') {
+            match part {
+                "dock:sessions" => self.set_dock_tab(DockTab::Sessions, cx),
+                "dock:changes" => self.set_dock_tab(DockTab::Changes, cx),
+                "dock:processes" => self.set_dock_tab(DockTab::Processes, cx),
+                "diff" => {
+                    if let Some(change) = self.changes.as_ref().and_then(|c| c.first().cloned()) {
+                        self.open_diff(&change, cx);
+                    }
+                }
+                "panel" => self.show_context_panel = true,
+                _ => {}
+            }
+        }
+        self.show_utility_dock = spec.contains("dock:");
+        cx.notify();
     }
 }
 
@@ -942,6 +1005,10 @@ struct Frame {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        self.client_decorated = matches!(
+            window.window_decorations(),
+            gpui::Decorations::Client { .. }
+        );
         let theme = Arc::clone(&self.theme);
         let metrics = self.metrics(window);
         let font = self.font.clone();
@@ -1440,6 +1507,7 @@ impl Render for TerminalView {
                         d.child(self.status_bar(self.computed_grid_size))
                     }),
             )
+            .when(self.client_decorated, |d| d.children(self.resize_edges()))
             // Absolute overlays must be painted after the workspace so their
             // hitboxes stay above its full-window terminal canvas.
             .when(!self.show_sidebar && self.sidebar_hover, |d| {

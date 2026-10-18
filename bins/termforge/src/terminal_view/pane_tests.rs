@@ -551,3 +551,99 @@ async fn dock_and_panel_state_round_trips_and_is_clamped(cx: &mut TestAppContext
         assert_eq!(v.panel_width, 240.0);
     });
 }
+
+#[gpui::test]
+async fn managed_process_state_is_observed_from_the_shell(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    view.update(cx, |v, cx| {
+        v.start_managed("echoer".into(), "echo tf-managed".into(), false, cx)
+    });
+    let index = view.read_with(cx, |v, _| v.active_tab);
+    view.read_with(cx, |v, _| {
+        let tab = &v.tabs[index];
+        assert_eq!(tab.name.as_deref(), Some("echoer"));
+        assert!(tab.managed.is_some());
+        assert!(!tab.managed.as_ref().unwrap().agent);
+    });
+    wait_for(cx, "the command to be observed finishing", |cx| {
+        view.read_with(cx, |v, _| {
+            TerminalView::managed_state(&v.tabs[index]) == Some(surface::ProcessState::Succeeded)
+        })
+    });
+    // A plain terminal is never reported as managed.
+    view.read_with(cx, |v, _| {
+        assert!(TerminalView::managed_state(&v.tabs[0]).is_none());
+    });
+}
+
+#[gpui::test]
+async fn docked_session_takes_input_and_moves_back(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    view.update(cx, |v, cx| v.new_local_tab(cx));
+    let (docked_id, docked_index) = view.read_with(cx, |v, _| (v.tabs[1].id, 1));
+    // Dock the workspace on the canvas: another one must take its place.
+    view.update(cx, |v, cx| v.move_to_dock(docked_id, cx));
+    redraw(cx);
+    view.read_with(cx, |v, _| {
+        assert_eq!(v.active_tab, 0, "the canvas switched to another workspace");
+        assert!(v.dock_moved && v.dock_focus && v.show_utility_dock);
+        let docked = v.docked().expect("docked session resolves");
+        assert_eq!(docked.0, docked_index);
+    });
+
+    view.read_with(cx, |v, _| v.write(b"echo tf-docked\r"));
+    wait_for(cx, "the command to run in the docked session", |cx| {
+        view.read_with(cx, |v, _| {
+            v.tabs[docked_index]
+                .session
+                .as_ref()
+                .is_some_and(|s| s.with(|p| p.blocks().finished()) >= 1)
+        })
+    });
+    view.read_with(cx, |v, _| {
+        let main = v.tabs[0].session.as_ref().unwrap();
+        assert_eq!(
+            main.with(|p| p.blocks().finished()),
+            0,
+            "the canvas session did not receive the keystrokes"
+        );
+    });
+
+    // Selecting it from anywhere moves it back, still the same session.
+    view.update(cx, |v, cx| v.select_tab(docked_index, cx));
+    view.read_with(cx, |v, _| {
+        assert!(!v.dock_moved && !v.dock_focus && v.dock_target.is_none());
+        assert_eq!(v.active_tab, docked_index);
+        assert_eq!(v.tabs.len(), 2, "no session was created or closed");
+    });
+}
+
+#[gpui::test]
+async fn switching_project_resets_per_project_state(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let root = std::env::temp_dir().join(format!("tfproj{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = dunce::canonicalize(&root).unwrap();
+    view.update(cx, |v, cx| {
+        v.new_local_tab(cx);
+        v.dock_target = Some(v.tabs[1].id);
+        v.dock_moved = true;
+        v.switch_project(root.clone(), cx);
+    });
+    redraw(cx);
+    view.read_with(cx, |v, _| {
+        assert_eq!(v.local_project_root.as_ref(), Some(&root));
+        assert_eq!(v.tabs.len(), 1, "the new project starts with one workspace");
+        assert!(v.dock_target.is_none() && !v.dock_moved);
+        assert_eq!(
+            v.projects.first(),
+            Some(&root),
+            "current project listed first"
+        );
+        assert!(v.session.is_some());
+    });
+    // Switching to the project already open is a no-op.
+    view.update(cx, |v, cx| v.switch_project(root.clone(), cx));
+    assert_eq!(view.read_with(cx, |v, _| v.tabs.len()), 1);
+    let _ = std::fs::remove_dir_all(&root);
+}

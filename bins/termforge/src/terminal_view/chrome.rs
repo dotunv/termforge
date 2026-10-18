@@ -61,6 +61,129 @@ impl TerminalView {
         }
     }
 
+    /// Empty strip that moves the window when dragged (client decorations
+    /// only; with server decorations the compositor owns the titlebar).
+    pub(super) fn drag_region(&self, id: &'static str) -> gpui::Stateful<gpui::Div> {
+        let region = div().id(id);
+        if !self.client_decorated {
+            return region;
+        }
+        region.on_mouse_down(MouseButton::Left, |ev: &MouseDownEvent, window, _| {
+            if ev.click_count >= 2 {
+                window.zoom_window();
+            } else {
+                window.start_window_move();
+            }
+        })
+    }
+
+    /// Minimise, maximise and close, drawn in the toolbar.
+    pub(super) fn window_controls(&self) -> impl IntoElement {
+        let t = &self.theme;
+        let button = |id: &'static str, glyph: &'static str, danger: bool| {
+            let hover = if danger {
+                with_alpha(hsla(t.danger), 0.85)
+            } else {
+                with_alpha(hsla(t.text), 0.08)
+            };
+            div()
+                .id(id)
+                .size(px(26.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(tokens::radius::SM))
+                .text_color(hsla(t.text_muted))
+                .hover(move |style| style.bg(hover).text_color(hsla(t.text)))
+                .child(glyph)
+        };
+        div()
+            .ml(px(tokens::space::SM))
+            .flex()
+            .items_center()
+            .child(
+                button("window-minimize", "–", false)
+                    .on_click(|_, window, _| window.minimize_window()),
+            )
+            .child(
+                button("window-maximize", "▢", false).on_click(|_, window, _| window.zoom_window()),
+            )
+            .child(
+                button("window-close", "×", true).on_click(|_, window, _| window.remove_window()),
+            )
+    }
+
+    /// Thin hit strips on the window edges so a borderless window can still
+    /// be resized.
+    pub(super) fn resize_edges(&self) -> Vec<gpui::AnyElement> {
+        use gpui::ResizeEdge as E;
+        const T: f32 = 5.0;
+        const C: f32 = 10.0;
+        let strip = |id: &'static str, edge: E| {
+            let d = div().id(id).absolute();
+            let d = match edge {
+                E::Top => d
+                    .top(px(0.0))
+                    .left(px(C))
+                    .right(px(C))
+                    .h(px(T))
+                    .cursor_row_resize(),
+                E::Bottom => d
+                    .bottom(px(0.0))
+                    .left(px(C))
+                    .right(px(C))
+                    .h(px(T))
+                    .cursor_row_resize(),
+                E::Left => d
+                    .left(px(0.0))
+                    .top(px(C))
+                    .bottom(px(C))
+                    .w(px(T))
+                    .cursor_col_resize(),
+                E::Right => d
+                    .right(px(0.0))
+                    .top(px(C))
+                    .bottom(px(C))
+                    .w(px(T))
+                    .cursor_col_resize(),
+                E::TopLeft => d
+                    .top(px(0.0))
+                    .left(px(0.0))
+                    .size(px(C))
+                    .cursor_nwse_resize(),
+                E::TopRight => d
+                    .top(px(0.0))
+                    .right(px(0.0))
+                    .size(px(C))
+                    .cursor_nesw_resize(),
+                E::BottomLeft => d
+                    .bottom(px(0.0))
+                    .left(px(0.0))
+                    .size(px(C))
+                    .cursor_nesw_resize(),
+                E::BottomRight => d
+                    .bottom(px(0.0))
+                    .right(px(0.0))
+                    .size(px(C))
+                    .cursor_nwse_resize(),
+            };
+            d.on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, window, _| {
+                window.start_window_resize(edge);
+            })
+            .into_any_element()
+        };
+        vec![
+            strip("resize-top", E::Top),
+            strip("resize-bottom", E::Bottom),
+            strip("resize-left", E::Left),
+            strip("resize-right", E::Right),
+            strip("resize-top-left", E::TopLeft),
+            strip("resize-top-right", E::TopRight),
+            strip("resize-bottom-left", E::BottomLeft),
+            strip("resize-bottom-right", E::BottomRight),
+        ]
+    }
+
     pub(super) fn header(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let t = &self.theme;
         let tab_count = self.tabs.len();
@@ -83,7 +206,6 @@ impl TerminalView {
                     .px(px(tokens::space::MD))
                     .flex()
                     .items_center()
-                    .justify_between()
                     .child(
                         div()
                             .flex()
@@ -113,6 +235,7 @@ impl TerminalView {
                             )
                             .child(self.context_badge("header-context-badge", cx)),
                     )
+                    .child(self.drag_region("header-drag").flex_1().h_full())
                     .child(
                         div()
                             .flex()
@@ -162,7 +285,8 @@ impl TerminalView {
                                 "⚙",
                                 cx.listener(|this, _, _, cx| this.open_settings(cx)),
                             )),
-                    ),
+                    )
+                    .when(self.client_decorated, |d| d.child(self.window_controls())),
             )
             .when(self.show_tab_strip, |header| {
                 header.child(
@@ -542,8 +666,194 @@ impl TerminalView {
             )
     }
 
+    /// Managed processes and agents with observed state, plus launchers.
+    fn dock_processes(&self, cx: &mut Context<'_, Self>) -> gpui::AnyElement {
+        let t = &self.theme;
+        let action = |id: SharedString, label: &'static str, color: Rgb| {
+            div()
+                .id(id)
+                .px(px(tokens::space::XS))
+                .rounded(px(tokens::radius::SM))
+                .text_size(px(tokens::text::XS))
+                .text_color(hsla(color))
+                .hover(|style| style.bg(with_alpha(hsla(t.text), 0.08)))
+                .child(label)
+        };
+        let running: Vec<_> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, tab)| Self::managed_state(tab).map(|state| (index, tab, state)))
+            .collect();
+        let mut launchers: Vec<(String, String, bool)> = self
+            .agent_clis
+            .iter()
+            .map(|(label, exe)| (format!("Agent: {label}"), (*exe).to_owned(), true))
+            .collect();
+        launchers.extend(
+            self.tasks
+                .items
+                .iter()
+                .filter(|task| task.state != tf_proto::TaskState::Done)
+                .filter_map(|task| Some((task.title.clone(), task.command.clone()?, false))),
+        );
+        div()
+            .id("utility-processes")
+            .flex_1()
+            .overflow_y_scroll()
+            .px(px(tokens::space::SM))
+            .py(px(tokens::space::XS))
+            .flex()
+            .flex_col()
+            .gap(px(1.0))
+            .children(running.into_iter().map(|(index, tab, state)| {
+                let managed = tab.managed.clone().expect("filtered on managed");
+                let color = match state {
+                    surface::ProcessState::Running => t.accent,
+                    surface::ProcessState::Succeeded => t.success,
+                    surface::ProcessState::Failed(_) => t.danger,
+                    _ => t.text_faint,
+                };
+                let can_restart = !matches!(
+                    state,
+                    surface::ProcessState::Running | surface::ProcessState::Pending
+                ) && !matches!(state, surface::ProcessState::SessionEnded(_));
+                let tab_id = tab.id;
+                div()
+                    .id(("process-row", tab.id as usize))
+                    .h(px(24.0))
+                    .px(px(tokens::space::SM))
+                    .flex()
+                    .items_center()
+                    .gap(px(tokens::space::SM))
+                    .rounded(px(tokens::radius::SM))
+                    .text_size(px(tokens::text::SM))
+                    .text_color(hsla(t.text_muted))
+                    .hover(|style| style.bg(with_alpha(hsla(t.text), 0.05)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.select_tab(index, cx)))
+                    .child(div().size(px(6.0)).rounded_full().bg(hsla(color)))
+                    .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(
+                        SharedString::from(format!(
+                            "{}{}",
+                            if managed.agent { "agent · " } else { "" },
+                            tab.name.clone().unwrap_or(managed.command)
+                        )),
+                    ))
+                    .child(
+                        div()
+                            .text_size(px(tokens::text::XS))
+                            .text_color(hsla(color))
+                            .child(SharedString::from(state.label())),
+                    )
+                    .when(state == surface::ProcessState::Running, |d| {
+                        d.child(
+                            action(format!("process-stop-{tab_id}").into(), "stop", t.warning)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.stop_managed(index);
+                                    cx.notify();
+                                })),
+                        )
+                    })
+                    .when(can_restart, |d| {
+                        d.child(
+                            action(
+                                format!("process-restart-{tab_id}").into(),
+                                "restart",
+                                t.accent,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.restart_managed(index);
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                    })
+            }))
+            .child(
+                div()
+                    .mt(px(tokens::space::XS))
+                    .px(px(tokens::space::SM))
+                    .text_size(px(tokens::text::XS))
+                    .text_color(hsla(t.text_faint))
+                    .child("Start"),
+            )
+            .children(
+                launchers
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (title, command, agent))| {
+                        let label = SharedString::from(format!("▶  {title}"));
+                        div()
+                            .id(("process-start", i))
+                            .h(px(22.0))
+                            .px(px(tokens::space::SM))
+                            .flex()
+                            .items_center()
+                            .rounded(px(tokens::radius::SM))
+                            .text_size(px(tokens::text::SM))
+                            .text_color(hsla(t.text_muted))
+                            .hover(|style| style.bg(with_alpha(hsla(t.text), 0.05)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.start_managed(title.clone(), command.clone(), agent, cx)
+                            }))
+                            .child(label)
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// The workspace shown in the dock, other than the one on the canvas.
+    pub(super) fn docked(&self) -> Option<(usize, Arc<SessionHandle>)> {
+        let id = self.dock_target?;
+        let (index, tab) = self.tabs.iter().enumerate().find(|(_, tab)| tab.id == id)?;
+        (index != self.active_tab)
+            .then(|| tab.session.clone().map(|session| (index, session)))
+            .flatten()
+    }
+
+    /// Where keystrokes go: the docked session while the dock has focus.
+    pub(super) fn input_session(&self) -> Option<Arc<SessionHandle>> {
+        if self.dock_focus
+            && self.dock_moved
+            && self.show_utility_dock
+            && self.dock_tab == DockTab::Output
+        {
+            if let Some((_, session)) = self.docked() {
+                return Some(session);
+            }
+        }
+        self.session.clone()
+    }
+
+    /// Show a workspace in the dock instead of on the canvas. The session is
+    /// the same one: nothing is spawned, and selecting it moves it back.
+    pub(super) fn move_to_dock(&mut self, tab_id: u64, cx: &mut Context<'_, Self>) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
+        if self.tabs.len() < 2 {
+            return;
+        }
+        if index == self.active_tab {
+            // The canvas needs something else to show.
+            let other = if index == 0 { 1 } else { index - 1 };
+            self.select_tab(other, cx);
+        }
+        self.dock_target = Some(tab_id);
+        self.dock_moved = true;
+        self.dock_focus = true;
+        self.dock_tab = DockTab::Output;
+        self.show_utility_dock = true;
+        cx.notify();
+    }
+
     pub(super) fn watch_in_dock(&mut self, tab_id: u64, cx: &mut Context<'_, Self>) {
         self.dock_target = Some(tab_id);
+        self.dock_moved = false;
+        self.dock_focus = false;
         self.dock_tab = DockTab::Output;
         self.show_utility_dock = true;
         cx.notify();
@@ -553,11 +863,7 @@ impl TerminalView {
     /// session the sidebar lists: no process is created or restarted.
     fn dock_output(&self, metrics: Metrics, cx: &mut Context<'_, Self>) -> gpui::AnyElement {
         let t = &self.theme;
-        let target = self
-            .dock_target
-            .and_then(|id| self.tabs.iter().enumerate().find(|(_, tab)| tab.id == id))
-            .filter(|(index, _)| *index != self.active_tab)
-            .and_then(|(index, tab)| tab.session.clone().map(|session| (index, session)));
+        let target = self.docked();
         let Some((index, session)) = target else {
             return div()
                 .p(px(tokens::space::MD))
@@ -600,14 +906,62 @@ impl TerminalView {
             },
         )
         .size_full();
+        let moved = self.dock_moved;
+        let focused = self.dock_focus;
+        let name = self
+            .tabs
+            .get(index)
+            .map(|tab| tab.name.clone().unwrap_or_else(|| Self::tab_label(tab)))
+            .unwrap_or_default();
         div()
-            .id("utility-output")
             .flex_1()
             .min_h(px(0.0))
-            .overflow_hidden()
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| this.select_tab(index, cx)))
-            .child(plain)
+            .flex()
+            .flex_col()
+            .when(moved, |d| {
+                d.child(
+                    div()
+                        .h(px(20.0))
+                        .px(px(tokens::space::MD))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .text_size(px(tokens::text::XS))
+                        .text_color(hsla(if focused { t.accent } else { t.text_faint }))
+                        .child(SharedString::from(format!(
+                            "{name} · docked{}",
+                            if focused { " · typing here" } else { "" }
+                        )))
+                        .child(
+                            div()
+                                .id("dock-restore")
+                                .px(px(tokens::space::XS))
+                                .rounded(px(tokens::radius::SM))
+                                .hover(|style| style.bg(with_alpha(hsla(t.text), 0.08)))
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.select_tab(index, cx)),
+                                )
+                                .child("move to canvas"),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .id("utility-output")
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_hidden()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.dock_moved {
+                            this.dock_focus = true;
+                            cx.notify();
+                        } else {
+                            this.select_tab(index, cx);
+                        }
+                    }))
+                    .child(plain),
+            )
             .into_any_element()
     }
 
@@ -629,6 +983,13 @@ impl TerminalView {
         self.dock_tab = tab;
         if tab == DockTab::Changes {
             self.refresh_changes(cx);
+        }
+        if tab == DockTab::Processes {
+            self.agent_clis = surface::AGENT_CLIS
+                .iter()
+                .copied()
+                .filter(|(_, exe)| surface::on_path(exe))
+                .collect();
         }
         self.persist_layout();
         cx.notify();
@@ -710,7 +1071,7 @@ impl TerminalView {
                     .id("context-panel-body")
                     .flex_1()
                     .min_h(px(0.0))
-                    .overflow_y_scroll()
+                    .overflow_scroll()
                     .child(body),
             )
     }
@@ -803,6 +1164,7 @@ impl TerminalView {
     ) -> impl IntoElement {
         let t = &self.theme;
         let edge = self.edge_handle("utility-dock-edge", Edge::Dock, cx);
+        let processes = (self.dock_tab == DockTab::Processes).then(|| self.dock_processes(cx));
         let output = (self.dock_tab == DockTab::Output).then(|| self.dock_output(metrics, cx));
         let change_count = self.changes.as_ref().map_or(0, Vec::len);
         let tab = |id: &'static str, label: String, which: DockTab| {
@@ -858,6 +1220,21 @@ impl TerminalView {
                                         .text_color(hsla(t.text_faint))
                                         .child(SharedString::from(branch)),
                                 )
+                                .child({
+                                    let tab_id = tab.id;
+                                    div()
+                                        .id(("utility-dock-move", tab.id as usize))
+                                        .px(px(tokens::space::XS))
+                                        .rounded(px(tokens::radius::SM))
+                                        .text_size(px(tokens::text::XS))
+                                        .text_color(hsla(t.accent))
+                                        .hover(|style| style.bg(with_alpha(hsla(t.text), 0.08)))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.move_to_dock(tab_id, cx);
+                                        }))
+                                        .child("dock")
+                                })
                                 .when(!active, |d| {
                                     let tab_id = tab.id;
                                     d.child(
@@ -879,6 +1256,7 @@ impl TerminalView {
                 }))
                 .into_any_element(),
             DockTab::Output => output.unwrap_or_else(|| div().into_any_element()),
+            DockTab::Processes => processes.unwrap_or_else(|| div().into_any_element()),
             DockTab::Changes => match &self.changes {
                 None => div()
                     .p(px(tokens::space::MD))
@@ -961,7 +1339,11 @@ impl TerminalView {
             .flex_col()
             .bg(hsla(t.bg_panel))
             .border_t_1()
-            .border_color(hsla(t.border))
+            .border_color(hsla(if self.dock_focus && self.dock_moved {
+                t.accent
+            } else {
+                t.border
+            }))
             .child(edge)
             .child(
                 div()
@@ -988,7 +1370,12 @@ impl TerminalView {
                                 },
                                 DockTab::Changes,
                             ))
-                            .child(tab("dock-tab-output", "Output".into(), DockTab::Output)),
+                            .child(tab(
+                                "dock-tab-processes",
+                                "Processes".into(),
+                                DockTab::Processes,
+                            ))
+                            .child(tab("dock-tab-output", "Terminal".into(), DockTab::Output)),
                     )
                     .child(self.icon_button(
                         "utility-dock-close",

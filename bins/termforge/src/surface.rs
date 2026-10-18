@@ -17,6 +17,8 @@ pub enum DockTab {
     Changes,
     /// Live output of another workspace's session (read-only view).
     Output,
+    /// Processes and agents TermForge launched, with observed state.
+    Processes,
 }
 
 /// What the optional right panel inspects.
@@ -94,7 +96,7 @@ pub fn parse_porcelain(raw: &str) -> Vec<GitChange> {
 /// in a repository or `git` is unavailable, which is distinct from "clean".
 pub fn git_changes(dir: &Path) -> Option<Vec<GitChange>> {
     let out = Command::new("git")
-        .args(["status", "--porcelain=v1", "-z"])
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
         .current_dir(dir)
         .output()
         .ok()?;
@@ -122,6 +124,84 @@ pub fn git_diff(dir: &Path, path: &str, untracked: bool) -> Option<String> {
     let out = cmd.current_dir(dir).output().ok()?;
     // `--no-index` exits 1 when files differ.
     (out.status.success() || untracked).then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// A command TermForge launched into a workspace of its own. TermForge only
+/// claims control of what it started: it types the command into that shell
+/// and observes the shell's own command marks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Managed {
+    pub command: String,
+    /// A coding-agent CLI rather than a development service.
+    pub agent: bool,
+}
+
+/// The last command a shell reported through OSC 133 marks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LastCommand {
+    Running,
+    Finished(Option<i32>),
+}
+
+/// What can actually be observed about a managed process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessState {
+    /// The shell has not reported a command yet (still starting, or the
+    /// shell has no integration, in which case nothing more is knowable).
+    Pending,
+    Running,
+    Succeeded,
+    Failed(i32),
+    /// The shell session itself ended.
+    SessionEnded(Option<u32>),
+}
+
+pub fn process_state(ended: Option<Option<u32>>, last: Option<LastCommand>) -> ProcessState {
+    if let Some(code) = ended {
+        return ProcessState::SessionEnded(code);
+    }
+    match last {
+        None => ProcessState::Pending,
+        Some(LastCommand::Running) => ProcessState::Running,
+        Some(LastCommand::Finished(Some(code))) if code != 0 => ProcessState::Failed(code),
+        Some(LastCommand::Finished(_)) => ProcessState::Succeeded,
+    }
+}
+
+impl ProcessState {
+    pub fn label(self) -> String {
+        match self {
+            Self::Pending => "waiting for shell".into(),
+            Self::Running => "running".into(),
+            Self::Succeeded => "finished".into(),
+            Self::Failed(code) => format!("failed ({code})"),
+            Self::SessionEnded(Some(code)) => format!("session ended ({code})"),
+            Self::SessionEnded(None) => "session ended".into(),
+        }
+    }
+}
+
+/// Coding-agent CLIs offered when found on `PATH`: (label, executable).
+pub const AGENT_CLIS: &[(&str, &str)] = &[
+    ("Claude Code", "claude"),
+    ("Codex", "codex"),
+    ("Gemini CLI", "gemini"),
+];
+
+/// Whether `name` resolves to a file in one of the `PATH` directories.
+pub fn on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let exts: &[&str] = if cfg!(windows) {
+        &["", ".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
+    std::env::split_paths(&path).any(|dir| {
+        exts.iter()
+            .any(|ext| dir.join(format!("{name}{ext}")).is_file())
+    })
 }
 
 /// One checked-out worktree of a repository.
@@ -223,6 +303,35 @@ mod tests {
         assert_eq!(wt[0].branch.as_deref(), Some("main"));
         assert_eq!(wt[1].branch, None);
         assert_eq!(wt[1].path, "/b");
+    }
+
+    #[test]
+    fn process_state_reports_only_what_was_observed() {
+        use LastCommand::*;
+        assert_eq!(process_state(None, None), ProcessState::Pending);
+        assert_eq!(process_state(None, Some(Running)), ProcessState::Running);
+        assert_eq!(
+            process_state(None, Some(Finished(Some(0)))),
+            ProcessState::Succeeded
+        );
+        assert_eq!(
+            process_state(None, Some(Finished(None))),
+            ProcessState::Succeeded
+        );
+        assert_eq!(
+            process_state(None, Some(Finished(Some(2)))),
+            ProcessState::Failed(2)
+        );
+        // A dead session wins over any earlier command mark.
+        assert_eq!(
+            process_state(Some(Some(1)), Some(Running)),
+            ProcessState::SessionEnded(Some(1))
+        );
+    }
+
+    #[test]
+    fn missing_executable_is_not_on_path() {
+        assert!(!on_path("definitely-not-a-real-binary-xyz"));
     }
 
     #[test]
