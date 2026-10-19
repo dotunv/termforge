@@ -73,8 +73,8 @@ async fn workbench_starts_project_first_and_terminal_can_maximize(cx: &mut TestA
     let (view, cx) = open(cx);
     view.read_with(cx, |view, _| {
         assert!(
-            !view.show_tab_strip,
-            "terminal tabs do not masquerade as workspace artifacts"
+            view.show_tab_strip,
+            "terminal tabs remain visible in their own header strip"
         );
         assert_eq!(view.workspace_artifact, WorkspaceArtifact::Overview);
         assert_eq!(view.dock_tool, DockTool::Terminal);
@@ -128,6 +128,51 @@ async fn split_focus_and_close_by_keyboard(cx: &mut TestAppContext) {
     assert_eq!(focused(&view, cx), first);
     // Closing the last pane would close the workspace; the layout is intact.
     assert_eq!(view.read_with(cx, |v, _| v.tabs.len()), 1);
+}
+
+#[gpui::test]
+async fn pane_focus_swaps_sessions_and_close_promotes_the_sibling(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let first = focused(&view, cx);
+    let first_session = view.read_with(cx, |v, _| {
+        v.session
+            .as_ref()
+            .cloned()
+            .expect("initial pane has a session handle")
+    });
+
+    view.update(cx, |v, cx| v.split_pane(Axis::Horizontal, cx));
+    let second = focused(&view, cx);
+    let second_session = view.read_with(cx, |v, _| {
+        v.session
+            .as_ref()
+            .cloned()
+            .expect("new pane has a session handle")
+    });
+    assert!(!Arc::ptr_eq(&first_session, &second_session));
+
+    view.update(cx, |v, cx| v.focus_pane(first, cx));
+    view.read_with(cx, |v, _| {
+        assert_eq!(v.tabs[v.active_tab].layout.focused(), first);
+        assert!(Arc::ptr_eq(v.session.as_ref().unwrap(), &first_session));
+        assert!(Arc::ptr_eq(
+            v.tabs[v.active_tab].panes[&second]
+                .session
+                .as_ref()
+                .unwrap(),
+            &second_session,
+        ));
+    });
+
+    // Closing the focused pane promotes the exact parked sibling; it does
+    // not create a replacement shell or leave the closed pane in the tree.
+    view.update(cx, |v, cx| v.close_pane(cx));
+    view.read_with(cx, |v, _| {
+        let tab = &v.tabs[v.active_tab];
+        assert_eq!(tab.layout.ids(), vec![second]);
+        assert!(tab.panes.is_empty());
+        assert!(Arc::ptr_eq(v.session.as_ref().unwrap(), &second_session));
+    });
 }
 
 #[gpui::test]

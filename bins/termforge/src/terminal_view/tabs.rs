@@ -3,6 +3,15 @@
 use super::*;
 
 impl TerminalView {
+    /// Close a local handle without making the lifecycle caller responsible
+    /// for logging and error policy. The daemon may already have ended it,
+    /// which is not a reason to abandon the rest of a tab/pane transition.
+    pub(super) fn close_session_handle(session: &SessionHandle, subject: &str) {
+        if let Err(error) = session.close() {
+            tracing::warn!(%error, %subject, "failed to close terminal session");
+        }
+    }
+
     pub(super) fn start_session(&mut self, reattach: bool) {
         self.start_session_as(if reattach {
             Attach::Matching
@@ -41,9 +50,7 @@ impl TerminalView {
 
     pub(super) fn start(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(session) = &self.session {
-            if let Err(error) = session.close() {
-                tracing::warn!(%error, "failed to close session before restart");
-            }
+            Self::close_session_handle(session, "before restart");
         }
         self.session = None;
         self.start_session(true);
@@ -386,17 +393,13 @@ impl TerminalView {
 
     pub(super) fn close_active_tab(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(session) = &self.session {
-            if let Err(error) = session.close() {
-                tracing::warn!(%error, "failed to close tab session");
-            }
+            Self::close_session_handle(session, "workspace tab");
         }
         self.session = None;
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             for slot in tab.panes.drain().map(|(_, slot)| slot) {
                 if let Some(session) = slot.session {
-                    if let Err(error) = session.close() {
-                        tracing::warn!(%error, "failed to close pane session");
-                    }
+                    Self::close_session_handle(&session, "parked pane");
                 }
             }
             tab.layout = PaneTree::new(tab.layout.focused());

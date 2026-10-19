@@ -2,77 +2,174 @@
 
 use super::*;
 
+/// A command as presented by the palette. Keeping the search metadata beside
+/// the rendered text means filters do not have to reverse-engineer action
+/// labels at every call site.
+#[derive(Debug, Clone)]
+struct PaletteCommand {
+    action: PaletteAction,
+    label: String,
+    shortcut: String,
+    category: PaletteCategory,
+}
+
+impl PaletteCommand {
+    fn command(
+        action: PaletteAction,
+        label: impl Into<String>,
+        shortcut: impl Into<String>,
+    ) -> Self {
+        Self {
+            action,
+            category: PaletteCategory::Other,
+            label: label.into(),
+            shortcut: shortcut.into(),
+        }
+    }
+
+    fn ssh(action: PaletteAction, label: impl Into<String>) -> Self {
+        Self {
+            action,
+            label: label.into(),
+            shortcut: String::new(),
+            category: PaletteCategory::Ssh,
+        }
+    }
+
+    fn picker(action: PaletteAction, item: &PickerItem) -> Self {
+        Self {
+            action,
+            label: item.label.clone(),
+            shortcut: item.hint.clone(),
+            category: PaletteCategory::Other,
+        }
+    }
+
+    fn matches(&self, filter: &PaletteFilter) -> bool {
+        filter
+            .category
+            .is_none_or(|category| category == self.category)
+            && (filter.needle.is_empty()
+                || self.label.to_ascii_lowercase().contains(&filter.needle)
+                || self.shortcut.to_ascii_lowercase().contains(&filter.needle))
+    }
+
+    fn into_tuple(self) -> (PaletteAction, String, String) {
+        (self.action, self.label, self.shortcut)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteCategory {
+    Ssh,
+    Other,
+}
+
+/// A leading `ssh:` is a deliberate scope selector, rather than an accidental
+/// consequence of every SSH command label beginning with the same word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PaletteFilter {
+    category: Option<PaletteCategory>,
+    needle: String,
+}
+
+impl PaletteFilter {
+    fn parse(query: &str) -> Self {
+        let query = query.trim().to_ascii_lowercase();
+        let (category, needle) = match query.strip_prefix("ssh:") {
+            Some(needle) => (Some(PaletteCategory::Ssh), needle.trim().to_owned()),
+            None => (None, query),
+        };
+        Self { category, needle }
+    }
+}
+
 impl TerminalView {
     pub(super) fn filtered_palette_commands(&self) -> Vec<(PaletteAction, String, String)> {
-        let query = self
-            .palette
-            .as_ref()
-            .map(|palette| palette.query.to_ascii_lowercase())
-            .unwrap_or_default();
+        let filter = PaletteFilter::parse(
+            self.palette
+                .as_ref()
+                .map(|palette| palette.query.as_str())
+                .unwrap_or_default(),
+        );
         if let Some(palette) = self
             .palette
             .as_ref()
             .filter(|palette| palette.mode != PickerMode::Commands)
         {
-            let mode = palette.mode;
             return palette
                 .items
                 .iter()
-                .filter(|item| query.is_empty() || item.label.to_ascii_lowercase().contains(&query))
                 .map(|item| {
-                    let action = match mode {
+                    let action = match palette.mode {
                         PickerMode::Themes => PaletteAction::SetTheme(item.value.clone()),
                         PickerMode::MonoFonts => PaletteAction::SetMonoFont(item.value.clone()),
                         PickerMode::UiFonts => PaletteAction::SetUiFont(item.value.clone()),
                         PickerMode::Contexts => PaletteAction::SetContext(item.value.clone()),
                         PickerMode::Commands => unreachable!("command mode handled above"),
                     };
-                    (action, item.label.clone(), item.hint.clone())
+                    PaletteCommand::picker(action, item)
                 })
+                .filter(|command| command.matches(&filter))
+                .map(PaletteCommand::into_tuple)
                 .collect();
         }
-        let mut commands: Vec<_> = PALETTE_COMMANDS
+        self.palette_commands()
+            .into_iter()
+            .filter(|command| command.matches(&filter))
+            .map(PaletteCommand::into_tuple)
+            .collect()
+    }
+
+    fn palette_commands(&self) -> Vec<PaletteCommand> {
+        let mut commands = PALETTE_COMMANDS
             .iter()
             .cloned()
-            .map(|(action, label, shortcut)| (action, label.to_owned(), shortcut.to_owned()))
-            .collect();
+            .map(|(action, label, shortcut)| PaletteCommand::command(action, label, shortcut))
+            .collect::<Vec<_>>();
         if self.spawn.ssh_host.is_some() {
-            commands.push((
+            commands.push(PaletteCommand::command(
                 PaletteAction::SwitchLocal,
-                "Workspace: switch to local".into(),
-                String::new(),
+                "Workspace: switch to local",
+                "",
             ));
             if let Some(host) = self.spawn.ssh_host.clone() {
-                commands.push((
+                commands.push(PaletteCommand::ssh(
                     PaletteAction::CopyRemoteIntegration(host),
-                    "SSH: copy Bash integration bootstrap".into(),
-                    String::new(),
+                    "SSH: copy Bash integration bootstrap",
                 ));
             }
         }
         for (index, shell) in self.shells.iter().enumerate() {
-            commands.push((
+            commands.push(PaletteCommand::command(
                 PaletteAction::NewShell(index),
                 format!("Shell: new {} terminal", shell.name),
-                String::new(),
+                "",
             ));
-            commands.push((
+            commands.push(PaletteCommand::command(
                 PaletteAction::SetDefaultShell(index),
                 format!("Shell: use {} for new terminals", shell.name),
-                String::new(),
+                "",
             ));
         }
-        commands.extend(self.ssh_hosts.iter().map(|host| {
-            (
+        let mut ssh_hosts = self.ssh_hosts.clone();
+        ssh_hosts.sort_unstable_by_key(|host| host.to_ascii_lowercase());
+        ssh_hosts.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        commands.extend(ssh_hosts.into_iter().map(|host| {
+            PaletteCommand::ssh(
                 PaletteAction::ConnectSsh(host.clone()),
                 format!("SSH: connect to {host}"),
-                String::new(),
             )
         }));
         commands
-            .into_iter()
-            .filter(|(_, label, _)| query.is_empty() || label.to_ascii_lowercase().contains(&query))
-            .collect()
+    }
+
+    fn normalize_palette_selection(palette: &mut PaletteState, command_count: usize) {
+        palette.selected = if command_count == 0 {
+            0
+        } else {
+            palette.selected.min(command_count - 1)
+        };
     }
 
     pub(super) fn palette_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<'_, Self>) -> bool {
@@ -88,6 +185,7 @@ impl TerminalView {
         let Some(palette) = &mut self.palette else {
             return false;
         };
+        Self::normalize_palette_selection(palette, count);
         let picker = palette.mode != PickerMode::Commands;
         match key {
             "escape" => {
@@ -100,7 +198,7 @@ impl TerminalView {
             "up" if count > 0 => palette.selected = (palette.selected + count - 1) % count,
             "down" if count > 0 => palette.selected = (palette.selected + 1) % count,
             "enter" if count > 0 => {
-                let action = commands[palette.selected.min(count - 1)].0.clone();
+                let action = commands[palette.selected].0.clone();
                 self.palette = None;
                 self.run_palette_action(action, cx);
             }
@@ -205,7 +303,12 @@ impl TerminalView {
         let palette = self.palette.as_ref()?;
         let commands = self.filtered_palette_commands();
         let command_count = commands.len();
-        let visible_start = palette.selected.saturating_sub(7);
+        let selected = if command_count == 0 {
+            0
+        } else {
+            palette.selected.min(command_count - 1)
+        };
+        let visible_start = selected.saturating_sub(7);
         let t = &self.theme;
         let mode = palette.mode;
         let query = if palette.query.is_empty() {
@@ -276,10 +379,10 @@ impl TerminalView {
                                         .items_center()
                                         .justify_between()
                                         .rounded(px(tokens::radius::MD))
-                                        .when(index == palette.selected, |d| {
+                                        .when(index == selected, |d| {
                                             d.bg(hsla(t.accent)).text_color(hsla(t.accent_text))
                                         })
-                                        .when(index != palette.selected, |d| {
+                                        .when(index != selected, |d| {
                                             d.text_color(hsla(t.text_muted))
                                         })
                                         .when(
@@ -317,5 +420,54 @@ impl TerminalView {
                         ),
                 ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssh_scope_filters_without_relying_on_label_text() {
+        let filter = PaletteFilter::parse("ssh: staging");
+        let ssh = PaletteCommand::ssh(
+            PaletteAction::ConnectSsh("staging".into()),
+            "Connect to staging",
+        );
+        let workspace =
+            PaletteCommand::command(PaletteAction::ToggleSidebar, "View: toggle sidebar", "");
+
+        assert!(ssh.matches(&filter));
+        assert!(!workspace.matches(&filter));
+    }
+
+    #[test]
+    fn empty_ssh_scope_keeps_all_ssh_commands() {
+        let filter = PaletteFilter::parse(" ssh: ");
+        let connect = PaletteCommand::ssh(
+            PaletteAction::ConnectSsh("buildbox".into()),
+            "SSH: connect to buildbox",
+        );
+        let bootstrap = PaletteCommand::ssh(
+            PaletteAction::CopyRemoteIntegration("buildbox".into()),
+            "SSH: copy Bash integration bootstrap",
+        );
+
+        assert!(connect.matches(&filter));
+        assert!(bootstrap.matches(&filter));
+    }
+
+    #[test]
+    fn selection_is_clamped_after_results_shrink() {
+        let mut palette = PaletteState {
+            selected: 8,
+            ..PaletteState::default()
+        };
+
+        TerminalView::normalize_palette_selection(&mut palette, 2);
+        assert_eq!(palette.selected, 1);
+
+        TerminalView::normalize_palette_selection(&mut palette, 0);
+        assert_eq!(palette.selected, 0);
     }
 }

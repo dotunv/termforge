@@ -40,6 +40,13 @@ impl AccountField {
         };
         Self::ALL[next]
     }
+
+    fn is_advanced(self) -> bool {
+        matches!(
+            self,
+            Self::GithubHost | Self::GhConfigDir | Self::GitConfigGlobal
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -121,11 +128,29 @@ fn path_or_none(value: &str) -> Option<PathBuf> {
     (!value.is_empty()).then(|| PathBuf::from(value))
 }
 
+fn account_validation_error(context: &ContextConfig) -> Option<&'static str> {
+    if context.id.is_empty() {
+        return Some("Give this account a short ID, such as `client-a`.");
+    }
+    if !context
+        .id
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Some("Account IDs use lowercase letters, numbers, and hyphens only.");
+    }
+    if context.name.is_empty() {
+        return Some("Give this account a name so it is easy to recognize.");
+    }
+    None
+}
+
 #[derive(Debug)]
 pub(super) struct AccountEditor {
     original_id: Option<String>,
     draft: AccountDraft,
     field: AccountField,
+    show_advanced: bool,
     error: Option<String>,
 }
 
@@ -305,6 +330,7 @@ impl TerminalView {
             original_id,
             draft,
             field,
+            show_advanced: false,
             error: None,
         });
         cx.notify();
@@ -341,6 +367,7 @@ impl TerminalView {
             original_id: None,
             draft,
             field: AccountField::Name,
+            show_advanced: false,
             error: None,
         });
         cx.notify();
@@ -399,6 +426,12 @@ impl TerminalView {
                 if editor.original_id.is_some() && editor.field == AccountField::Id {
                     editor.field = editor.field.next(modifiers.shift);
                 }
+                while !editor.show_advanced && editor.field.is_advanced() {
+                    editor.field = editor.field.next(modifiers.shift);
+                    if editor.original_id.is_some() && editor.field == AccountField::Id {
+                        editor.field = editor.field.next(modifiers.shift);
+                    }
+                }
             }
             "backspace" => {
                 if editor.original_id.is_none() || editor.field != AccountField::Id {
@@ -442,6 +475,13 @@ impl TerminalView {
         if let Some(original) = &editor.original_id {
             context.id.clone_from(original);
         }
+        if let Some(error) = account_validation_error(&context) {
+            if let Some(editor) = &mut self.account_editor {
+                editor.error = Some(error.into());
+            }
+            cx.notify();
+            return;
+        }
         let mut candidate = self.appearance.config.clone();
         if let Some(original) = &editor.original_id {
             if let Some(existing) = candidate
@@ -456,7 +496,7 @@ impl TerminalView {
         }
         if let Err(error) = candidate.validate() {
             if let Some(editor) = &mut self.account_editor {
-                editor.error = Some(error.to_string());
+                editor.error = Some(format!("Check the account details: {error}"));
             }
             cx.notify();
             return;
@@ -570,7 +610,7 @@ impl TerminalView {
                             div()
                                 .text_size(px(tokens::text::SM))
                                 .text_color(hsla(t.text_muted))
-                                .child("Choose the Git name, email and GitHub login to use for new terminals."),
+                                .child("Set the identity applied to new or restarted terminals. Existing terminals are unchanged."),
                         )
                         .child(
                             div()
@@ -579,13 +619,66 @@ impl TerminalView {
                                 .gap(px(tokens::space::MD))
                                 .child(self.account_field(AccountField::Name, "NAME", "Client A", true, cx))
                                 .child(self.account_field(AccountField::Id, "ID", "client-a", !editing, cx))
-                                .child(self.account_field(AccountField::Color, "BADGE COLOUR", "#168aad", true, cx))
-                                .child(self.account_field(AccountField::GithubHost, "EXPECTED REMOTE HOST", "github.com", true, cx))
                                 .child(self.account_field(AccountField::GitName, "GIT AUTHOR NAME", "Your Name", true, cx))
                                 .child(self.account_field(AccountField::GitEmail, "GIT AUTHOR EMAIL", "you@client.example", true, cx))
-                                .child(self.account_field(AccountField::GhConfigDir, "GH CONFIG DIRECTORY", "/home/you/.config/gh-client", true, cx))
-                                .child(self.account_field(AccountField::GitConfigGlobal, "GLOBAL GIT CONFIG", "/home/you/.config/git/client", true, cx)),
+                                .child(self.account_field(AccountField::Color, "BADGE COLOUR", "#168aad", true, cx)),
                         )
+                        .child({
+                            let expanded = editor.show_advanced;
+                            div()
+                                .id("account-advanced-toggle")
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .cursor_pointer()
+                                .py(px(tokens::space::SM))
+                                .border_t_1()
+                                .border_color(hsla(t.border))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(editor) = &mut this.account_editor {
+                                        editor.show_advanced = !editor.show_advanced;
+                                        if !editor.show_advanced && editor.field.is_advanced() {
+                                            editor.field = AccountField::Name;
+                                        }
+                                    }
+                                    cx.notify();
+                                }))
+                                .child(
+                                    div()
+                                        .text_size(px(tokens::text::SM))
+                                        .text_color(hsla(t.text))
+                                        .child("Advanced connection settings"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(tokens::text::XS))
+                                        .text_color(hsla(t.text_faint))
+                                        .child(if expanded { "Hide" } else { "Optional" }),
+                                )
+                        })
+                        .when(editor.show_advanced, |d| {
+                            d.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(tokens::space::MD))
+                                    .child(
+                                        div()
+                                            .text_size(px(tokens::text::XS))
+                                            .text_color(hsla(t.text_faint))
+                                            .child("Only set these when an account uses a separate GitHub CLI or Git configuration."),
+                                    )
+                                    .child(
+                                        div()
+                                            .grid()
+                                            .grid_cols(2)
+                                            .gap(px(tokens::space::MD))
+                                            .child(self.account_field(AccountField::GithubHost, "EXPECTED REMOTE HOST", "github.com", true, cx))
+                                            .child(self.account_field(AccountField::GhConfigDir, "GH CONFIG DIRECTORY", "/home/you/.config/gh-client", true, cx))
+                                            .child(self.account_field(AccountField::GitConfigGlobal, "GLOBAL GIT CONFIG", "/home/you/.config/git/client", true, cx)),
+                                    ),
+                            )
+                        })
                         .children(editor.error.as_ref().map(|error| {
                             div()
                                 .text_size(px(tokens::text::SM))
@@ -640,5 +733,36 @@ mod tests {
             context.git_config_global.as_deref(),
             Some(std::path::Path::new("/config/git"))
         );
+    }
+
+    #[test]
+    fn account_validation_explains_identity_requirements() {
+        let missing_id = ContextConfig {
+            id: String::new(),
+            name: "Client A".into(),
+            ..ContextConfig::default()
+        };
+        assert_eq!(
+            account_validation_error(&missing_id),
+            Some("Give this account a short ID, such as `client-a`.")
+        );
+
+        let invalid_id = ContextConfig {
+            id: "Client A".into(),
+            name: "Client A".into(),
+            ..ContextConfig::default()
+        };
+        assert_eq!(
+            account_validation_error(&invalid_id),
+            Some("Account IDs use lowercase letters, numbers, and hyphens only.")
+        );
+    }
+
+    #[test]
+    fn advanced_fields_are_connection_configuration() {
+        assert!(AccountField::GithubHost.is_advanced());
+        assert!(AccountField::GhConfigDir.is_advanced());
+        assert!(AccountField::GitConfigGlobal.is_advanced());
+        assert!(!AccountField::GitEmail.is_advanced());
     }
 }

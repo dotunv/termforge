@@ -50,7 +50,12 @@ impl PaneSlot {
         }
     }
 
-    fn apply_to(self, tab: &mut WorkspaceTab) {
+    /// Replace a workspace's focused-pane mirror with this parked pane.
+    ///
+    /// A `WorkspaceTab` keeps its focused pane in its flat fields and every
+    /// other pane in `panes`. Keeping this write in one place makes a focus
+    /// transition an explicit swap instead of a sequence of partial updates.
+    fn make_focused(self, tab: &mut WorkspaceTab) {
         tab.session = self.session;
         tab.spawn = self.spawn;
         tab.project_root = self.project_root;
@@ -62,6 +67,41 @@ impl PaneSlot {
         tab.history = self.history;
         tab.font_size = self.font_size;
         tab.scroll_offset = self.scroll_offset;
+    }
+}
+
+impl WorkspaceTab {
+    /// Store the state currently mirrored by this tab as a non-focused pane.
+    fn park_focused(&mut self) {
+        let focused = self.layout.focused();
+        let replaced = self.panes.insert(focused, PaneSlot::from_tab(self));
+        debug_assert!(replaced.is_none(), "focused pane was already parked");
+    }
+
+    /// Promote a parked pane to the tab's focused-pane mirror. The former
+    /// focused pane is parked first, so this operation cannot lose a live
+    /// session while changing focus.
+    fn focus_parked(&mut self, id: PaneId) -> bool {
+        if self.layout.focused() == id {
+            return false;
+        }
+        let Some(next) = self.panes.remove(&id) else {
+            return false;
+        };
+        self.park_focused();
+        debug_assert!(self.layout.set_focus(id));
+        next.make_focused(self);
+        true
+    }
+
+    /// Remove the focused leaf and promote the sibling chosen by the tree.
+    /// The caller is responsible for closing the current session first.
+    fn close_focused(&mut self) -> Option<PaneSlot> {
+        let closing = self.layout.focused();
+        let next = self.layout.close(closing)?;
+        let slot = self.panes.remove(&next);
+        debug_assert!(slot.is_some(), "a non-focused pane must be parked");
+        slot
     }
 }
 
@@ -77,18 +117,23 @@ impl TerminalView {
         }
         self.sync_active_tab();
         let focused = self.tabs[self.active_tab].layout.focused();
-        let parked = PaneSlot::from_tab(&self.tabs[self.active_tab]);
+        let new_id = self.next_pane_id;
+        // Validate the tree mutation before starting a new shell or parking
+        // the current one. A depth-limit rejection must be a true no-op.
+        let mut next_layout = self.tabs[self.active_tab].layout.clone();
+        if !next_layout.split(focused, axis, new_id) {
+            return;
+        }
         if self.spawn.ssh_host.is_none() {
             if let Some(cwd) = &self.cwd {
                 self.spawn.cwd = Some(workspace::local_path(cwd));
             }
         }
         self.start_session(false);
-        let new_id = self.next_pane_id;
         self.next_pane_id += 1;
         let tab = &mut self.tabs[self.active_tab];
-        tab.panes.insert(focused, parked);
-        tab.layout.split(focused, axis, new_id);
+        tab.park_focused();
+        tab.layout = next_layout;
         self.sync_active_tab();
         self.persist_layout();
         cx.notify();
@@ -104,13 +149,9 @@ impl TerminalView {
         }
         self.sync_active_tab();
         let tab = &mut self.tabs[self.active_tab];
-        let Some(slot) = tab.panes.remove(&id) else {
+        if !tab.focus_parked(id) {
             return;
-        };
-        let previous = tab.layout.focused();
-        tab.panes.insert(previous, PaneSlot::from_tab(tab));
-        tab.layout.set_focus(id);
-        slot.apply_to(tab);
+        }
         // A pane the user returns to has been seen.
         tab.attention = None;
         tab.attention_note = None;
@@ -159,19 +200,13 @@ impl TerminalView {
             return;
         }
         if let Some(session) = &self.session {
-            if let Err(error) = session.close() {
-                tracing::warn!(%error, "failed to close pane session");
-            }
+            Self::close_session_handle(session, "focused pane");
         }
         let tab = &mut self.tabs[self.active_tab];
-        let closing = tab.layout.focused();
-        let Some(next) = tab.layout.close(closing) else {
+        let Some(slot) = tab.close_focused() else {
             return;
         };
-        let Some(slot) = tab.panes.remove(&next) else {
-            return;
-        };
-        slot.apply_to(tab);
+        slot.make_focused(tab);
         let tab = tab.clone();
         self.load_tab_state(tab);
         self.on_output(cx);
