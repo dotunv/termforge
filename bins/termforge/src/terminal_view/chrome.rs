@@ -187,12 +187,10 @@ impl TerminalView {
     pub(super) fn header(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let t = &self.theme;
         let tab_count = self.tabs.len();
-        let active_title = self
+        let branch = self
             .tabs
             .get(self.active_tab)
-            .and_then(|tab| tab.name.clone().or_else(|| tab.title.clone()))
-            .filter(|title| !title.trim().is_empty())
-            .unwrap_or_else(|| "Terminal".into());
+            .and_then(|tab| tab.branch.as_deref());
         div()
             .h(px(if self.show_tab_strip { 68.0 } else { 38.0 }))
             .flex()
@@ -221,17 +219,32 @@ impl TerminalView {
                             .child(
                                 div()
                                     .text_size(px(tokens::text::SM))
-                                    .text_color(hsla(t.text_muted))
+                                    .text_color(hsla(t.text))
                                     .child(SharedString::from(self.project_name())),
                             )
-                            .child(div().text_color(hsla(t.text_faint)).child("/"))
+                            .when_some(branch, |d, branch| {
+                                d.child(div().text_color(hsla(t.text_faint)).child("·"))
+                                    .child(
+                                        div()
+                                            .max_w(px(180.0))
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_size(px(tokens::text::XS))
+                                            .text_color(hsla(t.text_faint))
+                                            .child(SharedString::from(format!("⎇ {branch}"))),
+                                    )
+                            })
                             .child(
                                 div()
-                                    .max_w(px(260.0))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_color(hsla(t.text))
-                                    .child(SharedString::from(active_title)),
+                                    .w(px(1.0))
+                                    .h(px(14.0))
+                                    .bg(with_alpha(hsla(t.border), 0.75)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(tokens::text::XS))
+                                    .text_color(hsla(t.text_faint))
+                                    .child("Workspace"),
                             )
                             .child(self.context_badge("header-context-badge", cx)),
                     )
@@ -255,7 +268,7 @@ impl TerminalView {
                                         style.bg(hsla(t.bg_hover)).text_color(hsla(t.text))
                                     })
                                     .on_click(cx.listener(|this, _, _, cx| this.open_palette(cx)))
-                                    .child("⌕  Commands"),
+                                    .child("⌕  Search"),
                             )
                             .child(self.icon_button(
                                 "header-toggle-context-panel",
@@ -847,6 +860,7 @@ impl TerminalView {
         self.dock_focus = true;
         self.dock_tab = DockTab::Output;
         self.show_utility_dock = true;
+        self.persist_layout();
         cx.notify();
     }
 
@@ -1403,6 +1417,19 @@ impl TerminalView {
     pub(super) fn open_palette(&mut self, cx: &mut Context<'_, Self>) {
         self.ssh_hosts = tf_pty::discover_ssh_hosts();
         self.palette = Some(PaletteState::default());
+        cx.notify();
+    }
+
+    /// Configured SSH aliases are useful when connecting, but should not
+    /// permanently occupy navigation space. Open the command palette already
+    /// narrowed to remote-connection actions instead.
+    pub(super) fn open_ssh_picker(&mut self, cx: &mut Context<'_, Self>) {
+        self.ssh_hosts = tf_pty::discover_ssh_hosts();
+        self.palette = Some(PaletteState {
+            query: "ssh:".into(),
+            ..PaletteState::default()
+        });
+        self.search = None;
         cx.notify();
     }
 

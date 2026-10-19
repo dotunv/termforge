@@ -83,6 +83,9 @@ pub struct SavedChrome {
     pub dock_tab: String,
     pub panel_open: bool,
     pub panel_width: u32,
+    /// Daemon session shown interactively in the dock, if any. Runtime tab
+    /// ids are ephemeral, so the durable session id is the only safe link.
+    pub docked_session: Option<String>,
 }
 
 /// Order, names and pins of the workspaces in a window.
@@ -137,12 +140,13 @@ impl Layout {
         }
         if let Some(c) = &self.chrome {
             out.push_str(&format!(
-                "C\t{}\t{}\t{}\t{}\t{}\n",
+                "C\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 u8::from(c.dock_open),
                 c.dock_height,
                 c.dock_tab,
                 u8::from(c.panel_open),
-                c.panel_width
+                c.panel_width,
+                c.docked_session.as_deref().unwrap_or_default()
             ));
         }
         for tab in &self.tabs {
@@ -182,6 +186,11 @@ impl Layout {
                     let dock_tab = fields.next().map(str::to_owned);
                     let panel_open = fields.next().map(|v| v == "1");
                     let panel_width = fields.next().and_then(|v| v.parse().ok());
+                    // The sixth field was added after the initial chrome
+                    // format. Older layouts intentionally decode as no
+                    // docked surface.
+                    let docked_session =
+                        fields.next().map(str::to_owned).filter(|id| !id.is_empty());
                     if let (
                         Some(dock_height),
                         Some(dock_tab),
@@ -195,6 +204,7 @@ impl Layout {
                             dock_tab,
                             panel_open,
                             panel_width,
+                            docked_session,
                         });
                     }
                 }
@@ -266,6 +276,7 @@ mod tests {
                 dock_tab: "changes".into(),
                 panel_open: false,
                 panel_width: 360,
+                docked_session: Some("a".into()),
             }),
         };
         assert_eq!(Layout::decode(&layout.encode()), layout);

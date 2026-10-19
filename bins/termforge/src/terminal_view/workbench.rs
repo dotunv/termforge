@@ -2,6 +2,63 @@
 
 use super::*;
 
+const MAX_PROJECT_FILES: usize = 360;
+const MAX_PROJECT_DEPTH: usize = 5;
+
+#[derive(Debug, Clone)]
+struct ProjectFileEntry {
+    path: PathBuf,
+    depth: usize,
+    is_dir: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ProjectFileGroup {
+    Source,
+    Libraries,
+    Packages,
+    Config,
+    Ai,
+    Docs,
+    Other,
+}
+
+impl ProjectFileGroup {
+    const ALL: [Self; 7] = [
+        Self::Source,
+        Self::Libraries,
+        Self::Packages,
+        Self::Config,
+        Self::Ai,
+        Self::Docs,
+        Self::Other,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Source => "Source code",
+            Self::Libraries => "Libraries",
+            Self::Packages => "Packages",
+            Self::Config => "Config & tooling",
+            Self::Ai => "AI skills & instructions",
+            Self::Docs => "Documentation",
+            Self::Other => "Other files",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Source => "⌘",
+            Self::Libraries => "◫",
+            Self::Packages => "□",
+            Self::Config => "⚙",
+            Self::Ai => "✦",
+            Self::Docs => "▤",
+            Self::Other => "·",
+        }
+    }
+}
+
 impl TerminalView {
     pub(super) fn toggle_terminal_maximized(&mut self, cx: &mut Context<'_, Self>) {
         self.terminal_maximized = !self.terminal_maximized;
@@ -16,6 +73,11 @@ impl TerminalView {
         cx: &mut Context<'_, Self>,
     ) {
         self.workspace_artifact = artifact;
+        cx.notify();
+    }
+
+    fn select_file_explorer_mode(&mut self, mode: FileExplorerMode, cx: &mut Context<'_, Self>) {
+        self.file_explorer_mode = mode;
         cx.notify();
     }
 
@@ -35,6 +97,7 @@ impl TerminalView {
         let t = &self.theme;
         let tabs = [
             (WorkspaceArtifact::Overview, "Overview"),
+            (WorkspaceArtifact::Files, "Files"),
             (WorkspaceArtifact::Tasks, "Tasks"),
             (WorkspaceArtifact::Sessions, "Sessions"),
         ];
@@ -80,8 +143,314 @@ impl TerminalView {
     ) -> gpui::AnyElement {
         match self.workspace_artifact {
             WorkspaceArtifact::Overview => self.workbench_overview(cx).into_any_element(),
+            WorkspaceArtifact::Files => self.workbench_files(cx).into_any_element(),
             WorkspaceArtifact::Tasks => self.workbench_tasks(cx).into_any_element(),
             WorkspaceArtifact::Sessions => self.workbench_sessions(cx).into_any_element(),
+        }
+    }
+
+    pub(super) fn workbench_files(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let t = &self.theme;
+        let Some(root) = self.local_project_root.as_deref() else {
+            return div()
+                .id("workbench-files")
+                .flex_1()
+                .min_h(px(0.0))
+                .p(px(tokens::space::LG))
+                .bg(hsla(t.bg_app))
+                .child(self.artifact_heading(
+                    "Project files",
+                    "Open a local project to organize its files.",
+                    cx,
+                ));
+        };
+        let entries = Self::project_files(root);
+        let truncated = entries.len() == MAX_PROJECT_FILES;
+        let root_label = root.to_string_lossy().into_owned();
+        let content = match self.file_explorer_mode {
+            FileExplorerMode::Smart => self.smart_file_groups(&entries).into_any_element(),
+            FileExplorerMode::Tree => self.file_tree(&entries).into_any_element(),
+        };
+        div()
+            .id("workbench-files")
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_y_scroll()
+            .p(px(tokens::space::LG))
+            .bg(hsla(t.bg_app))
+            .child(
+                div()
+                    .mb(px(tokens::space::LG))
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .child(
+                        div()
+                            .child(
+                                div()
+                                    .text_size(px(tokens::text::XL))
+                                    .text_color(hsla(t.text))
+                                    .child("Project files"),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(2.0))
+                                    .max_w(px(460.0))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_size(px(tokens::text::SM))
+                                    .text_color(hsla(t.text_faint))
+                                    .child(SharedString::from(root_label)),
+                            ),
+                    )
+                    .child(self.file_mode_switch(cx)),
+            )
+            .when(truncated, |d| {
+                d.child(
+                    div()
+                        .mb(px(tokens::space::MD))
+                        .px(px(tokens::space::MD))
+                        .py(px(tokens::space::SM))
+                        .rounded(px(tokens::radius::MD))
+                        .bg(with_alpha(hsla(t.warning), 0.10))
+                        .text_size(px(tokens::text::SM))
+                        .text_color(hsla(t.text_muted))
+                        .child("Showing the first 360 project entries."),
+                )
+            })
+            .child(content)
+    }
+
+    fn file_mode_switch(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let t = &self.theme;
+        let modes = [
+            (FileExplorerMode::Smart, "Smart groups"),
+            (FileExplorerMode::Tree, "Folders & files"),
+        ];
+        div()
+            .p(px(2.0))
+            .flex()
+            .items_center()
+            .rounded(px(tokens::radius::MD))
+            .bg(with_alpha(hsla(t.text), 0.05))
+            .children(modes.into_iter().map(|(mode, label)| {
+                let active = mode == self.file_explorer_mode;
+                div()
+                    .id(SharedString::from(format!("file-mode-{label}")))
+                    .px(px(tokens::space::SM))
+                    .py(px(4.0))
+                    .rounded(px(tokens::radius::SM))
+                    .text_size(px(tokens::text::XS))
+                    .when(active, |d| d.bg(hsla(t.bg_panel)).text_color(hsla(t.text)))
+                    .when(!active, |d| {
+                        d.text_color(hsla(t.text_faint))
+                            .hover(|style| style.text_color(hsla(t.text)))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_file_explorer_mode(mode, cx);
+                    }))
+                    .child(label)
+            }))
+    }
+
+    fn smart_file_groups(&self, entries: &[ProjectFileEntry]) -> impl IntoElement {
+        let t = &self.theme;
+        let mut groups: std::collections::BTreeMap<ProjectFileGroup, Vec<&ProjectFileEntry>> =
+            std::collections::BTreeMap::new();
+        for entry in entries {
+            groups
+                .entry(Self::project_file_group(&entry.path))
+                .or_default()
+                .push(entry);
+        }
+        div().flex().flex_col().gap(px(tokens::space::MD)).children(
+            ProjectFileGroup::ALL.into_iter().filter_map(|group| {
+                let entries = groups.get(&group)?;
+                Some(
+                    div()
+                        .rounded(px(tokens::radius::LG))
+                        .border_1()
+                        .border_color(hsla(t.border))
+                        .bg(hsla(t.bg_panel))
+                        .overflow_hidden()
+                        .child(
+                            self.workbench_card_header(group.label(), &entries.len().to_string()),
+                        )
+                        .child(div().p(px(tokens::space::XS)).children(entries.iter().map(
+                            |entry| self.file_row(entry, group.icon(), false).into_any_element(),
+                        ))),
+                )
+            }),
+        )
+    }
+
+    fn file_tree(&self, entries: &[ProjectFileEntry]) -> impl IntoElement {
+        let t = &self.theme;
+        div()
+            .rounded(px(tokens::radius::LG))
+            .border_1()
+            .border_color(hsla(t.border))
+            .bg(hsla(t.bg_panel))
+            .overflow_hidden()
+            .child(self.workbench_card_header("FOLDERS & FILES", &entries.len().to_string()))
+            .child(
+                div().p(px(tokens::space::XS)).children(
+                    entries.iter().map(|entry| {
+                        self.file_row(entry, if entry.is_dir { "▸" } else { "·" }, true)
+                    }),
+                ),
+            )
+    }
+
+    fn file_row(
+        &self,
+        entry: &ProjectFileEntry,
+        icon: &'static str,
+        show_depth: bool,
+    ) -> impl IntoElement {
+        let t = &self.theme;
+        let label = entry.path.to_string_lossy().into_owned();
+        let indent = if show_depth {
+            entry.depth as f32 * 14.0
+        } else {
+            0.0
+        };
+        div()
+            .h(px(26.0))
+            .pl(px(tokens::space::SM + indent))
+            .pr(px(tokens::space::SM))
+            .flex()
+            .items_center()
+            .gap(px(tokens::space::SM))
+            .rounded(px(tokens::radius::SM))
+            .text_size(px(tokens::text::SM))
+            .text_color(hsla(if entry.is_dir {
+                t.text_muted
+            } else {
+                t.text_faint
+            }))
+            .hover(|style| {
+                style
+                    .bg(with_alpha(hsla(t.text), 0.05))
+                    .text_color(hsla(t.text))
+            })
+            .child(div().w(px(12.0)).text_color(hsla(t.text_faint)).child(icon))
+            .child(
+                div()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(SharedString::from(label)),
+            )
+    }
+
+    fn project_files(root: &Path) -> Vec<ProjectFileEntry> {
+        fn visit(root: &Path, dir: &Path, depth: usize, output: &mut Vec<ProjectFileEntry>) {
+            if depth > MAX_PROJECT_DEPTH || output.len() >= MAX_PROJECT_FILES {
+                return;
+            }
+            let Ok(read_dir) = std::fs::read_dir(dir) else {
+                return;
+            };
+            let mut entries: Vec<_> = read_dir.flatten().collect();
+            entries.sort_by_key(|entry| {
+                let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+                (!is_dir, entry.file_name())
+            });
+            for entry in entries {
+                if output.len() >= MAX_PROJECT_FILES {
+                    return;
+                }
+                let path = entry.path();
+                let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if is_dir && matches!(name.as_str(), ".git" | "target" | "node_modules" | ".next") {
+                    continue;
+                }
+                if is_dir
+                    && name.starts_with('.')
+                    && !matches!(
+                        name.as_str(),
+                        ".claude" | ".cursor" | ".agents" | ".codex" | ".github"
+                    )
+                {
+                    continue;
+                }
+                let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+                output.push(ProjectFileEntry {
+                    path: relative,
+                    depth,
+                    is_dir,
+                });
+                if is_dir {
+                    visit(root, &path, depth + 1, output);
+                }
+            }
+        }
+
+        let mut output = Vec::new();
+        visit(root, root, 0, &mut output);
+        output
+    }
+
+    fn project_file_group(path: &Path) -> ProjectFileGroup {
+        let first = path
+            .components()
+            .next()
+            .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if matches!(first.as_str(), ".claude" | ".cursor" | ".agents" | ".codex")
+            || matches!(name.as_str(), "agents.md" | "claude.md" | "skill.md")
+        {
+            ProjectFileGroup::Ai
+        } else if matches!(first.as_str(), "docs" | "doc")
+            || matches!(
+                name.as_str(),
+                "readme.md" | "contributing.md" | "changelog.md"
+            )
+        {
+            ProjectFileGroup::Docs
+        } else if matches!(first.as_str(), "crates" | "libs" | "lib") {
+            ProjectFileGroup::Libraries
+        } else if matches!(first.as_str(), "packages" | "vendor")
+            || matches!(
+                name.as_str(),
+                "cargo.toml" | "package.json" | "pnpm-lock.yaml" | "yarn.lock"
+            )
+        {
+            ProjectFileGroup::Packages
+        } else if matches!(first.as_str(), "src" | "app" | "apps" | "bin" | "bins")
+            || matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some(
+                    "rs" | "ts"
+                        | "tsx"
+                        | "js"
+                        | "jsx"
+                        | "py"
+                        | "go"
+                        | "java"
+                        | "swift"
+                        | "c"
+                        | "h"
+                        | "cpp"
+                )
+            )
+        {
+            ProjectFileGroup::Source
+        } else if first.starts_with('.')
+            || matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("toml" | "yaml" | "yml" | "json" | "jsonc" | "ini" | "env")
+            )
+            || matches!(name.as_str(), "makefile" | "dockerfile" | "justfile")
+        {
+            ProjectFileGroup::Config
+        } else {
+            ProjectFileGroup::Other
         }
     }
 
@@ -548,6 +917,28 @@ impl TerminalView {
                     ("ATTENTION", attention),
                 ],
             ),
+            WorkspaceArtifact::Files => {
+                let entries = self
+                    .local_project_root
+                    .as_deref()
+                    .map(Self::project_files)
+                    .unwrap_or_default();
+                (
+                    "FILE EXPLORER",
+                    vec![
+                        (
+                            "VIEW",
+                            match self.file_explorer_mode {
+                                FileExplorerMode::Smart => "Smart groups",
+                                FileExplorerMode::Tree => "Folders & files",
+                            }
+                            .into(),
+                        ),
+                        ("ITEMS", entries.len().to_string()),
+                        ("PROJECT", self.project_name()),
+                    ],
+                )
+            }
             WorkspaceArtifact::Tasks => {
                 let (open, active, blocked) = self.task_summary();
                 (
@@ -683,5 +1074,35 @@ impl TerminalView {
             .hover(|style| style.bg(hsla(t.bg_hover)).text_color(hsla(t.text)))
             .on_click(on_click)
             .child(label)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProjectFileGroup, TerminalView};
+    use std::path::Path;
+
+    #[test]
+    fn smart_file_groups_prioritize_ai_docs_and_project_structure() {
+        assert_eq!(
+            TerminalView::project_file_group(Path::new(".claude/skills/release/SKILL.md")),
+            ProjectFileGroup::Ai
+        );
+        assert_eq!(
+            TerminalView::project_file_group(Path::new("docs/adr/0001.md")),
+            ProjectFileGroup::Docs
+        );
+        assert_eq!(
+            TerminalView::project_file_group(Path::new("crates/tf-ui/src/lib.rs")),
+            ProjectFileGroup::Libraries
+        );
+        assert_eq!(
+            TerminalView::project_file_group(Path::new("Cargo.toml")),
+            ProjectFileGroup::Packages
+        );
+        assert_eq!(
+            TerminalView::project_file_group(Path::new("bins/termforge/src/main.rs")),
+            ProjectFileGroup::Source
+        );
     }
 }

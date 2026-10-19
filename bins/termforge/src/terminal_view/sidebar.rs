@@ -414,30 +414,15 @@ impl TerminalView {
             .tabs
             .iter()
             .enumerate()
+            .filter(|(_, tab)| tab.spawn.ssh_host.is_none())
             .map(|(index, tab)| self.workspace_row(index, tab, cx))
             .collect();
-        let hosts: Vec<_> = self
-            .ssh_hosts
+        let remote_sessions: Vec<_> = self
+            .tabs
             .iter()
-            .map(|host| {
-                let target = host.clone();
-                let label = SharedString::from(host.clone());
-                div()
-                    .id(SharedString::from(format!("sidebar-host-{host}")))
-                    .h(px(28.0))
-                    .px(px(tokens::space::SM))
-                    .flex()
-                    .items_center()
-                    .gap(px(tokens::space::SM))
-                    .rounded(px(tokens::radius::MD))
-                    .text_color(hsla(t.text_muted))
-                    .hover(|style| style.bg(hsla(t.bg_hover)).text_color(hsla(t.text)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.new_ssh_tab(target.clone(), cx);
-                    }))
-                    .child(div().text_color(hsla(t.accent)).child("⇄"))
-                    .child(div().overflow_hidden().child(label))
-            })
+            .enumerate()
+            .filter(|(_, tab)| tab.spawn.ssh_host.is_some())
+            .map(|(index, tab)| self.workspace_row(index, tab, cx))
             .collect();
         let open_project_action: ClickHandler = {
             let view = cx.entity();
@@ -447,12 +432,11 @@ impl TerminalView {
             let view = cx.entity();
             Box::new(move |_, _, cx| view.update(cx, |this, cx| this.new_local_tab(cx)))
         };
-        let refresh_hosts: ClickHandler = {
+        let connect_ssh: ClickHandler = {
             let view = cx.entity();
             Box::new(move |_, _, cx| {
                 view.update(cx, |this, cx| {
-                    this.ssh_hosts = tf_pty::discover_ssh_hosts();
-                    cx.notify();
+                    this.open_ssh_picker(cx);
                 });
             })
         };
@@ -575,22 +559,40 @@ impl TerminalView {
                     .child(self.section_header(
                         SidebarSection::SshHosts,
                         "section-hosts",
-                        "Connections",
-                        Some(("section-hosts-refresh", "↻", refresh_hosts)),
+                        "Remote sessions",
+                        Some(("section-hosts-connect", "+", connect_ssh)),
                         cx,
                     ))
                     .when(hosts_open, |d| {
-                        if hosts.is_empty() {
+                        if remote_sessions.is_empty() {
                             d.child(
                                 div()
+                                    .id("sidebar-connect-ssh")
+                                    .mx(px(tokens::space::SM))
+                                    .my(px(4.0))
                                     .px(px(tokens::space::SM))
-                                    .py(px(4.0))
+                                    .py(px(6.0))
                                     .text_size(px(tokens::text::XS))
                                     .text_color(hsla(t.text_faint))
-                                    .child("No hosts in ~/.ssh/config"),
+                                    .rounded(px(tokens::radius::SM))
+                                    .hover(|style| {
+                                        style
+                                            .bg(with_alpha(hsla(t.text), 0.05))
+                                            .text_color(hsla(t.text_muted))
+                                    })
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.open_ssh_picker(cx)),
+                                    )
+                                    .child("Connect to an SSH host…"),
                             )
                         } else {
-                            d.child(div().flex().flex_col().children(hosts))
+                            d.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.0))
+                                    .children(remote_sessions),
+                            )
                         }
                     })
                     .when(self.worktrees.len() > 1, |d| {

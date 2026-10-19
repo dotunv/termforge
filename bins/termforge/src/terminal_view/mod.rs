@@ -12,7 +12,7 @@
 //! (header, status bar), `sidebar` and `settings`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -478,8 +478,18 @@ enum SidebarSection {
 enum WorkspaceArtifact {
     #[default]
     Overview,
+    Files,
     Tasks,
     Sessions,
+}
+
+/// The file browser starts with an intent-oriented project map, but never
+/// removes access to the literal on-disk hierarchy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum FileExplorerMode {
+    #[default]
+    Smart,
+    Tree,
 }
 
 /// Tools hosted by the dock beneath the active workspace artifact.
@@ -588,6 +598,8 @@ pub struct TerminalView {
     dock_collapsed: bool,
     /// Artifact currently occupying the project workspace.
     workspace_artifact: WorkspaceArtifact,
+    /// Whether project files are organized by purpose or by their real paths.
+    file_explorer_mode: FileExplorerMode,
     /// Tool currently occupying the bottom dock.
     dock_tool: DockTool,
     /// Optional inspector; a project opens directly on its working surface.
@@ -757,6 +769,7 @@ impl TerminalView {
             terminal_maximized: false,
             dock_collapsed: false,
             workspace_artifact: WorkspaceArtifact::Overview,
+            file_explorer_mode: FileExplorerMode::Smart,
             dock_tool: DockTool::Terminal,
             show_context_panel: false,
             dock_tab: DockTab::default(),

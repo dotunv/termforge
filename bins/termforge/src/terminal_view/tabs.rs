@@ -795,6 +795,16 @@ impl TerminalView {
             .into(),
             panel_open: self.show_context_panel,
             panel_width: self.panel_width.round() as u32,
+            docked_session: self.dock_moved.then_some(()).and_then(|()| {
+                let id = self.dock_target?;
+                self.tabs
+                    .iter()
+                    .find(|tab| tab.id == id)?
+                    .session
+                    .as_ref()?
+                    .id()
+                    .map(|id| id.to_string())
+            }),
         }
     }
 
@@ -811,6 +821,35 @@ impl TerminalView {
         };
         self.show_context_panel = chrome.panel_open;
         self.panel_width = (chrome.panel_width as f32).clamp(240.0, 640.0);
+    }
+
+    /// Reconnect a persisted dock placement to the runtime tab that owns its
+    /// daemon session. The canvas always retains another tab, just as it does
+    /// when the user moves a terminal into the dock interactively.
+    fn restore_docked_session(&mut self, chrome: &SavedChrome, cx: &mut Context<'_, Self>) {
+        let Some(session_id) = chrome.docked_session.as_deref() else {
+            return;
+        };
+        let Some(index) = self.tabs.iter().position(|tab| {
+            tab.session
+                .as_ref()
+                .and_then(|session| session.id())
+                .is_some_and(|id| id.to_string() == session_id)
+        }) else {
+            return;
+        };
+        if self.tabs.len() < 2 {
+            return;
+        }
+        if index == self.active_tab {
+            let canvas = if index == 0 { 1 } else { index - 1 };
+            self.select_tab(canvas, cx);
+        }
+        self.dock_target = Some(self.tabs[index].id);
+        self.dock_moved = true;
+        self.dock_focus = false;
+        self.dock_tab = DockTab::Output;
+        self.show_utility_dock = true;
     }
 
     /// The split layout of a workspace in a form that survives restarts:
@@ -1087,6 +1126,9 @@ impl TerminalView {
         let target = active_index.min(self.tabs.len() - 1);
         self.active_tab = usize::MAX;
         self.select_tab(target, cx);
+        if let Some(chrome) = &layout.chrome {
+            self.restore_docked_session(chrome, cx);
+        }
         true
     }
 }

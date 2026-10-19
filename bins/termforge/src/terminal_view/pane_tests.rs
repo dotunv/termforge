@@ -529,6 +529,7 @@ async fn dock_and_panel_state_round_trips_and_is_clamped(cx: &mut TestAppContext
         v.panel_width = 400.0;
         let saved = v.saved_chrome();
         assert_eq!(saved.dock_tab, "output");
+        assert!(saved.docked_session.is_none());
 
         v.show_utility_dock = false;
         v.dock_tab = DockTab::Sessions;
@@ -545,6 +546,7 @@ async fn dock_and_panel_state_round_trips_and_is_clamped(cx: &mut TestAppContext
             dock_tab: "bogus".into(),
             panel_open: true,
             panel_width: 1,
+            docked_session: None,
         };
         v.apply_saved_chrome(&hostile);
         assert_eq!(v.dock_height, 520.0);
@@ -589,6 +591,15 @@ async fn docked_session_takes_input_and_moves_back(cx: &mut TestAppContext) {
         assert!(v.dock_moved && v.dock_focus && v.show_utility_dock);
         let docked = v.docked().expect("docked session resolves");
         assert_eq!(docked.0, docked_index);
+        assert_eq!(
+            v.saved_chrome().docked_session,
+            v.tabs[docked_index]
+                .session
+                .as_ref()
+                .and_then(|session| session.id())
+                .map(|id| id.to_string()),
+            "the durable layout references the same daemon session"
+        );
     });
 
     view.read_with(cx, |v, _| v.write(b"echo tf-docked\r"));
@@ -615,6 +626,7 @@ async fn docked_session_takes_input_and_moves_back(cx: &mut TestAppContext) {
         assert!(!v.dock_moved && !v.dock_focus && v.dock_target.is_none());
         assert_eq!(v.active_tab, docked_index);
         assert_eq!(v.tabs.len(), 2, "no session was created or closed");
+        assert!(v.saved_chrome().docked_session.is_none());
     });
 }
 
