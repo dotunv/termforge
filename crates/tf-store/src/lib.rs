@@ -22,6 +22,8 @@ pub enum StoreError {
     TooNew { found: i64, supported: i64 },
     #[error("stored session environment: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("invalid task dependency: {0}")]
+    InvalidTaskDependency(String),
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -99,6 +101,19 @@ const MIGRATIONS: &[&str] = &[
     r"
     ALTER TABLE restorable_sessions ADD COLUMN context_env TEXT NOT NULL DEFAULT '[]';
     ",
+    // v8: task planning metadata and an integrity-checked dependency graph.
+    r"
+    ALTER TABLE tasks ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'
+        CHECK(priority IN ('low', 'normal', 'high', 'urgent'));
+    CREATE TABLE task_dependencies (
+        task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        depends_on_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        PRIMARY KEY(task_id, depends_on_id),
+        CHECK(task_id <> depends_on_id)
+    );
+    CREATE INDEX idx_task_dependencies_reverse
+        ON task_dependencies(depends_on_id, task_id);
+    ",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +156,14 @@ pub enum TaskState {
     Done,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskPriority {
+    Low,
+    Normal,
+    High,
+    Urgent,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRecord {
     pub id: String,
@@ -150,7 +173,19 @@ pub struct TaskRecord {
     /// A single-line shell command the UI can run for this task.
     pub command: Option<String>,
     pub state: TaskState,
+    pub priority: TaskPriority,
+    pub dependencies: Vec<String>,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Default)]
+pub struct TaskUpdate<'a> {
+    pub state: Option<TaskState>,
+    pub title: Option<&'a str>,
+    pub context: Option<&'a str>,
+    pub command: Option<&'a str>,
+    pub priority: Option<TaskPriority>,
+    pub dependencies: Option<&'a [String]>,
 }
 
 #[derive(Debug)]
@@ -374,19 +409,24 @@ impl Store {
     pub fn create_task(&self, task: &TaskRecord) -> Result<()> {
         let project_root = dunce::canonicalize(&task.project_root)
             .map_err(|error| StoreError::Path(task.project_root.clone(), error))?;
-        self.conn.execute(
-            "INSERT INTO tasks (id, project_root, title, context, state, created_at, updated_at, command)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
+        let project_root = project_root.to_string_lossy().into_owned();
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO tasks (id, project_root, title, context, state, created_at, updated_at, command, priority)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8)",
             params![
                 task.id,
-                project_root.to_string_lossy(),
+                project_root,
                 task.title,
                 task.context,
                 task_state_name(task.state),
                 now_ms(),
                 task.command,
+                task_priority_name(task.priority),
             ],
         )?;
+        replace_task_dependencies(&transaction, &task.id, &project_root, &task.dependencies)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -394,23 +434,38 @@ impl Store {
         let root = dunce::canonicalize(project_root)
             .map_err(|error| StoreError::Path(project_root.into(), error))?;
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, project_root, title, context, state, updated_at, command FROM tasks
+            "SELECT id, project_root, title, context, state, updated_at, command, priority FROM tasks
              WHERE project_root = ?1 ORDER BY updated_at DESC, id",
         )?;
         let rows = stmt.query_map(params![root.to_string_lossy()], row_to_task)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut tasks: Vec<TaskRecord> = rows.collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        for task in &mut tasks {
+            let mut dependencies = self.conn.prepare_cached(
+                "SELECT depends_on_id FROM task_dependencies
+                 WHERE task_id = ?1 ORDER BY depends_on_id",
+            )?;
+            task.dependencies = dependencies
+                .query_map(params![task.id], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+        }
+        Ok(tasks)
     }
 
-    pub fn update_task(
-        &self,
-        id: &str,
-        state: Option<TaskState>,
-        title: Option<&str>,
-        context: Option<&str>,
-        command: Option<&str>,
-    ) -> Result<bool> {
+    pub fn update_task(&self, id: &str, update: &TaskUpdate<'_>) -> Result<bool> {
         // `command`: `None` leaves it alone, `Some("")` clears it.
-        let changed = self.conn.execute(
+        let transaction = self.conn.unchecked_transaction()?;
+        let project_root: Option<String> = transaction
+            .query_row(
+                "SELECT project_root FROM tasks WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(project_root) = project_root else {
+            return Ok(false);
+        };
+        let changed = transaction.execute(
             "UPDATE tasks SET
                 state = COALESCE(?2, state),
                 title = COALESCE(?3, title),
@@ -418,17 +473,23 @@ impl Store {
                 command = CASE WHEN ?5 IS NULL THEN command
                                WHEN ?5 = '' THEN NULL
                                ELSE ?5 END,
-                updated_at = ?6
+                priority = COALESCE(?6, priority),
+                updated_at = ?7
              WHERE id = ?1",
             params![
                 id,
-                state.map(task_state_name),
-                title,
-                context,
-                command,
+                update.state.map(task_state_name),
+                update.title,
+                update.context,
+                update.command,
+                update.priority.map(task_priority_name),
                 now_ms()
             ],
         )?;
+        if let Some(dependencies) = update.dependencies {
+            replace_task_dependencies(&transaction, id, &project_root, dependencies)?;
+        }
+        transaction.commit()?;
         Ok(changed != 0)
     }
 
@@ -450,6 +511,69 @@ fn task_state_name(state: TaskState) -> &'static str {
     }
 }
 
+fn task_priority_name(priority: TaskPriority) -> &'static str {
+    match priority {
+        TaskPriority::Low => "low",
+        TaskPriority::Normal => "normal",
+        TaskPriority::High => "high",
+        TaskPriority::Urgent => "urgent",
+    }
+}
+
+fn replace_task_dependencies(
+    connection: &Connection,
+    task_id: &str,
+    project_root: &str,
+    dependencies: &[String],
+) -> Result<()> {
+    connection.execute(
+        "DELETE FROM task_dependencies WHERE task_id = ?1",
+        params![task_id],
+    )?;
+    let mut unique = std::collections::HashSet::new();
+    for dependency in dependencies {
+        if dependency == task_id || !unique.insert(dependency) {
+            return Err(StoreError::InvalidTaskDependency(
+                "dependencies must be unique and cannot reference the task itself".into(),
+            ));
+        }
+        let dependency_project: Option<String> = connection
+            .query_row(
+                "SELECT project_root FROM tasks WHERE id = ?1",
+                params![dependency],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if dependency_project.as_deref() != Some(project_root) {
+            return Err(StoreError::InvalidTaskDependency(format!(
+                "task {dependency} does not exist in this project"
+            )));
+        }
+        let creates_cycle: bool = connection.query_row(
+            "WITH RECURSIVE prerequisites(id) AS (
+                 SELECT depends_on_id FROM task_dependencies WHERE task_id = ?1
+                 UNION
+                 SELECT edge.depends_on_id
+                 FROM task_dependencies edge
+                 JOIN prerequisites prior ON edge.task_id = prior.id
+             )
+             SELECT EXISTS(SELECT 1 FROM prerequisites WHERE id = ?2)",
+            params![dependency, task_id],
+            |row| row.get(0),
+        )?;
+        if creates_cycle {
+            return Err(StoreError::InvalidTaskDependency(format!(
+                "dependency on {dependency} would create a cycle"
+            )));
+        }
+        connection.execute(
+            "INSERT INTO task_dependencies (task_id, depends_on_id) VALUES (?1, ?2)",
+            params![task_id, dependency],
+        )?;
+    }
+    Ok(())
+}
+
 fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
     let state = match row.get::<_, String>(4)?.as_str() {
         "planned" => TaskState::Planned,
@@ -465,6 +589,14 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
         context: row.get(3)?,
         command: row.get(6)?,
         state,
+        priority: match row.get::<_, String>(7)?.as_str() {
+            "low" => TaskPriority::Low,
+            "normal" => TaskPriority::Normal,
+            "high" => TaskPriority::High,
+            "urgent" => TaskPriority::Urgent,
+            value => return Err(rusqlite::Error::InvalidParameterName(value.into())),
+        },
+        dependencies: Vec::new(),
         updated_at: row.get(5)?,
     })
 }
@@ -647,6 +779,8 @@ mod tests {
             context: "Keep the daemon local-first".into(),
             command: Some("cargo test".into()),
             state: TaskState::Planned,
+            priority: TaskPriority::Normal,
+            dependencies: Vec::new(),
             updated_at: 0,
         };
         store.create_task(&task).unwrap();
@@ -656,33 +790,90 @@ mod tests {
         assert!(store
             .update_task(
                 "task-1",
-                Some(TaskState::Active),
-                None,
-                Some("Protocol and storage are stable"),
-                None,
+                &TaskUpdate {
+                    state: Some(TaskState::Active),
+                    context: Some("Protocol and storage are stable"),
+                    priority: Some(TaskPriority::High),
+                    ..TaskUpdate::default()
+                },
             )
             .unwrap());
         let updated = store.tasks_for_project(root.path()).unwrap().pop().unwrap();
         assert_eq!(updated.state, TaskState::Active);
         assert_eq!(updated.context, "Protocol and storage are stable");
+        assert_eq!(updated.priority, TaskPriority::High);
         // Updating other fields leaves the command alone; "" clears it.
         assert_eq!(updated.command.as_deref(), Some("cargo test"));
         assert!(store
-            .update_task("task-1", None, None, None, Some("cargo clippy"))
+            .update_task(
+                "task-1",
+                &TaskUpdate {
+                    command: Some("cargo clippy"),
+                    ..TaskUpdate::default()
+                },
+            )
             .unwrap());
         let changed = store.tasks_for_project(root.path()).unwrap().pop().unwrap();
         assert_eq!(changed.command.as_deref(), Some("cargo clippy"));
         assert!(store
-            .update_task("task-1", None, None, None, Some(""))
+            .update_task(
+                "task-1",
+                &TaskUpdate {
+                    command: Some(""),
+                    ..TaskUpdate::default()
+                },
+            )
             .unwrap());
         let cleared = store.tasks_for_project(root.path()).unwrap().pop().unwrap();
         assert_eq!(cleared.command, None);
 
+        let dependent = TaskRecord {
+            id: "task-2".into(),
+            project_root: root.path().canonicalize().unwrap(),
+            title: "Publish beta".into(),
+            context: String::new(),
+            command: None,
+            state: TaskState::Planned,
+            priority: TaskPriority::Urgent,
+            dependencies: vec!["task-1".into()],
+            updated_at: 0,
+        };
+        store.create_task(&dependent).unwrap();
+        let tasks = store.tasks_for_project(root.path()).unwrap();
+        assert_eq!(
+            tasks
+                .iter()
+                .find(|task| task.id == "task-2")
+                .unwrap()
+                .dependencies,
+            vec!["task-1"]
+        );
+        assert!(matches!(
+            store.update_task(
+                "task-1",
+                &TaskUpdate {
+                    dependencies: Some(&["task-2".into()]),
+                    ..TaskUpdate::default()
+                },
+            ),
+            Err(StoreError::InvalidTaskDependency(_))
+        ));
+
         assert!(!store
-            .update_task("missing", Some(TaskState::Done), None, None, None)
+            .update_task(
+                "missing",
+                &TaskUpdate {
+                    state: Some(TaskState::Done),
+                    ..TaskUpdate::default()
+                },
+            )
             .unwrap());
         assert!(store.delete_task("task-1").unwrap());
         assert!(!store.delete_task("task-1").unwrap());
+        let task_two = store.tasks_for_project(root.path()).unwrap().pop().unwrap();
+        assert_eq!(task_two.id, "task-2");
+        assert!(task_two.dependencies.is_empty());
+        assert!(store.delete_task("task-2").unwrap());
         assert!(store.tasks_for_project(root.path()).unwrap().is_empty());
     }
 }

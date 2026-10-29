@@ -172,7 +172,12 @@ impl TerminalView {
         };
     }
 
-    pub(super) fn palette_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<'_, Self>) -> bool {
+    pub(super) fn palette_key(
+        &mut self,
+        ev: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
         let key = ev.keystroke.key.as_str();
         let modifiers = ev.keystroke.modifiers;
         if modifiers.control && modifiers.shift && key.eq_ignore_ascii_case("p") {
@@ -200,7 +205,7 @@ impl TerminalView {
             "enter" if count > 0 => {
                 let action = commands[palette.selected].0.clone();
                 self.palette = None;
-                self.run_palette_action(action, cx);
+                self.run_palette_action(action, window, cx);
             }
             "backspace" => {
                 palette.query.pop();
@@ -223,7 +228,12 @@ impl TerminalView {
         true
     }
 
-    pub(super) fn run_palette_action(&mut self, action: PaletteAction, cx: &mut Context<'_, Self>) {
+    pub(super) fn run_palette_action(
+        &mut self,
+        action: PaletteAction,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         match action {
             PaletteAction::NewTab => self.new_local_tab(cx),
             PaletteAction::CloseTab => self.close_active_tab(cx),
@@ -234,7 +244,7 @@ impl TerminalView {
             PaletteAction::NextTab => self.cycle_tab(false, cx),
             PaletteAction::PreviousTab => self.cycle_tab(true, cx),
             PaletteAction::RestartSession => self.start(cx),
-            PaletteAction::Quit => cx.quit(),
+            PaletteAction::Quit => self.request_window_close(window, cx),
             PaletteAction::Find => self.open_search(cx),
             PaletteAction::Copy => self.copy_selection(cx),
             PaletteAction::Paste => self.paste(cx),
@@ -256,11 +266,15 @@ impl TerminalView {
             PaletteAction::NewShell(index) => self.new_shell_tab(index, cx),
             PaletteAction::SetDefaultShell(index) => self.set_default_shell(index, cx),
             PaletteAction::ToggleSidebar => self.toggle_sidebar(cx),
-            PaletteAction::ToggleContextPanel => self.toggle_context_panel(cx),
             PaletteAction::ToggleUtilityDock => self.toggle_utility_dock(cx),
             PaletteAction::OpenSettings => self.open_settings(cx),
             PaletteAction::NewTask => self.open_task_form("", "", cx),
-            PaletteAction::ListTasks => self.write(b"tf task list\r"),
+            PaletteAction::ListTasks => {
+                self.workspace_artifact = WorkspaceArtifact::Tasks;
+                self.refresh_tasks(cx);
+                self.refresh_task_suggestions();
+                self.persist_layout();
+            }
             PaletteAction::StatusWorking => self.write(b"tf status working --app termforge\r"),
             PaletteAction::StatusDone => self.write(b"tf status done --app termforge\r"),
             PaletteAction::StatusClear => self.write(b"tf status clear\r"),

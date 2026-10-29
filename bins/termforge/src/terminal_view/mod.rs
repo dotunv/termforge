@@ -42,7 +42,7 @@ use crate::panes::{Axis, Dir, PaneId, PaneTree, Rect as PaneRect};
 use crate::remote_session::{self, Attach, SessionHandle};
 use crate::surface::{self, DockTab, GitChange, Inspector};
 use crate::updates::UpdateNotice;
-use crate::workspace::{self, Layout, SavedChrome, SavedPanes, SavedTab};
+use crate::workspace::{self, Layout, SavedChrome, SavedPanes, SavedTab, SavedWorkbench};
 
 mod accounts;
 mod chrome;
@@ -72,6 +72,13 @@ struct SearchState {
     current: Option<usize>,
     /// New output arrived since `matches` was computed.
     stale: bool,
+}
+
+#[derive(Debug, Default)]
+struct EditorSearchState {
+    query: String,
+    matches: Vec<std::ops::Range<usize>>,
+    current: usize,
 }
 
 /// What the palette overlay is choosing between.
@@ -148,7 +155,6 @@ enum PaletteAction {
     ScrollBottom,
     CopyDiagnostics,
     ToggleSidebar,
-    ToggleContextPanel,
     ToggleUtilityDock,
     OpenSettings,
     NewShell(usize),
@@ -259,11 +265,6 @@ const PALETTE_COMMANDS: &[(PaletteAction, &str, &str)] = &[
         "Ctrl Shift B",
     ),
     (
-        PaletteAction::ToggleContextPanel,
-        "View: toggle context panel",
-        "Ctrl Shift I",
-    ),
-    (
         PaletteAction::ToggleUtilityDock,
         "View: toggle utility dock",
         "Ctrl Shift J",
@@ -365,18 +366,9 @@ struct PaneSlot {
     attention: Option<Attention>,
 }
 
-/// A divider being dragged with the mouse.
-/// Which edge of a docked region is being dragged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Edge {
-    Dock,
-    Panel,
-}
-
 /// A resize in progress: the pointer position and region size at press time.
 #[derive(Debug, Clone, Copy)]
 struct EdgeDrag {
-    edge: Edge,
     pointer: f32,
     size: f32,
 }
@@ -479,6 +471,7 @@ enum WorkspaceArtifact {
     #[default]
     Overview,
     Files,
+    Changes,
     Tasks,
     Sessions,
 }
@@ -487,8 +480,8 @@ enum WorkspaceArtifact {
 /// removes access to the literal on-disk hierarchy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum FileExplorerMode {
-    #[default]
     Smart,
+    #[default]
     Tree,
 }
 
@@ -499,6 +492,19 @@ enum DockTool {
     Terminal,
     Problems,
     Output,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum GitDiffView {
+    #[default]
+    Unified,
+    Split,
+}
+
+#[derive(Debug, Clone)]
+enum GitDialog {
+    Discard(GitChange),
+    Commit(String),
 }
 
 /// Pages of the settings panel.
@@ -600,13 +606,57 @@ pub struct TerminalView {
     workspace_artifact: WorkspaceArtifact,
     /// Whether project files are organized by purpose or by their real paths.
     file_explorer_mode: FileExplorerMode,
+    /// File currently open in the Files environment, relative to the project root.
+    selected_project_file: Option<PathBuf>,
+    /// Transactional buffer backing the Files editor.
+    editor_buffer: Option<tf_editor::Buffer>,
+    /// Other open buffers, keyed by absolute path across project switches.
+    editor_buffers: HashMap<PathBuf, tf_editor::Buffer>,
+    editor_saves: std::collections::HashSet<PathBuf>,
+    editor_queued_saves: HashMap<PathBuf, tf_editor::Buffer>,
+    editor_save_errors: HashMap<PathBuf, String>,
+    close_confirmation_pending: bool,
+    /// Human-readable reason the selected file could not be opened or saved.
+    editor_error: Option<String>,
+    editor_loading: bool,
+    editor_open_generation: u64,
+    editor_pending_position: Option<(PathBuf, tf_editor::TextPosition)>,
+    editor_scroll: gpui::ScrollHandle,
+    editor_search: Option<EditorSearchState>,
+    /// Optional language server following the selected editor buffer.
+    lsp: crate::lsp::Supervisor,
+    lsp_server: Option<String>,
+    lsp_error: Option<String>,
+    lsp_diagnostics: Vec<crate::lsp::Diagnostic>,
+    lsp_restart_at: Option<std::time::Instant>,
+    lsp_restart_attempts: u8,
+    /// Collapsed relative directories in the Files tree.
+    collapsed_file_paths: std::collections::HashSet<PathBuf>,
+    /// Background explorer snapshot and its in-flight cancellation token.
+    project_file_entries: Vec<workbench::ProjectFileEntry>,
+    project_files_loading: bool,
+    project_files_error: Option<String>,
+    project_files_generation: u64,
+    project_files_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    project_files_checked_at: Option<std::time::Instant>,
+    /// Collapsed smart-file group labels.
+    collapsed_file_groups: std::collections::HashSet<&'static str>,
     /// Tool currently occupying the bottom dock.
     dock_tool: DockTool,
-    /// Optional inspector; a project opens directly on its working surface.
-    show_context_panel: bool,
     dock_tab: DockTab,
     changes: Option<Vec<GitChange>>,
     changes_dir: Option<PathBuf>,
+    git_loading: bool,
+    git_error: Option<String>,
+    git_status_generation: u64,
+    git_diff_generation: u64,
+    git_project_generation: u64,
+    git_diff_loading: bool,
+    git_diff_error: Option<String>,
+    selected_git_scope: surface::DiffScope,
+    git_diff_view: GitDiffView,
+    reviewed_changes: std::collections::HashSet<(String, surface::DiffScope)>,
+    git_dialog: Option<GitDialog>,
     /// Projects the daemon knows about, current first.
     projects: Vec<PathBuf>,
     dock_height: f32,
@@ -618,7 +668,6 @@ pub struct TerminalView {
     dock_moved: bool,
     /// Keystrokes go to the docked session instead of the canvas.
     dock_focus: bool,
-    panel_width: f32,
     edge_drag: Option<EdgeDrag>,
     worktrees: Vec<surface::Worktree>,
     inspector: Inspector,
@@ -770,18 +819,54 @@ impl TerminalView {
             dock_collapsed: false,
             workspace_artifact: WorkspaceArtifact::Overview,
             file_explorer_mode: FileExplorerMode::Smart,
+            selected_project_file: None,
+            editor_buffer: None,
+            editor_buffers: HashMap::new(),
+            editor_saves: std::collections::HashSet::new(),
+            editor_queued_saves: HashMap::new(),
+            editor_save_errors: HashMap::new(),
+            close_confirmation_pending: false,
+            editor_error: None,
+            editor_loading: false,
+            editor_open_generation: 0,
+            editor_pending_position: None,
+            editor_scroll: gpui::ScrollHandle::new(),
+            editor_search: None,
+            lsp: crate::lsp::Supervisor::default(),
+            lsp_server: None,
+            lsp_error: None,
+            lsp_diagnostics: Vec::new(),
+            lsp_restart_at: None,
+            lsp_restart_attempts: 0,
+            collapsed_file_paths: std::collections::HashSet::new(),
+            project_file_entries: Vec::new(),
+            project_files_loading: false,
+            project_files_error: None,
+            project_files_generation: 0,
+            project_files_cancel: None,
+            project_files_checked_at: None,
+            collapsed_file_groups: std::collections::HashSet::new(),
             dock_tool: DockTool::Terminal,
-            show_context_panel: false,
             dock_tab: DockTab::default(),
             changes: None,
             changes_dir: None,
+            git_loading: false,
+            git_error: None,
+            git_status_generation: 0,
+            git_diff_generation: 0,
+            git_project_generation: 0,
+            git_diff_loading: false,
+            git_diff_error: None,
+            selected_git_scope: surface::DiffScope::Unstaged,
+            git_diff_view: GitDiffView::Unified,
+            reviewed_changes: std::collections::HashSet::new(),
+            git_dialog: None,
             projects: Vec::new(),
             dock_height: 168.0,
             agent_clis: Vec::new(),
             dock_target: None,
             dock_moved: false,
             dock_focus: false,
-            panel_width: 320.0,
             edge_drag: None,
             worktrees: Vec::new(),
             inspector: Inspector::default(),
@@ -805,9 +890,17 @@ impl TerminalView {
             _appearance_watch: None,
             _focus_subs: subs,
         };
+        let weak_view = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            weak_view
+                .update(cx, |view, cx| view.confirm_window_close(window, cx))
+                .unwrap_or(true)
+        });
         view.restore_workspace(cx);
+        view.refresh_project_files(cx);
         view.tasks = tasks::TasksState::for_project(view.local_project_root.as_deref());
         view.refresh_tasks(cx);
+        view.refresh_changes(cx);
         view._pump = Some(cx.spawn(async move |this, cx| {
             while rx.next().await.is_some() {
                 while rx.try_recv().is_ok() {}
@@ -841,6 +934,17 @@ impl TerminalView {
                 // observed process state while it is on screen.
                 if view.show_utility_dock && view.dock_tab == DockTab::Processes {
                     cx.notify();
+                }
+                if view.poll_lsp() {
+                    cx.notify();
+                }
+                if view.workspace_artifact == WorkspaceArtifact::Files
+                    && !view.project_files_loading
+                    && view.project_files_checked_at.is_none_or(|checked| {
+                        checked.elapsed() >= std::time::Duration::from_secs(10)
+                    })
+                {
+                    view.refresh_project_files(cx);
                 }
             });
             if alive.is_err() {
@@ -883,7 +987,6 @@ impl TerminalView {
                         self.open_diff(&change, cx);
                     }
                 }
-                "panel" => self.show_context_panel = true,
                 _ => {}
             }
         }
@@ -1355,6 +1458,7 @@ impl Render for TerminalView {
         let settings_overlay = self.settings_panel(cx);
         let account_editor_overlay = self.account_editor_overlay(cx);
         let task_form_overlay = self.task_form_overlay(cx);
+        let git_dialog_overlay = self.git_dialog_overlay(cx);
         let shell_menu_overlay = self.shell_menu_overlay(cx);
         let recovery_notice = self.recovery_notice.clone();
         let update_notice = self.update_notice.clone();
@@ -1368,6 +1472,8 @@ impl Render for TerminalView {
             .font_family(self.ui_font.clone())
             .text_size(px(tokens::text::MD))
             .text_color(hsla(self.theme.text))
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::key_down))
             .when(self.show_sidebar, |d| d.child(self.workspace_sidebar(cx)))
             .child(
                 div()
@@ -1460,22 +1566,33 @@ impl Render for TerminalView {
                                     .min_w(px(0.0))
                                     .flex()
                                     .flex_col()
-                                    .when(!self.terminal_maximized, |d| {
-                                        d.child(self.workspace_tab_strip(cx))
-                                    })
-                                    .when(!self.terminal_maximized, |d| {
-                                        d.child(self.workspace_artifact_content(cx))
-                                    })
-                                    .child(self.terminal_panel_header(cx))
-                                    .when(!self.dock_collapsed, |d| {
-                                        d.child(
+                                    .child(self.workspace_tab_strip(cx))
+                                    .when(
+                                        self.workspace_artifact != WorkspaceArtifact::Sessions
+                                            && !self.terminal_maximized,
+                                        |d| d.child(self.workspace_artifact_content(cx)),
+                                    )
+                                    .when(
+                                        self.workspace_artifact == WorkspaceArtifact::Overview
+                                            || self.workspace_artifact
+                                                == WorkspaceArtifact::Sessions
+                                            || self.terminal_maximized,
+                                        |d| d.child(self.terminal_panel_header(cx)),
+                                    )
+                                    .when(
+                                        !self.dock_collapsed
+                                            && (self.workspace_artifact
+                                                == WorkspaceArtifact::Overview
+                                                || self.workspace_artifact
+                                                    == WorkspaceArtifact::Sessions
+                                                || self.terminal_maximized),
+                                        |d| {
+                                            d.child(
                                         div()
                                             .id("terminal")
                                             .relative()
                                             .overflow_hidden()
                                             .bg(hsla(self.theme.term_bg))
-                                            .track_focus(&self.focus)
-                                            .on_key_down(cx.listener(Self::key_down))
                                             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
                                             .on_modifiers_changed(cx.listener(
                                                 |this,
@@ -1488,10 +1605,20 @@ impl Render for TerminalView {
                                                     this.update_hover(ev.modifiers, at, cx);
                                                 },
                                             ))
-                                            .when(self.terminal_maximized, |d| d.flex_1())
-                                            .when(!self.terminal_maximized, |d| {
+                                            .when(
+                                                self.terminal_maximized
+                                                    || self.workspace_artifact
+                                                        == WorkspaceArtifact::Sessions,
+                                                |d| d.flex_1(),
+                                            )
+                                            .when(
+                                                !self.terminal_maximized
+                                                    && self.workspace_artifact
+                                                        == WorkspaceArtifact::Overview,
+                                                |d| {
                                                 d.h(px(236.0)).flex_none()
-                                            })
+                                            },
+                                            )
                                             .when(self.dock_tool != DockTool::Terminal, |d| {
                                                 d.h(px(168.0)).flex_none()
                                             })
@@ -1506,14 +1633,17 @@ impl Render for TerminalView {
                                                 d.children(split_content.into_iter().flatten())
                                             })
                                             .when(self.dock_tool != DockTool::Terminal, |d| {
-                                                d.child(self.dock_placeholder())
+                                                d.child(self.dock_placeholder(cx))
                                             }),
                                     )
-                                    }),
+                                        },
+                                    ),
                             )
-                            .when(!self.terminal_maximized, |d| {
-                                d.child(self.workbench_inspector(cx))
-                            })
+                            .when(
+                                !self.terminal_maximized
+                                    && self.workspace_artifact == WorkspaceArtifact::Overview,
+                                |d| d.child(self.workbench_inspector(cx)),
+                            )
                             .when(self.show_utility_dock, |d| {
                                 d.child(self.utility_dock(metrics, cx))
                             }),
@@ -1564,6 +1694,7 @@ impl Render for TerminalView {
             .children(search_overlay)
             .children(shell_menu_overlay)
             .children(task_form_overlay)
+            .children(git_dialog_overlay)
             .children(settings_overlay)
             .children(account_editor_overlay)
             // Painted last so a picker opened from settings is on top.

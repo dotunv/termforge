@@ -87,6 +87,10 @@ enum TaskCommand {
         /// A one-line shell command TermForge can run for this task.
         #[arg(long)]
         command: Option<String>,
+        #[arg(long, value_enum, default_value = "normal")]
+        priority: TaskPriorityArg,
+        #[arg(long = "depends-on", value_delimiter = ',')]
+        depends_on: Vec<tf_proto::TaskId>,
         #[arg(long, default_value = ".")]
         project: PathBuf,
     },
@@ -101,6 +105,12 @@ enum TaskCommand {
         /// Set the task's command; pass an empty string to clear it.
         #[arg(long)]
         command: Option<String>,
+        #[arg(long, value_enum)]
+        priority: Option<TaskPriorityArg>,
+        #[arg(long = "depends-on", value_delimiter = ',')]
+        depends_on: Vec<tf_proto::TaskId>,
+        #[arg(long, conflicts_with = "depends_on")]
+        clear_dependencies: bool,
     },
     /// Delete a task.
     Delete { id: tf_proto::TaskId },
@@ -112,6 +122,25 @@ enum TaskStateArg {
     Active,
     Blocked,
     Done,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum TaskPriorityArg {
+    Low,
+    Normal,
+    High,
+    Urgent,
+}
+
+impl From<TaskPriorityArg> for tf_proto::TaskPriority {
+    fn from(priority: TaskPriorityArg) -> Self {
+        match priority {
+            TaskPriorityArg::Low => Self::Low,
+            TaskPriorityArg::Normal => Self::Normal,
+            TaskPriorityArg::High => Self::High,
+            TaskPriorityArg::Urgent => Self::Urgent,
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -174,7 +203,22 @@ fn run_task(command: TaskCommand, out: &mut impl Write) -> Result<()> {
                     anyhow::bail!("unexpected response from forged");
                 };
                 for task in tasks {
-                    writeln!(out, "{}\t{:?}\t{}", task.id, task.state, task.title)?;
+                    writeln!(
+                        out,
+                        "{}\t{:?}\t{:?}\t{}",
+                        task.id, task.state, task.priority, task.title
+                    )?;
+                    if !task.dependencies.is_empty() {
+                        writeln!(
+                            out,
+                            "  depends on: {}",
+                            task.dependencies
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )?;
+                    }
                     if let Some(command) = &task.command {
                         writeln!(out, "  $ {command}")?;
                     }
@@ -187,6 +231,8 @@ fn run_task(command: TaskCommand, out: &mut impl Write) -> Result<()> {
                 title,
                 context,
                 command,
+                priority,
+                depends_on,
                 project,
             } => {
                 let project_root = dunce::canonicalize(project)?;
@@ -196,6 +242,8 @@ fn run_task(command: TaskCommand, out: &mut impl Write) -> Result<()> {
                         title,
                         context,
                         command,
+                        priority: priority.into(),
+                        dependencies: depends_on,
                     }))
                     .await?;
                 let tf_proto::Response::TaskCreated(id) = response else {
@@ -209,6 +257,9 @@ fn run_task(command: TaskCommand, out: &mut impl Write) -> Result<()> {
                 title,
                 context,
                 command,
+                priority,
+                depends_on,
+                clear_dependencies,
             } => {
                 let state = state.map(|state| match state {
                     TaskStateArg::Planned => tf_proto::TaskState::Planned,
@@ -223,6 +274,14 @@ fn run_task(command: TaskCommand, out: &mut impl Write) -> Result<()> {
                         title,
                         context,
                         command,
+                        priority: priority.map(Into::into),
+                        dependencies: if clear_dependencies {
+                            Some(Vec::new())
+                        } else if depends_on.is_empty() {
+                            None
+                        } else {
+                            Some(depends_on)
+                        },
                     }))
                     .await?;
             }
@@ -390,5 +449,35 @@ mod tests {
         .unwrap();
         let parsed = parse(&seq);
         assert!(matches!(parsed.as_slice(), [TapEvent::ProgramStatus(_)]));
+    }
+
+    #[test]
+    fn task_cli_accepts_priority_and_dependencies() {
+        let dependency = "123e4567-e89b-12d3-a456-426614174000";
+        let cli = Cli::try_parse_from([
+            "tf",
+            "task",
+            "create",
+            "Ship beta",
+            "--priority",
+            "urgent",
+            "--depends-on",
+            dependency,
+        ])
+        .expect("task planning arguments parse");
+        let Command::Task {
+            command:
+                TaskCommand::Create {
+                    priority,
+                    depends_on,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("task create command expected");
+        };
+        assert!(matches!(priority, TaskPriorityArg::Urgent));
+        assert_eq!(depends_on.len(), 1);
+        assert_eq!(depends_on[0].to_string(), dependency);
     }
 }

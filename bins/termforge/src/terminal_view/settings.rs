@@ -495,6 +495,7 @@ impl TerminalView {
                 let w = *w;
                 Self::choice(cx, *label, (width - w).abs() < 1.0, move |this, cx| {
                     this.sidebar_width = w;
+                    this.persist_layout();
                     cx.notify();
                 })
             })
@@ -1039,8 +1040,8 @@ impl TerminalView {
                     self.button(
                         "set-copy-diag",
                         "Copy",
-                        cx.listener(|this, _, _, cx| {
-                            this.run_palette_action(PaletteAction::CopyDiagnostics, cx);
+                        cx.listener(|this, _, window, cx| {
+                            this.run_palette_action(PaletteAction::CopyDiagnostics, window, cx);
                         }),
                     ),
                 ),
@@ -1050,9 +1051,9 @@ impl TerminalView {
                     self.button(
                         "set-doctor",
                         "Run",
-                        cx.listener(|this, _, _, cx| {
+                        cx.listener(|this, _, window, cx| {
                             this.settings = None;
-                            this.run_palette_action(PaletteAction::DaemonDoctor, cx);
+                            this.run_palette_action(PaletteAction::DaemonDoctor, window, cx);
                         }),
                     ),
                 ),

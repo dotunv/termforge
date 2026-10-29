@@ -79,6 +79,10 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
+        if self.git_dialog_key(ev, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.account_editor_key(ev, cx) {
             cx.stop_propagation();
             return;
@@ -89,7 +93,7 @@ impl TerminalView {
             return;
         }
         // A picker opened from settings owns the keyboard until it closes.
-        if self.settings.is_some() && self.palette.is_some() && self.palette_key(ev, cx) {
+        if self.settings.is_some() && self.palette.is_some() && self.palette_key(ev, window, cx) {
             cx.stop_propagation();
             return;
         }
@@ -105,7 +109,11 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
-        if self.palette.is_some() && self.palette_key(ev, cx) {
+        if self.palette.is_some() && self.palette_key(ev, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if self.editor_search_key(ev, cx) || self.editor_key(ev, cx) {
             cx.stop_propagation();
             return;
         }
@@ -139,11 +147,9 @@ impl TerminalView {
         } else if ctrl_shift && key.eq_ignore_ascii_case("w") {
             self.close_active_tab(cx);
         } else if ctrl_shift && key.eq_ignore_ascii_case("q") {
-            cx.quit();
+            self.request_window_close(window, cx);
         } else if ctrl_shift && key.eq_ignore_ascii_case("b") {
             self.toggle_sidebar(cx);
-        } else if ctrl_shift && key.eq_ignore_ascii_case("i") {
-            self.toggle_context_panel(cx);
         } else if ctrl_shift && key.eq_ignore_ascii_case("j") {
             self.toggle_utility_dock(cx);
         } else if ctrl_shift && key.eq_ignore_ascii_case("u") {
@@ -231,6 +237,169 @@ impl TerminalView {
         cx.stop_propagation();
     }
 
+    fn editor_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<'_, Self>) -> bool {
+        if self.workspace_artifact != WorkspaceArtifact::Files || self.dock_focus {
+            return false;
+        }
+        let key = ev.keystroke.key.as_str();
+        let modifiers = ev.keystroke.modifiers;
+        if modifiers.control && !modifiers.alt && matches!(key, "c" | "x" | "v") {
+            match key {
+                "c" => self.copy_selection(cx),
+                "v" => self.paste(cx),
+                "x" => {
+                    self.copy_selection(cx);
+                    if let Some(buffer) = self.editor_buffer.as_mut() {
+                        if !buffer.selection().is_empty() {
+                            buffer.replace_selection("");
+                            self.editor_error = None;
+                            self.sync_editor_lsp();
+                            self.reveal_editor_selection();
+                            cx.notify();
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if modifiers.control && !modifiers.alt && key.eq_ignore_ascii_case("s") {
+            self.save_editor_buffer(cx);
+            return true;
+        }
+        let Some(buffer) = self.editor_buffer.as_mut() else {
+            return matches!(key, "backspace" | "delete" | "enter");
+        };
+        let revision_before = buffer.revision();
+        if modifiers.control && !modifiers.alt && key.eq_ignore_ascii_case("f") {
+            self.editor_search = Some(EditorSearchState::default());
+        } else if modifiers.control && !modifiers.alt && key.eq_ignore_ascii_case("z") {
+            if modifiers.shift {
+                buffer.redo();
+            } else {
+                buffer.undo();
+            }
+        } else if modifiers.control && !modifiers.alt && key.eq_ignore_ascii_case("y") {
+            buffer.redo();
+        } else if modifiers.control && !modifiers.alt && key.eq_ignore_ascii_case("a") {
+            buffer.set_selection(0..buffer.text().len());
+        } else if !modifiers.control && !modifiers.alt && key == "backspace" {
+            buffer.delete_backward();
+            self.editor_error = None;
+        } else if !modifiers.control && !modifiers.alt && key == "delete" {
+            buffer.delete_forward();
+            self.editor_error = None;
+        } else if !modifiers.control && !modifiers.alt && key == "enter" {
+            buffer.replace_selection("\n");
+            self.editor_error = None;
+        } else if !modifiers.control && !modifiers.alt && key == "tab" {
+            buffer.replace_selection("    ");
+            self.editor_error = None;
+        } else if !modifiers.alt && matches!(key, "left" | "right" | "up" | "down" | "home" | "end")
+        {
+            let movement = match (key, modifiers.control) {
+                ("left", false) => tf_editor::Movement::Left,
+                ("right", false) => tf_editor::Movement::Right,
+                ("up", false) => tf_editor::Movement::Up,
+                ("down", false) => tf_editor::Movement::Down,
+                ("home", false) => tf_editor::Movement::LineStart,
+                ("end", false) => tf_editor::Movement::LineEnd,
+                ("home", true) => tf_editor::Movement::DocumentStart,
+                ("end", true) => tf_editor::Movement::DocumentEnd,
+                _ => return false,
+            };
+            buffer.move_cursor(movement, modifiers.shift);
+        } else if !modifiers.control && !modifiers.alt && ev.keystroke.key_char.is_some() {
+            // GPUI sends printable and composed input through EntityInputHandler.
+            return true;
+        } else {
+            return false;
+        }
+        let changed = buffer.revision() != revision_before;
+        if changed {
+            self.sync_editor_lsp();
+        }
+        self.reveal_editor_selection();
+        cx.notify();
+        true
+    }
+
+    fn editor_search_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<'_, Self>) -> bool {
+        let Some(search) = self.editor_search.as_mut() else {
+            return false;
+        };
+        let key = ev.keystroke.key.as_str();
+        let modifiers = ev.keystroke.modifiers;
+        match key {
+            "escape" => {
+                self.editor_search = None;
+                cx.notify();
+                return true;
+            }
+            "enter" => {
+                let backwards = modifiers.shift;
+                self.move_editor_search(backwards, cx);
+                return true;
+            }
+            "backspace" if !modifiers.control && !modifiers.alt => {
+                search.query.pop();
+            }
+            _ if !modifiers.control && !modifiers.alt => {
+                if let Some(text) = ev.keystroke.key_char.as_deref() {
+                    if !text.chars().any(char::is_control) {
+                        search.query.push_str(text);
+                    }
+                } else {
+                    return true;
+                }
+            }
+            _ => return true,
+        }
+        self.recompute_editor_search();
+        cx.notify();
+        true
+    }
+
+    pub(super) fn recompute_editor_search(&mut self) {
+        let Some(search) = self.editor_search.as_mut() else {
+            return;
+        };
+        search.matches = self
+            .editor_buffer
+            .as_ref()
+            .map(|buffer| buffer.find_all(&search.query, false))
+            .unwrap_or_default();
+        search.current = 0;
+        if let (Some(buffer), Some(range)) =
+            (self.editor_buffer.as_mut(), search.matches.first().cloned())
+        {
+            buffer.set_selection(range);
+        }
+        self.reveal_editor_selection();
+    }
+
+    pub(super) fn move_editor_search(&mut self, backwards: bool, cx: &mut Context<'_, Self>) {
+        let Some(search) = self.editor_search.as_mut() else {
+            return;
+        };
+        if search.matches.is_empty() {
+            return;
+        }
+        search.current = if backwards {
+            search
+                .current
+                .checked_sub(1)
+                .unwrap_or(search.matches.len() - 1)
+        } else {
+            (search.current + 1) % search.matches.len()
+        };
+        if let Some(buffer) = self.editor_buffer.as_mut() {
+            buffer.set_selection(search.matches[search.current].clone());
+        }
+        self.reveal_editor_selection();
+        cx.notify();
+    }
+
     pub(super) fn send_key(
         &mut self,
         ev: &KeyDownEvent,
@@ -268,6 +437,16 @@ impl TerminalView {
 
     pub(super) fn paste(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+            if self.workspace_artifact == WorkspaceArtifact::Files && !self.dock_focus {
+                if let Some(buffer) = self.editor_buffer.as_mut() {
+                    buffer.replace_selection(&text);
+                    self.editor_error = None;
+                    self.sync_editor_lsp();
+                    self.reveal_editor_selection();
+                    cx.notify();
+                }
+                return;
+            }
             let bytes = encode_paste(&text, self.input_modes());
             self.selection = None;
             self.scroll(Scroll::Bottom, cx);
@@ -295,6 +474,15 @@ impl TerminalView {
     }
 
     pub(super) fn copy_selection(&self, cx: &mut Context<'_, Self>) {
+        if self.workspace_artifact == WorkspaceArtifact::Files && !self.dock_focus {
+            if let Some(buffer) = self.editor_buffer.as_ref() {
+                let selection = buffer.selection();
+                if !selection.is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(buffer.text()[selection].to_owned()));
+                }
+            }
+            return;
+        }
         if let Some(text) = self.selection_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }

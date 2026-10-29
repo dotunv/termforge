@@ -88,6 +88,21 @@ pub struct SavedChrome {
     pub docked_session: Option<String>,
 }
 
+/// Project workbench environment and its per-environment presentation choices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedWorkbench {
+    pub environment: String,
+    pub file_mode: String,
+    pub selected_file: Option<String>,
+    pub git_diff_view: String,
+    pub task_filter: String,
+    pub task_sort: String,
+    pub dock_tool: String,
+    pub dock_collapsed: bool,
+    pub terminal_maximized: bool,
+    pub sidebar_width: u32,
+}
+
 /// Order, names and pins of the workspaces in a window.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Layout {
@@ -95,6 +110,8 @@ pub struct Layout {
     pub active: Option<String>,
     /// Dock and panel state; absent in files written by older builds.
     pub chrome: Option<SavedChrome>,
+    /// Absent in layouts written before workbench environments were durable.
+    pub workbench: Option<SavedWorkbench>,
 }
 
 const HEADER: &str = "termforge-layout 1";
@@ -147,6 +164,21 @@ impl Layout {
                 u8::from(c.panel_open),
                 c.panel_width,
                 c.docked_session.as_deref().unwrap_or_default()
+            ));
+        }
+        if let Some(workbench) = &self.workbench {
+            out.push_str(&format!(
+                "W\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                workbench.environment,
+                workbench.file_mode,
+                escape(workbench.selected_file.as_deref().unwrap_or_default()),
+                workbench.git_diff_view,
+                workbench.task_filter,
+                workbench.task_sort,
+                workbench.dock_tool,
+                u8::from(workbench.dock_collapsed),
+                u8::from(workbench.terminal_maximized),
+                workbench.sidebar_width,
             ));
         }
         for tab in &self.tabs {
@@ -205,6 +237,49 @@ impl Layout {
                             panel_open,
                             panel_width,
                             docked_session,
+                        });
+                    }
+                }
+                (Some("W"), Some(environment)) => {
+                    let file_mode = fields.next();
+                    let selected_file = fields.next().map(unescape).filter(|path| !path.is_empty());
+                    let git_diff_view = fields.next();
+                    let task_filter = fields.next();
+                    let task_sort = fields.next();
+                    let dock_tool = fields.next();
+                    let dock_collapsed = fields.next().map(|value| value == "1");
+                    let terminal_maximized = fields.next().map(|value| value == "1");
+                    let sidebar_width = fields.next().and_then(|value| value.parse().ok());
+                    if let (
+                        Some(file_mode),
+                        Some(git_diff_view),
+                        Some(task_filter),
+                        Some(task_sort),
+                        Some(dock_tool),
+                        Some(dock_collapsed),
+                        Some(terminal_maximized),
+                        Some(sidebar_width),
+                    ) = (
+                        file_mode,
+                        git_diff_view,
+                        task_filter,
+                        task_sort,
+                        dock_tool,
+                        dock_collapsed,
+                        terminal_maximized,
+                        sidebar_width,
+                    ) {
+                        layout.workbench = Some(SavedWorkbench {
+                            environment: environment.to_owned(),
+                            file_mode: file_mode.to_owned(),
+                            selected_file,
+                            git_diff_view: git_diff_view.to_owned(),
+                            task_filter: task_filter.to_owned(),
+                            task_sort: task_sort.to_owned(),
+                            dock_tool: dock_tool.to_owned(),
+                            dock_collapsed,
+                            terminal_maximized,
+                            sidebar_width,
                         });
                     }
                 }
@@ -277,6 +352,18 @@ mod tests {
                 panel_open: false,
                 panel_width: 360,
                 docked_session: Some("a".into()),
+            }),
+            workbench: Some(SavedWorkbench {
+                environment: "files".into(),
+                file_mode: "tree".into(),
+                selected_file: Some("src/main.rs".into()),
+                git_diff_view: "split".into(),
+                task_filter: "blocked".into(),
+                task_sort: "title".into(),
+                dock_tool: "problems".into(),
+                dock_collapsed: true,
+                terminal_maximized: false,
+                sidebar_width: 280,
             }),
         };
         assert_eq!(Layout::decode(&layout.encode()), layout);

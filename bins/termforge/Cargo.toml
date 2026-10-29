@@ -17,6 +17,7 @@ tf-pty.workspace = true
 tf-proto.workspace = true
 tf-ipc = { path = "../../crates/tf-ipc" }
 tf-update.workspace = true
+tf-editor.workspace = true
 gpui.workspace = true
 futures.workspace = true
 anyhow.workspace = true

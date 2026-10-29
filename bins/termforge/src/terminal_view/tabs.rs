@@ -246,9 +246,34 @@ impl TerminalView {
         self.dock_focus = false;
         self.changes = None;
         self.changes_dir = None;
+        self.git_status_generation = self.git_status_generation.wrapping_add(1);
+        self.git_diff_generation = self.git_diff_generation.wrapping_add(1);
+        self.git_project_generation = self.git_project_generation.wrapping_add(1);
+        self.git_loading = false;
+        self.git_diff_loading = false;
+        self.git_error = None;
+        self.git_diff_error = None;
+        self.git_dialog = None;
+        self.reviewed_changes.clear();
+        self.tasks.items.clear();
+        self.tasks.selected = None;
         self.inspector = Inspector::default();
         self.diff_lines.clear();
+        self.lsp.stop();
+        self.lsp_server = None;
+        self.lsp_error = None;
+        self.lsp_diagnostics.clear();
+        self.lsp_restart_at = None;
+        self.lsp_restart_attempts = 0;
+        self.park_editor_buffer();
+        self.editor_open_generation = self.editor_open_generation.wrapping_add(1);
+        self.editor_loading = false;
+        self.editor_error = None;
+        self.editor_pending_position = None;
+        self.selected_project_file = None;
+        self.editor_search = None;
         self.local_project_root = Some(root.clone());
+        self.reset_project_files();
         self.local_spawn.cwd = Some(root.clone());
         self.project_root = Some(root.clone());
         self.spawn = self.local_spawn.clone();
@@ -268,6 +293,8 @@ impl TerminalView {
         self.refresh_worktrees();
         self.refresh_projects();
         self.refresh_tasks(cx);
+        self.refresh_changes(cx);
+        self.refresh_project_files(cx);
         cx.notify();
     }
 
@@ -777,6 +804,7 @@ impl TerminalView {
             tabs,
             active,
             chrome: Some(self.saved_chrome()),
+            workbench: Some(self.saved_workbench()),
         }
         .encode();
         if encoded != self.saved_layout {
@@ -796,8 +824,9 @@ impl TerminalView {
                 DockTab::Processes => "processes",
             }
             .into(),
-            panel_open: self.show_context_panel,
-            panel_width: self.panel_width.round() as u32,
+            // Kept in the persisted schema so older layouts remain readable.
+            panel_open: false,
+            panel_width: 320,
             docked_session: self.dock_moved.then_some(()).and_then(|()| {
                 let id = self.dock_target?;
                 self.tabs
@@ -808,6 +837,110 @@ impl TerminalView {
                     .id()
                     .map(|id| id.to_string())
             }),
+        }
+    }
+
+    pub(super) fn saved_workbench(&self) -> SavedWorkbench {
+        SavedWorkbench {
+            environment: match self.workspace_artifact {
+                WorkspaceArtifact::Overview => "project",
+                WorkspaceArtifact::Files => "files",
+                WorkspaceArtifact::Changes => "git",
+                WorkspaceArtifact::Tasks => "tasks",
+                WorkspaceArtifact::Sessions => "terminal",
+            }
+            .into(),
+            file_mode: match self.file_explorer_mode {
+                FileExplorerMode::Smart => "smart",
+                FileExplorerMode::Tree => "tree",
+            }
+            .into(),
+            selected_file: self
+                .selected_project_file
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            git_diff_view: match self.git_diff_view {
+                GitDiffView::Unified => "unified",
+                GitDiffView::Split => "split",
+            }
+            .into(),
+            task_filter: match self.tasks.filter {
+                tasks::TaskFilter::Open => "open",
+                tasks::TaskFilter::All => "all",
+                tasks::TaskFilter::Active => "active",
+                tasks::TaskFilter::Blocked => "blocked",
+                tasks::TaskFilter::Done => "done",
+            }
+            .into(),
+            task_sort: match self.tasks.sort {
+                tasks::TaskSort::Priority => "priority",
+                tasks::TaskSort::Updated => "updated",
+                tasks::TaskSort::Title => "title",
+            }
+            .into(),
+            dock_tool: match self.dock_tool {
+                DockTool::Terminal => "terminal",
+                DockTool::Problems => "problems",
+                DockTool::Output => "output",
+            }
+            .into(),
+            dock_collapsed: self.dock_collapsed,
+            terminal_maximized: self.terminal_maximized,
+            sidebar_width: self.sidebar_width.round() as u32,
+        }
+    }
+
+    pub(super) fn apply_saved_workbench(
+        &mut self,
+        saved: &SavedWorkbench,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.workspace_artifact = match saved.environment.as_str() {
+            "files" => WorkspaceArtifact::Files,
+            "git" => WorkspaceArtifact::Changes,
+            "tasks" => WorkspaceArtifact::Tasks,
+            "terminal" => WorkspaceArtifact::Sessions,
+            _ => WorkspaceArtifact::Overview,
+        };
+        self.file_explorer_mode = match saved.file_mode.as_str() {
+            "smart" => FileExplorerMode::Smart,
+            _ => FileExplorerMode::Tree,
+        };
+        self.git_diff_view = match saved.git_diff_view.as_str() {
+            "split" => GitDiffView::Split,
+            _ => GitDiffView::Unified,
+        };
+        self.tasks.filter = match saved.task_filter.as_str() {
+            "all" => tasks::TaskFilter::All,
+            "active" => tasks::TaskFilter::Active,
+            "blocked" => tasks::TaskFilter::Blocked,
+            "done" => tasks::TaskFilter::Done,
+            _ => tasks::TaskFilter::Open,
+        };
+        self.tasks.sort = match saved.task_sort.as_str() {
+            "updated" => tasks::TaskSort::Updated,
+            "title" => tasks::TaskSort::Title,
+            _ => tasks::TaskSort::Priority,
+        };
+        self.dock_tool = match saved.dock_tool.as_str() {
+            "problems" => DockTool::Problems,
+            "output" => DockTool::Output,
+            _ => DockTool::Terminal,
+        };
+        self.dock_collapsed = saved.dock_collapsed;
+        self.terminal_maximized = saved.terminal_maximized;
+        self.sidebar_width = (saved.sidebar_width as f32).clamp(190.0, 320.0);
+
+        if let Some(path) = saved.selected_file.as_deref().map(PathBuf::from) {
+            let safe = path.components().all(|component| {
+                matches!(
+                    component,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            });
+            if safe && self.local_project_root.is_some() {
+                self.open_project_file(path, cx);
+            }
         }
     }
 
@@ -822,8 +955,6 @@ impl TerminalView {
             "processes" => DockTab::Processes,
             _ => DockTab::Sessions,
         };
-        self.show_context_panel = chrome.panel_open;
-        self.panel_width = (chrome.panel_width as f32).clamp(240.0, 640.0);
     }
 
     /// Reconnect a persisted dock placement to the runtime tab that owns its
@@ -979,6 +1110,9 @@ impl TerminalView {
             .unwrap_or_default();
         if let Some(chrome) = &layout.chrome {
             self.apply_saved_chrome(chrome);
+        }
+        if let Some(workbench) = &layout.workbench {
+            self.apply_saved_workbench(workbench, cx);
         }
         let running = |id: &str| {
             stored

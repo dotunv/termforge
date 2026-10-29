@@ -19,7 +19,7 @@ use tf_proto::{
     TaskInfo, TaskState as ProtoTaskState, TermSize, WorkingDirectory, PROTOCOL_VERSION,
 };
 use tf_session::{LiveSession, SessionEvent, SpawnOptions, Waker};
-use tf_store::{RestorableSession, Store, TaskRecord, TaskState as StoreTaskState};
+use tf_store::{RestorableSession, Store, TaskRecord, TaskState as StoreTaskState, TaskUpdate};
 
 const MAX_REPLAY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REPLAY_EVENTS: usize = 8_192;
@@ -534,6 +534,12 @@ impl SessionHost {
                 context: create.context,
                 command,
                 state: StoreTaskState::Planned,
+                priority: task_priority_to_store(create.priority),
+                dependencies: create
+                    .dependencies
+                    .into_iter()
+                    .map(|id| id.to_string())
+                    .collect(),
                 updated_at: 0,
             })
             .map_err(internal)?;
@@ -552,13 +558,23 @@ impl SessionHost {
             Some(value) if value.trim().is_empty() => Some(String::new()),
             other => normalize_task_command(other)?,
         };
+        let dependencies = update.dependencies.map(|dependencies| {
+            dependencies
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+        });
         let changed = lock(&self.store)
             .update_task(
                 &update.id.to_string(),
-                update.state.map(task_state_to_store),
-                update.title.as_deref(),
-                update.context.as_deref(),
-                command.as_deref(),
+                &TaskUpdate {
+                    state: update.state.map(task_state_to_store),
+                    title: update.title.as_deref(),
+                    context: update.context.as_deref(),
+                    command: command.as_deref(),
+                    priority: update.priority.map(task_priority_to_store),
+                    dependencies: dependencies.as_deref(),
+                },
             )
             .map_err(internal)?;
         if !changed {
@@ -607,6 +623,15 @@ fn task_state_to_store(state: ProtoTaskState) -> StoreTaskState {
     }
 }
 
+fn task_priority_to_store(priority: tf_proto::TaskPriority) -> tf_store::TaskPriority {
+    match priority {
+        tf_proto::TaskPriority::Low => tf_store::TaskPriority::Low,
+        tf_proto::TaskPriority::Normal => tf_store::TaskPriority::Normal,
+        tf_proto::TaskPriority::High => tf_store::TaskPriority::High,
+        tf_proto::TaskPriority::Urgent => tf_store::TaskPriority::Urgent,
+    }
+}
+
 fn task_to_proto(task: TaskRecord) -> Result<TaskInfo, ProtoError> {
     Ok(TaskInfo {
         id: task.id.parse().map_err(internal)?,
@@ -620,6 +645,17 @@ fn task_to_proto(task: TaskRecord) -> Result<TaskInfo, ProtoError> {
             StoreTaskState::Blocked => ProtoTaskState::Blocked,
             StoreTaskState::Done => ProtoTaskState::Done,
         },
+        priority: match task.priority {
+            tf_store::TaskPriority::Low => tf_proto::TaskPriority::Low,
+            tf_store::TaskPriority::Normal => tf_proto::TaskPriority::Normal,
+            tf_store::TaskPriority::High => tf_proto::TaskPriority::High,
+            tf_store::TaskPriority::Urgent => tf_proto::TaskPriority::Urgent,
+        },
+        dependencies: task
+            .dependencies
+            .into_iter()
+            .map(|id| id.parse().map_err(internal))
+            .collect::<Result<_, _>>()?,
         updated_at: task.updated_at,
     })
 }
@@ -1049,6 +1085,8 @@ mod tests {
                 title: "Ship beta".into(),
                 context: "Preserve project state".into(),
                 command: Some("cargo test".into()),
+                priority: tf_proto::TaskPriority::High,
+                dependencies: Vec::new(),
             }))
             .expect("create task")
         else {
@@ -1060,6 +1098,8 @@ mod tests {
             title: None,
             context: Some("Daemon and UI share context".into()),
             command: None,
+            priority: None,
+            dependencies: None,
         }))
         .expect("update task");
         let Response::Tasks(tasks) = host
@@ -1075,6 +1115,46 @@ mod tests {
         assert_eq!(tasks[0].state, ProtoTaskState::Active);
         assert_eq!(tasks[0].context, "Daemon and UI share context");
         assert_eq!(tasks[0].command.as_deref(), Some("cargo test"));
+        assert_eq!(tasks[0].priority, tf_proto::TaskPriority::High);
+
+        let Response::TaskCreated(dependent_id) = host
+            .handle(Request::CreateTask(tf_proto::CreateTask {
+                project_root: dir.path().to_path_buf(),
+                title: "Publish beta".into(),
+                context: String::new(),
+                command: None,
+                priority: tf_proto::TaskPriority::Urgent,
+                dependencies: vec![id],
+            }))
+            .expect("create dependent task")
+        else {
+            panic!("unexpected response");
+        };
+        let Response::Tasks(tasks) = host
+            .handle(Request::ListTasks {
+                project_root: dir.path().to_path_buf(),
+            })
+            .expect("list dependent task")
+        else {
+            panic!("unexpected response");
+        };
+        let dependent = tasks
+            .iter()
+            .find(|task| task.id == dependent_id)
+            .expect("dependent task is listed");
+        assert_eq!(dependent.dependencies, vec![id]);
+        assert_eq!(dependent.priority, tf_proto::TaskPriority::Urgent);
+        assert!(host
+            .handle(Request::UpdateTask(tf_proto::UpdateTask {
+                id,
+                state: None,
+                title: None,
+                context: None,
+                command: None,
+                priority: None,
+                dependencies: Some(vec![dependent_id]),
+            }))
+            .is_err());
 
         // A task command is typed into a terminal, so reject control text.
         assert!(host
@@ -1083,12 +1163,16 @@ mod tests {
                 title: "Bad".into(),
                 context: String::new(),
                 command: Some("echo hi\nrm -rf /".into()),
+                priority: tf_proto::TaskPriority::Normal,
+                dependencies: Vec::new(),
             }))
             .is_err());
 
         host.handle(Request::DeleteTask { id })
             .expect("delete task");
         assert!(host.handle(Request::DeleteTask { id }).is_err());
+        host.handle(Request::DeleteTask { id: dependent_id })
+            .expect("delete dependent task");
     }
 
     #[test]

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped on any incompatible change to the types in this crate.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Stable identifier for a PTY session owned by `forged`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -205,6 +205,8 @@ pub struct CreateTask {
     pub context: String,
     /// A single-line shell command the UI can run for this task.
     pub command: Option<String>,
+    pub priority: TaskPriority,
+    pub dependencies: Vec<TaskId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,6 +217,9 @@ pub struct UpdateTask {
     pub context: Option<String>,
     /// `None` leaves the command unchanged; `Some("")` clears it.
     pub command: Option<String>,
+    pub priority: Option<TaskPriority>,
+    /// `None` leaves the dependency set unchanged; an empty list clears it.
+    pub dependencies: Option<Vec<TaskId>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,6 +230,15 @@ pub enum TaskState {
     Done,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskPriority {
+    Low,
+    #[default]
+    Normal,
+    High,
+    Urgent,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskInfo {
     pub id: TaskId,
@@ -233,6 +247,8 @@ pub struct TaskInfo {
     pub context: String,
     pub command: Option<String>,
     pub state: TaskState,
+    pub priority: TaskPriority,
+    pub dependencies: Vec<TaskId>,
     pub updated_at: i64,
 }
 

@@ -23,17 +23,93 @@ pub(super) enum TaskField {
     Command,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum TaskFilter {
+    #[default]
+    Open,
+    All,
+    Active,
+    Blocked,
+    Done,
+}
+
+impl TaskFilter {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Open => "Open",
+            Self::All => "All",
+            Self::Active => "Active",
+            Self::Blocked => "Blocked",
+            Self::Done => "Completed",
+        }
+    }
+
+    fn includes(self, state: TaskState) -> bool {
+        match self {
+            Self::Open => state != TaskState::Done,
+            Self::All => true,
+            Self::Active => state == TaskState::Active,
+            Self::Blocked => state == TaskState::Blocked,
+            Self::Done => state == TaskState::Done,
+        }
+    }
+
+    pub(super) fn next(self) -> Self {
+        match self {
+            Self::Open => Self::All,
+            Self::All => Self::Active,
+            Self::Active => Self::Blocked,
+            Self::Blocked => Self::Done,
+            Self::Done => Self::Open,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum TaskSort {
+    #[default]
+    Priority,
+    Updated,
+    Title,
+}
+
+impl TaskSort {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Priority => "Priority",
+            Self::Updated => "Recently updated",
+            Self::Title => "Title",
+        }
+    }
+
+    pub(super) fn next(self) -> Self {
+        match self {
+            Self::Priority => Self::Updated,
+            Self::Updated => Self::Title,
+            Self::Title => Self::Priority,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct TaskForm {
     title: String,
     command: String,
     field: TaskField,
+    priority: tf_proto::TaskPriority,
+    dependencies: Vec<tf_proto::TaskId>,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct TasksState {
     pub(super) items: Vec<TaskInfo>,
+    pub(super) loading: bool,
+    pub(super) error: Option<String>,
+    load_generation: u64,
     show_done: bool,
+    pub(super) filter: TaskFilter,
+    pub(super) sort: TaskSort,
+    pub(super) selected: Option<tf_proto::TaskId>,
     form: Option<TaskForm>,
     /// Project-detected common commands.
     suggestions: Vec<Suggestion>,
@@ -69,7 +145,51 @@ fn state_glyph(state: TaskState) -> &'static str {
     }
 }
 
+fn priority_label(priority: tf_proto::TaskPriority) -> &'static str {
+    match priority {
+        tf_proto::TaskPriority::Low => "Low",
+        tf_proto::TaskPriority::Normal => "Normal",
+        tf_proto::TaskPriority::High => "High",
+        tf_proto::TaskPriority::Urgent => "Urgent",
+    }
+}
+
+fn priority_rank(priority: tf_proto::TaskPriority) -> u8 {
+    match priority {
+        tf_proto::TaskPriority::Low => 0,
+        tf_proto::TaskPriority::Normal => 1,
+        tf_proto::TaskPriority::High => 2,
+        tf_proto::TaskPriority::Urgent => 3,
+    }
+}
+
 impl TerminalView {
+    pub(super) fn filtered_task_indices(&self) -> Vec<usize> {
+        let mut indices: Vec<_> = self
+            .tasks
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| self.tasks.filter.includes(task.state))
+            .map(|(index, _)| index)
+            .collect();
+        indices.sort_by(|left, right| {
+            let left = &self.tasks.items[*left];
+            let right = &self.tasks.items[*right];
+            match self.tasks.sort {
+                TaskSort::Priority => priority_rank(right.priority)
+                    .cmp(&priority_rank(left.priority))
+                    .then_with(|| right.updated_at.cmp(&left.updated_at)),
+                TaskSort::Updated => right.updated_at.cmp(&left.updated_at),
+                TaskSort::Title => left
+                    .title
+                    .to_ascii_lowercase()
+                    .cmp(&right.title.to_ascii_lowercase()),
+            }
+        });
+        indices
+    }
+
     pub(super) fn task_summary(&self) -> (usize, usize, usize) {
         let open = self
             .tasks
@@ -111,17 +231,42 @@ impl TerminalView {
 
     pub(super) fn refresh_tasks(&mut self, cx: &mut Context<'_, Self>) {
         let Some(root) = self.local_project_root.clone() else {
+            self.tasks.items.clear();
+            self.tasks.loading = false;
+            self.tasks.error = None;
             return;
         };
+        self.tasks.load_generation = self.tasks.load_generation.saturating_add(1);
+        let generation = self.tasks.load_generation;
+        self.tasks.loading = true;
+        self.tasks.error = None;
+        cx.notify();
         cx.spawn(async move |this, cx| {
+            let requested_root = root.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move { remote_session::list_tasks(root) })
                 .await;
             let _ = this.update(cx, |view, cx| {
+                if view.tasks.load_generation != generation
+                    || view.local_project_root.as_ref() != Some(&requested_root)
+                {
+                    return;
+                }
+                view.tasks.loading = false;
                 match result {
-                    Ok(items) => view.tasks.items = items,
-                    Err(error) => tracing::debug!("could not list tasks: {error:#}"),
+                    Ok(items) => {
+                        view.tasks.items = items;
+                        if view.tasks.selected.is_some_and(|selected| {
+                            !view.tasks.items.iter().any(|task| task.id == selected)
+                        }) {
+                            view.tasks.selected = None;
+                        }
+                        view.tasks.error = None;
+                    }
+                    Err(error) => {
+                        view.tasks.error = Some(format!("Could not load tasks: {error:#}"));
+                    }
                 }
                 cx.notify();
             });
@@ -137,10 +282,15 @@ impl TerminalView {
     ) {
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async move { job() }).await;
-            if let Err(error) = &result {
-                tracing::warn!("task update failed: {error:#}");
-            }
-            let _ = this.update(cx, |view, cx| view.refresh_tasks(cx));
+            let _ = this.update(cx, |view, cx| match result {
+                Ok(()) => view.refresh_tasks(cx),
+                Err(error) => {
+                    tracing::warn!("task update failed: {error:#}");
+                    view.tasks.loading = false;
+                    view.tasks.error = Some(format!("Task update failed: {error:#}"));
+                    cx.notify();
+                }
+            });
         })
         .detach();
     }
@@ -163,11 +313,20 @@ impl TerminalView {
             } else {
                 TaskField::Command
             },
+            priority: tf_proto::TaskPriority::Normal,
+            dependencies: Vec::new(),
         });
         cx.notify();
     }
 
-    fn save_task(&mut self, title: String, command: String, cx: &mut Context<'_, Self>) {
+    fn save_task(
+        &mut self,
+        title: String,
+        command: String,
+        priority: tf_proto::TaskPriority,
+        dependencies: Vec<tf_proto::TaskId>,
+        cx: &mut Context<'_, Self>,
+    ) {
         let Some(root) = self.local_project_root.clone() else {
             return;
         };
@@ -181,7 +340,7 @@ impl TerminalView {
         }
         let command = (!command.is_empty()).then_some(command);
         self.mutate_tasks(
-            move || remote_session::create_task(root, title, command),
+            move || remote_session::create_task(root, title, command, priority, dependencies),
             cx,
         );
     }
@@ -190,7 +349,40 @@ impl TerminalView {
         let Some(form) = self.tasks.form.take() else {
             return;
         };
-        self.save_task(form.title, form.command, cx);
+        self.save_task(
+            form.title,
+            form.command,
+            form.priority,
+            form.dependencies,
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn set_task_form_priority(
+        &mut self,
+        priority: tf_proto::TaskPriority,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(form) = self.tasks.form.as_mut() {
+            form.priority = priority;
+            cx.notify();
+        }
+    }
+
+    fn toggle_task_form_dependency(
+        &mut self,
+        dependency: tf_proto::TaskId,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(form) = self.tasks.form.as_mut() else {
+            return;
+        };
+        if let Some(index) = form.dependencies.iter().position(|id| *id == dependency) {
+            form.dependencies.remove(index);
+        } else {
+            form.dependencies.push(dependency);
+        }
         cx.notify();
     }
 
@@ -214,6 +406,41 @@ impl TerminalView {
         };
         let id = task.id;
         self.mutate_tasks(move || remote_session::delete_task(id), cx);
+    }
+
+    fn cycle_task_priority(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+        let Some(task) = self.tasks.items.get(index) else {
+            return;
+        };
+        let priority = match task.priority {
+            tf_proto::TaskPriority::Low => tf_proto::TaskPriority::Normal,
+            tf_proto::TaskPriority::Normal => tf_proto::TaskPriority::High,
+            tf_proto::TaskPriority::High => tf_proto::TaskPriority::Urgent,
+            tf_proto::TaskPriority::Urgent => tf_proto::TaskPriority::Low,
+        };
+        let id = task.id;
+        self.mutate_tasks(move || remote_session::set_task_priority(id, priority), cx);
+    }
+
+    pub(super) fn toggle_existing_task_dependency(
+        &mut self,
+        task_id: tf_proto::TaskId,
+        dependency: tf_proto::TaskId,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(task) = self.tasks.items.iter().find(|task| task.id == task_id) else {
+            return;
+        };
+        let mut dependencies = task.dependencies.clone();
+        if let Some(index) = dependencies.iter().position(|id| *id == dependency) {
+            dependencies.remove(index);
+        } else {
+            dependencies.push(dependency);
+        }
+        self.mutate_tasks(
+            move || remote_session::set_task_dependencies(task_id, dependencies),
+            cx,
+        );
     }
 
     /// Type a task's command into the active terminal and mark it active.
@@ -365,6 +592,8 @@ impl TerminalView {
         let done = task.state == TaskState::Done;
         let group = SharedString::from(format!("task-row-{index}"));
         let has_command = task.command.is_some();
+        let task_id = task.id;
+        let selected = self.tasks.selected == Some(task.id);
         let glyph_color = match task.state {
             TaskState::Done => t.success,
             TaskState::Active => t.accent,
@@ -380,7 +609,12 @@ impl TerminalView {
             .items_start()
             .gap(px(tokens::space::SM))
             .rounded(px(tokens::radius::MD))
+            .when(selected, |d| d.bg(hsla(t.bg_selected)))
             .hover(|style| style.bg(hsla(t.bg_hover)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.tasks.selected = Some(task_id);
+                cx.notify();
+            }))
             .child(
                 div()
                     .id(("task-state", index))
@@ -417,7 +651,39 @@ impl TerminalView {
                             .text_size(px(tokens::text::XS))
                             .text_color(hsla(t.text_faint))
                             .child(SharedString::from(format!("$ {command}")))
-                    })),
+                    }))
+                    .child(
+                        div()
+                            .mt(px(2.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(tokens::space::SM))
+                            .text_size(px(tokens::text::XS))
+                            .text_color(hsla(t.text_faint))
+                            .child(
+                                div()
+                                    .id(("task-priority", index))
+                                    .px(px(4.0))
+                                    .rounded(px(tokens::radius::SM))
+                                    .hover(|style| style.bg(hsla(t.bg_hover)))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.cycle_task_priority(index, cx);
+                                        cx.stop_propagation();
+                                    }))
+                                    .child(priority_label(task.priority)),
+                            )
+                            .when(!task.dependencies.is_empty(), |d| {
+                                d.child(SharedString::from(format!(
+                                    "{} prerequisite{}",
+                                    task.dependencies.len(),
+                                    if task.dependencies.len() == 1 {
+                                        ""
+                                    } else {
+                                        "s"
+                                    }
+                                )))
+                            }),
+                    ),
             )
             .children(has_command.then(|| {
                 div()
@@ -453,7 +719,7 @@ impl TerminalView {
             )
     }
 
-    fn suggestion_row(
+    pub(super) fn suggestion_row(
         &self,
         index: usize,
         title: String,
@@ -570,20 +836,47 @@ impl TerminalView {
                 cx,
             ))
             .when(open, |d| {
-                d.when(no_rows, |d| {
+                d.when(self.tasks.loading, |d| {
                     d.child(
                         div()
                             .px(px(tokens::space::SM))
                             .py(px(4.0))
                             .text_size(px(tokens::text::XS))
                             .text_color(hsla(t.text_faint))
-                            .child(if self.local_project_root.is_some() {
-                                "No tasks yet. Add one with +, or pick a suggestion."
-                            } else {
-                                "Tasks need a project folder."
-                            }),
+                            .child("Loading tasks…"),
                     )
                 })
+                .when_some(self.tasks.error.clone(), |d, error| {
+                    d.child(
+                        div()
+                            .id("sidebar-tasks-retry")
+                            .px(px(tokens::space::SM))
+                            .py(px(4.0))
+                            .text_size(px(tokens::text::XS))
+                            .text_color(hsla(t.danger))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(hsla(t.bg_hover)))
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_tasks(cx)))
+                            .child(SharedString::from(format!("{error} · Retry"))),
+                    )
+                })
+                .when(
+                    no_rows && !self.tasks.loading && self.tasks.error.is_none(),
+                    |d| {
+                        d.child(
+                            div()
+                                .px(px(tokens::space::SM))
+                                .py(px(4.0))
+                                .text_size(px(tokens::text::XS))
+                                .text_color(hsla(t.text_faint))
+                                .child(if self.local_project_root.is_some() {
+                                    "No tasks yet. Add one with +, or pick a suggestion."
+                                } else {
+                                    "Tasks need a project folder."
+                                }),
+                        )
+                    },
+                )
                 .child(div().flex().flex_col().gap(px(2.0)).children(rows))
                 .when(hidden_done > 0, |d| {
                     d.child(
@@ -650,6 +943,59 @@ impl TerminalView {
                 )
         };
         let can_save = !form.title.trim().is_empty() || !form.command.trim().is_empty();
+        let priority_options: Vec<_> = [
+            tf_proto::TaskPriority::Low,
+            tf_proto::TaskPriority::Normal,
+            tf_proto::TaskPriority::High,
+            tf_proto::TaskPriority::Urgent,
+        ]
+        .into_iter()
+        .map(|priority| {
+            let selected = form.priority == priority;
+            div()
+                .id(SharedString::from(format!(
+                    "task-priority-{}",
+                    priority_label(priority).to_ascii_lowercase()
+                )))
+                .px(px(tokens::space::SM))
+                .py(px(4.0))
+                .rounded(px(tokens::radius::SM))
+                .border_1()
+                .border_color(hsla(if selected { t.accent } else { t.border }))
+                .bg(hsla(if selected { t.bg_selected } else { t.bg_app }))
+                .text_size(px(tokens::text::XS))
+                .text_color(hsla(if selected { t.text } else { t.text_muted }))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_task_form_priority(priority, cx);
+                }))
+                .child(priority_label(priority))
+        })
+        .collect();
+        let dependency_options: Vec<_> = self
+            .tasks
+            .items
+            .iter()
+            .map(|task| {
+                let task_id = task.id;
+                let selected = form.dependencies.contains(&task_id);
+                div()
+                    .id(SharedString::from(format!("task-dependency-{task_id}")))
+                    .px(px(tokens::space::SM))
+                    .py(px(4.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(tokens::space::SM))
+                    .rounded(px(tokens::radius::SM))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(hsla(t.bg_hover)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_task_form_dependency(task_id, cx);
+                    }))
+                    .child(if selected { "☑" } else { "☐" })
+                    .child(SharedString::from(task.title.clone()))
+            })
+            .collect();
         Some(
             div()
                 .id("task-form-scrim")
@@ -672,6 +1018,8 @@ impl TerminalView {
                         .mt(px(64.0))
                         .w(px(520.0))
                         .max_w_full()
+                        .max_h(px(720.0))
+                        .overflow_y_scroll()
                         .p(px(tokens::space::LG))
                         .flex()
                         .flex_col()
@@ -700,6 +1048,49 @@ impl TerminalView {
                             "e.g. cargo test --workspace",
                             form.field == TaskField::Command,
                         ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.0))
+                                .child(
+                                    div()
+                                        .text_size(px(tokens::text::XS))
+                                        .text_color(hsla(t.text_faint))
+                                        .child("PRIORITY"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(tokens::space::XS))
+                                        .children(priority_options),
+                                ),
+                        )
+                        .when(!dependency_options.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(tokens::text::XS))
+                                            .text_color(hsla(t.text_faint))
+                                            .child("PREREQUISITES"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("task-form-dependencies")
+                                            .max_h(px(150.0))
+                                            .overflow_y_scroll()
+                                            .rounded(px(tokens::radius::MD))
+                                            .border_1()
+                                            .border_color(hsla(t.border))
+                                            .children(dependency_options),
+                                    ),
+                            )
+                        })
                         .child(
                             div()
                                 .flex()
@@ -785,5 +1176,19 @@ mod tests {
         state.set_suggestion_root(None);
         assert!(state.suggestions.is_empty());
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn task_filters_and_priority_order_are_explicit() {
+        assert!(TaskFilter::Open.includes(TaskState::Active));
+        assert!(!TaskFilter::Open.includes(TaskState::Done));
+        assert!(TaskFilter::Blocked.includes(TaskState::Blocked));
+        assert!(!TaskFilter::Blocked.includes(TaskState::Planned));
+        assert!(
+            priority_rank(tf_proto::TaskPriority::Urgent)
+                > priority_rank(tf_proto::TaskPriority::High)
+        );
+        assert_eq!(TaskSort::Priority.next(), TaskSort::Updated);
+        assert_eq!(TaskFilter::Done.next(), TaskFilter::Open);
     }
 }

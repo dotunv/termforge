@@ -759,7 +759,13 @@ pub fn list_tasks(project_root: PathBuf) -> Result<Vec<tf_proto::TaskInfo>> {
 }
 
 /// Create a task. Blocking; call it from a background thread.
-pub fn create_task(project_root: PathBuf, title: String, command: Option<String>) -> Result<()> {
+pub fn create_task(
+    project_root: PathBuf,
+    title: String,
+    command: Option<String>,
+    priority: tf_proto::TaskPriority,
+    dependencies: Vec<tf_proto::TaskId>,
+) -> Result<()> {
     blocking_ipc(move |mut client| async move {
         client
             .request(Request::CreateTask(tf_proto::CreateTask {
@@ -767,6 +773,8 @@ pub fn create_task(project_root: PathBuf, title: String, command: Option<String>
                 title,
                 context: String::new(),
                 command,
+                priority,
+                dependencies,
             }))
             .await?;
         Ok(())
@@ -783,8 +791,46 @@ pub fn set_task_state(id: tf_proto::TaskId, state: tf_proto::TaskState) -> Resul
                 title: None,
                 context: None,
                 command: None,
+                priority: None,
+                dependencies: None,
             }))
             .await?;
+        Ok(())
+    })
+}
+
+pub fn set_task_priority(id: tf_proto::TaskId, priority: tf_proto::TaskPriority) -> Result<()> {
+    task_update(tf_proto::UpdateTask {
+        id,
+        state: None,
+        title: None,
+        context: None,
+        command: None,
+        priority: Some(priority),
+        dependencies: None,
+    })
+}
+
+pub fn set_task_dependencies(
+    id: tf_proto::TaskId,
+    dependencies: Vec<tf_proto::TaskId>,
+) -> Result<()> {
+    task_update(tf_proto::UpdateTask {
+        id,
+        state: None,
+        title: None,
+        context: None,
+        command: None,
+        priority: None,
+        dependencies: Some(dependencies),
+    })
+}
+
+fn task_update(update: tf_proto::UpdateTask) -> Result<()> {
+    futures::executor::block_on(async move {
+        let token = tf_ipc::token::ensure_token()?;
+        let mut client = tf_ipc::IpcClient::connect("", &token, "termforge-ui").await?;
+        client.request(Request::UpdateTask(update)).await?;
         Ok(())
     })
 }

@@ -62,9 +62,18 @@ impl EntityInputHandler for TerminalView {
     ) {
         self.ime_preedit.clear();
         if !text.is_empty() {
-            self.selection = None;
-            self.scroll(Scroll::Bottom, cx);
-            self.write(text.as_bytes());
+            if self.workspace_artifact == WorkspaceArtifact::Files && !self.dock_focus {
+                if let Some(buffer) = self.editor_buffer.as_mut() {
+                    buffer.replace_selection(text);
+                    self.editor_error = None;
+                }
+                self.sync_editor_lsp();
+                self.reveal_editor_selection();
+            } else {
+                self.selection = None;
+                self.scroll(Scroll::Bottom, cx);
+                self.write(text.as_bytes());
+            }
         }
         cx.notify();
     }

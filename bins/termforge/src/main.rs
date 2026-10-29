@@ -10,6 +10,7 @@ mod appearance;
 mod contexts;
 mod diagnostics;
 mod fonts;
+mod lsp;
 mod paint;
 mod panes;
 mod perf;

@@ -32,6 +32,7 @@ tf-shell = { path = "crates/tf-shell" }
 tf-ui = { path = "crates/tf-ui" }
 tf-input = { path = "crates/tf-input" }
 tf-update = { path = "crates/tf-update" }
+tf-editor = { path = "crates/tf-editor" }
 
 # terminal
 alacritty_terminal = "0.26"

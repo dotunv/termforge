@@ -6228,6 +6228,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tf-config",
+ "tf-editor",
  "tf-engine",
  "tf-input",
  "tf-ipc",
@@ -6273,6 +6274,13 @@ dependencies = [
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
+]
+
+[[package]]
+name = "tf-editor"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]

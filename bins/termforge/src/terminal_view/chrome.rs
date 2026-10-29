@@ -78,7 +78,7 @@ impl TerminalView {
     }
 
     /// Minimise, maximise and close, drawn in the toolbar.
-    pub(super) fn window_controls(&self) -> impl IntoElement {
+    pub(super) fn window_controls(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let t = &self.theme;
         let button = |id: &'static str, glyph: &'static str, danger: bool| {
             let hover = if danger {
@@ -108,9 +108,11 @@ impl TerminalView {
             .child(
                 button("window-maximize", "▢", false).on_click(|_, window, _| window.zoom_window()),
             )
-            .child(
-                button("window-close", "×", true).on_click(|_, window, _| window.remove_window()),
-            )
+            .child(button("window-close", "×", true).on_click(cx.listener(
+                |this, _, window, cx| {
+                    this.request_window_close(window, cx);
+                },
+            )))
     }
 
     /// Thin hit strips on the window edges so a borderless window can still
@@ -271,11 +273,6 @@ impl TerminalView {
                                     .child("⌕  Search"),
                             )
                             .child(self.icon_button(
-                                "header-toggle-context-panel",
-                                "◫",
-                                cx.listener(|this, _, _, cx| this.toggle_context_panel(cx)),
-                            ))
-                            .child(self.icon_button(
                                 "header-toggle-utility-dock",
                                 "▱",
                                 cx.listener(|this, _, _, cx| this.toggle_utility_dock(cx)),
@@ -299,7 +296,7 @@ impl TerminalView {
                                 cx.listener(|this, _, _, cx| this.open_settings(cx)),
                             )),
                     )
-                    .when(self.client_decorated, |d| d.child(self.window_controls())),
+                    .when(self.client_decorated, |d| d.child(self.window_controls(cx))),
             )
             .when(self.show_tab_strip, |header| {
                 header.child(
@@ -600,12 +597,6 @@ impl TerminalView {
         cx.notify();
     }
 
-    pub(super) fn toggle_context_panel(&mut self, cx: &mut Context<'_, Self>) {
-        self.show_context_panel = !self.show_context_panel;
-        self.persist_layout();
-        cx.notify();
-    }
-
     pub(super) fn toggle_utility_dock(&mut self, cx: &mut Context<'_, Self>) {
         self.show_utility_dock = !self.show_utility_dock;
         self.persist_layout();
@@ -620,21 +611,13 @@ impl TerminalView {
             .or_else(|| self.local_project_root.clone())
     }
 
-    /// Resize the dock or right panel while its edge is dragged.
+    /// Resize the utility dock while its edge is dragged.
     pub(super) fn drag_edge(&mut self, position: gpui::Point<Pixels>, cx: &mut Context<'_, Self>) {
         let Some(drag) = self.edge_drag else {
             return;
         };
-        match drag.edge {
-            Edge::Dock => {
-                let delta = drag.pointer - f32::from(position.y);
-                self.dock_height = (drag.size + delta).clamp(96.0, 520.0);
-            }
-            Edge::Panel => {
-                let delta = drag.pointer - f32::from(position.x);
-                self.panel_width = (drag.size + delta).clamp(240.0, 640.0);
-            }
-        }
+        let delta = drag.pointer - f32::from(position.y);
+        self.dock_height = (drag.size + delta).clamp(96.0, 520.0);
         cx.notify();
     }
 
@@ -642,38 +625,22 @@ impl TerminalView {
     fn edge_handle(
         &self,
         id: &'static str,
-        edge: Edge,
         cx: &mut Context<'_, Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let handle = div().id(id).absolute();
-        let handle = match edge {
-            Edge::Dock => handle
-                .top(px(-2.0))
-                .left(px(0.0))
-                .right(px(0.0))
-                .h(px(5.0))
-                .cursor_row_resize(),
-            Edge::Panel => handle
-                .left(px(-2.0))
-                .top(px(0.0))
-                .bottom(px(0.0))
-                .w(px(5.0))
-                .cursor_col_resize(),
-        };
+        let handle = handle
+            .top(px(-2.0))
+            .left(px(0.0))
+            .right(px(0.0))
+            .h(px(5.0))
+            .cursor_row_resize();
         handle
             .hover(|style| style.bg(with_alpha(hsla(self.theme.accent), 0.5)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                    let (pointer, size) = match edge {
-                        Edge::Dock => (f32::from(ev.position.y), this.dock_height),
-                        Edge::Panel => (f32::from(ev.position.x), this.panel_width),
-                    };
-                    this.edge_drag = Some(EdgeDrag {
-                        edge,
-                        pointer,
-                        size,
-                    });
+                    let (pointer, size) = (f32::from(ev.position.y), this.dock_height);
+                    this.edge_drag = Some(EdgeDrag { pointer, size });
                     cx.stop_propagation();
                 }),
             )
@@ -988,9 +955,62 @@ impl TerminalView {
     }
 
     pub(super) fn refresh_changes(&mut self, cx: &mut Context<'_, Self>) {
+        self.git_status_generation = self.git_status_generation.wrapping_add(1);
+        let generation = self.git_status_generation;
+        let previous_dir = self.changes_dir.clone();
         self.changes_dir = self.repo_dir();
-        self.changes = self.changes_dir.as_deref().and_then(surface::git_changes);
+        if self.changes_dir != previous_dir {
+            self.git_project_generation = self.git_project_generation.wrapping_add(1);
+            self.git_diff_generation = self.git_diff_generation.wrapping_add(1);
+            self.git_diff_loading = false;
+            self.git_diff_error = None;
+            self.diff_lines.clear();
+            self.inspector = Inspector::Session;
+            self.changes = None;
+            self.reviewed_changes.clear();
+        }
+        let Some(root) = self.changes_dir.clone() else {
+            self.changes = None;
+            self.git_loading = false;
+            self.git_error = Some("The active session is not inside a Git repository.".into());
+            cx.notify();
+            return;
+        };
+        self.git_loading = true;
+        self.git_error = None;
         cx.notify();
+        cx.spawn(async move |this, cx| {
+            let requested_root = root.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { surface::git_changes(&root) })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.git_status_generation != generation
+                    || view.changes_dir.as_ref() != Some(&requested_root)
+                {
+                    return;
+                }
+                view.git_loading = false;
+                match result {
+                    Some(changes) => {
+                        view.changes = Some(changes);
+                        view.git_error = None;
+                        if view.workspace_artifact == WorkspaceArtifact::Changes
+                            && !view.change_selection_is_current()
+                        {
+                            view.open_first_workbench_diff(cx);
+                        }
+                    }
+                    None => {
+                        view.changes = None;
+                        view.git_error = Some("Git status could not be read.".into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(super) fn set_dock_tab(&mut self, tab: DockTab, cx: &mut Context<'_, Self>) {
@@ -1010,163 +1030,10 @@ impl TerminalView {
     }
 
     pub(super) fn open_diff(&mut self, change: &GitChange, cx: &mut Context<'_, Self>) {
-        let untracked = change.kind == surface::ChangeKind::Untracked;
-        // Diff against the directory the list was read from, not wherever the
-        // shell has since moved to.
-        self.diff_lines = self
-            .changes_dir
-            .as_deref()
-            .and_then(|dir| surface::git_diff(dir, &change.path, untracked))
-            .map(|text| text.lines().map(str::to_owned).collect())
-            .unwrap_or_default();
-        self.inspector = Inspector::Diff(change.path.clone());
-        self.show_context_panel = true;
+        self.workspace_artifact = WorkspaceArtifact::Changes;
+        self.open_workbench_diff(change.clone(), surface::DiffScope::Unstaged, cx);
+        self.persist_layout();
         cx.notify();
-    }
-
-    /// Right panel. It owns no session state, so opening it cannot duplicate
-    /// or restart a PTY: it only inspects the active session or one diff.
-    pub(super) fn context_panel(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let t = &self.theme;
-        let (title, body) = match &self.inspector {
-            Inspector::Session => ("Session".to_owned(), self.session_inspector()),
-            Inspector::Diff(path) => (path.clone(), self.diff_inspector()),
-        };
-        let back = matches!(self.inspector, Inspector::Diff(_));
-        div()
-            .id("context-panel")
-            .relative()
-            .w(px(self.panel_width))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .bg(hsla(t.bg_panel))
-            .border_l_1()
-            .border_color(hsla(t.border))
-            .child(self.edge_handle("context-panel-edge", Edge::Panel, cx))
-            .child(
-                div()
-                    .h(px(34.0))
-                    .px(px(tokens::space::MD))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(tokens::space::SM))
-                    .border_b_1()
-                    .border_color(hsla(t.border))
-                    .text_size(px(tokens::text::SM))
-                    .text_color(hsla(t.text))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(SharedString::from(title)),
-                    )
-                    .when(back, |d| {
-                        d.child(self.icon_button(
-                            "context-panel-back",
-                            "‹",
-                            cx.listener(|this, _, _, cx| {
-                                this.inspector = Inspector::Session;
-                                cx.notify();
-                            }),
-                        ))
-                    })
-                    .child(self.icon_button(
-                        "context-panel-close",
-                        "×",
-                        cx.listener(|this, _, _, cx| this.toggle_context_panel(cx)),
-                    )),
-            )
-            .child(
-                div()
-                    .id("context-panel-body")
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .overflow_scroll()
-                    .child(body),
-            )
-    }
-
-    fn session_inspector(&self) -> gpui::AnyElement {
-        let t = &self.theme;
-        let location = self.cwd.clone().unwrap_or_else(|| self.project_name());
-        let branch = self
-            .tabs
-            .get(self.active_tab)
-            .and_then(|tab| tab.branch.clone())
-            .unwrap_or_else(|| "No branch detected".into());
-        let activity = self
-            .program_status_summary()
-            .and_then(|(_, detail)| detail)
-            .unwrap_or_else(|| "No program status reported".into());
-        let row = |label: &'static str, value: String| {
-            div()
-                .px(px(tokens::space::MD))
-                .py(px(6.0))
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(px(tokens::text::XS))
-                        .text_color(hsla(t.text_faint))
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .text_size(px(tokens::text::SM))
-                        .text_color(hsla(t.text_muted))
-                        .child(SharedString::from(value)),
-                )
-        };
-        div()
-            .flex()
-            .flex_col()
-            .child(row("Directory", location))
-            .child(row("Branch", branch))
-            .child(row("Activity", activity))
-            .into_any_element()
-    }
-
-    fn diff_inspector(&self) -> gpui::AnyElement {
-        let t = &self.theme;
-        if self.diff_lines.is_empty() {
-            return div()
-                .p(px(tokens::space::MD))
-                .text_size(px(tokens::text::SM))
-                .text_color(hsla(t.text_faint))
-                .child("No textual diff available for this file.")
-                .into_any_element();
-        }
-        div()
-            .py(px(tokens::space::XS))
-            .flex()
-            .flex_col()
-            .font_family(self.font.family.clone())
-            .text_size(px(11.5))
-            .children(self.diff_lines.iter().map(|line| {
-                let (fg, bg) = match surface::classify_diff_line(line) {
-                    surface::DiffLine::Added => {
-                        (t.success, Some(with_alpha(hsla(t.success), 0.10)))
-                    }
-                    surface::DiffLine::Removed => {
-                        (t.danger, Some(with_alpha(hsla(t.danger), 0.10)))
-                    }
-                    surface::DiffLine::Hunk => (t.accent, None),
-                    surface::DiffLine::Header => (t.text_faint, None),
-                    surface::DiffLine::Context => (t.text_muted, None),
-                };
-                div()
-                    .px(px(tokens::space::MD))
-                    .whitespace_nowrap()
-                    .text_color(hsla(fg))
-                    .when_some(bg, |d, bg| d.bg(bg))
-                    .child(SharedString::from(line.clone()))
-            }))
-            .into_any_element()
     }
 
     /// Bottom dock: Sessions selects existing workspaces (never a second PTY
@@ -1177,7 +1044,7 @@ impl TerminalView {
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let t = &self.theme;
-        let edge = self.edge_handle("utility-dock-edge", Edge::Dock, cx);
+        let edge = self.edge_handle("utility-dock-edge", cx);
         let processes = (self.dock_tab == DockTab::Processes).then(|| self.dock_processes(cx));
         let output = (self.dock_tab == DockTab::Output).then(|| self.dock_output(metrics, cx));
         let change_count = self.changes.as_ref().map_or(0, Vec::len);
