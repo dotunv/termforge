@@ -86,6 +86,8 @@ impl TerminalView {
             attention_note: None,
             layout: PaneTree::new(pane),
             panes: HashMap::new(),
+            retained_panes: HashMap::new(),
+            preset_layouts: HashMap::new(),
         }
     }
 

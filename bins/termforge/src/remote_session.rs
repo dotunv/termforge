@@ -5,23 +5,100 @@
 //! usable when the daemon has not been started yet.
 
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 use std::time::Duration;
 use std::{path::PathBuf, process::Stdio};
 
 use anyhow::{Context, Result};
 use tf_engine::{AlacrittyEngine, GridSize, TerminalEngine};
-use tf_ipc::IpcClient;
+use tf_ipc::{IpcClient, IpcError};
 use tf_proto::{
     BlockedKind as ProtoBlockedKind, CreateSession, Event, ProgramState as ProtoState,
-    ProgramStatus, Request, Response, SessionId, SessionInfo, TermSize,
+    ProgramStatus, ProtoError, Request, Response, SessionId, SessionInfo, TermSize,
 };
 use tf_session::{LiveSession, Processor, SessionEvent, SpawnOptions, Waker};
 use tokio::sync::mpsc::{self as async_mpsc, UnboundedReceiver, UnboundedSender};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Connection status of the local `forged` daemon observed by the UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonStatus {
+    /// Connected to `forged` over the current protocol version.
+    Connected,
+    /// `forged` responded with a protocol version mismatch; UI continues with
+    /// embedded fallback sessions.
+    VersionMismatch { server: u32, client: u32 },
+    /// `forged` is unreachable or running in embedded fallback mode.
+    Offline(String),
+}
+
+impl DaemonStatus {
+    /// Non-blocking status bar indicator text when `forged` is offline or mismatched.
+    pub fn status_bar_label(&self) -> Option<String> {
+        match self {
+            Self::Connected => None,
+            Self::VersionMismatch { server, client } => Some(format!(
+                "forged v{server} != client v{client} · embedded fallback"
+            )),
+            Self::Offline(reason) if reason.is_empty() => {
+                Some("forged offline · embedded fallback".into())
+            }
+            Self::Offline(reason) => Some(format!("forged offline ({reason}) · embedded fallback")),
+        }
+    }
+}
+
+fn daemon_status_cell() -> &'static Mutex<DaemonStatus> {
+    static STATUS: OnceLock<Mutex<DaemonStatus>> = OnceLock::new();
+    STATUS.get_or_init(|| Mutex::new(DaemonStatus::Connected))
+}
+
+/// Read the latest non-blocking daemon connection status.
+pub fn daemon_status() -> DaemonStatus {
+    lock(daemon_status_cell()).clone()
+}
+
+/// Update the daemon connection status surfaced in the status bar.
+pub fn set_daemon_status(status: DaemonStatus) {
+    *lock(daemon_status_cell()) = status;
+}
+
+/// Classify a daemon connection error and update [`daemon_status`].
+pub fn record_daemon_error(error: &anyhow::Error) -> DaemonStatus {
+    for cause in error.chain() {
+        if let Some(IpcError::Protocol(ProtoError::VersionMismatch { server, client })) =
+            cause.downcast_ref::<IpcError>()
+        {
+            let status = DaemonStatus::VersionMismatch {
+                server: *server,
+                client: *client,
+            };
+            set_daemon_status(status.clone());
+            return status;
+        }
+        if let Some(ProtoError::VersionMismatch { server, client }) =
+            cause.downcast_ref::<ProtoError>()
+        {
+            let status = DaemonStatus::VersionMismatch {
+                server: *server,
+                client: *client,
+            };
+            set_daemon_status(status.clone());
+            return status;
+        }
+    }
+    let summary = error
+        .chain()
+        .last()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| error.to_string());
+    let status = DaemonStatus::Offline(summary);
+    set_daemon_status(status.clone());
+    status
 }
 
 #[derive(Debug)]
@@ -368,9 +445,17 @@ impl SessionHandle {
                 attach,
                 Arc::clone(&wake),
             ) {
-                Ok(session) => return Ok(Self::Remote(session)),
+                Ok(session) => {
+                    set_daemon_status(DaemonStatus::Connected);
+                    return Ok(Self::Remote(session));
+                }
                 Err(initial_error) => {
-                    if let Err(start_error) = start_forged() {
+                    let initial_status = record_daemon_error(&initial_error);
+                    if matches!(initial_status, DaemonStatus::VersionMismatch { .. }) {
+                        tracing::warn!(
+                            "forged protocol mismatch ({initial_error:#}); using embedded session"
+                        );
+                    } else if let Err(start_error) = start_forged() {
                         tracing::warn!(
                             "forged unavailable ({initial_error:#}) and could not be started: {start_error:#}"
                         );
@@ -384,10 +469,14 @@ impl SessionHandle {
                                 attach,
                                 Arc::clone(&wake),
                             ) {
-                                Ok(session) => return Ok(Self::Remote(session)),
+                                Ok(session) => {
+                                    set_daemon_status(DaemonStatus::Connected);
+                                    return Ok(Self::Remote(session));
+                                }
                                 Err(error) => last_error = error,
                             }
                         }
+                        let _ = record_daemon_error(&last_error);
                         tracing::warn!(
                             "forged was started but did not become ready ({last_error:#}); using embedded session"
                         );
@@ -622,6 +711,31 @@ mod tests {
             Some(expected)
         );
     }
+
+    #[test]
+    fn record_daemon_error_extracts_version_mismatch_and_offline() {
+        let mismatch_err = anyhow::Error::new(IpcError::Protocol(ProtoError::VersionMismatch {
+            server: 9,
+            client: 10,
+        }))
+        .context("connect to forged");
+        let status = record_daemon_error(&mismatch_err);
+        assert_eq!(
+            status,
+            DaemonStatus::VersionMismatch {
+                server: 9,
+                client: 10
+            }
+        );
+        assert_eq!(
+            status.status_bar_label().as_deref(),
+            Some("forged v9 != client v10 · embedded fallback")
+        );
+
+        let offline_err = anyhow::anyhow!("connection refused").context("connect to forged");
+        let status = record_daemon_error(&offline_err);
+        assert_eq!(status, DaemonStatus::Offline("connection refused".into()));
+    }
 }
 
 /// What the daemon remembers about a project's workspace.
@@ -655,7 +769,12 @@ where
                 )
                 .await
                 .context("forged connection timed out")?
-                .context("connect to forged")?;
+                .map_err(|error| {
+                    let err = anyhow::Error::new(error).context("connect to forged");
+                    let _ = record_daemon_error(&err);
+                    err
+                })?;
+                set_daemon_status(DaemonStatus::Connected);
                 tokio::time::timeout(Duration::from_secs(2), exchange(client))
                     .await
                     .context("forged request timed out")?

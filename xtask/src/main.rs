@@ -394,14 +394,14 @@ fn ci() -> Result<()> {
     step(&["fmt", "--all", "--check"])?;
     step(&[
         "clippy",
+        "--workspace",
         "--all-targets",
         "--locked",
         "--",
         "-D",
         "warnings",
     ])?;
-    step(&["test", "--locked"])?;
-    step(&["test", "-p", "termforge", "--locked"])?;
+    step(&["test", "--workspace", "--locked"])?;
     Ok(())
 }
 

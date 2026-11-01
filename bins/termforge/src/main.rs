@@ -138,7 +138,11 @@ fn main() {
                 ..Default::default()
             },
             |window, cx| {
-                cx.new(|cx| TerminalView::new(spawn, project_root, appearance, window, cx))
+                cx.new(|cx| {
+                    let mut view = TerminalView::new(spawn, project_root, appearance, window, cx);
+                    view.prepare_workbench(cx);
+                    view
+                })
             },
         );
         if let Err(e) = opened {

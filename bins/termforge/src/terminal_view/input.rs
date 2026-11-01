@@ -478,7 +478,9 @@ impl TerminalView {
             if let Some(buffer) = self.editor_buffer.as_ref() {
                 let selection = buffer.selection();
                 if !selection.is_empty() {
-                    cx.write_to_clipboard(ClipboardItem::new_string(buffer.text()[selection].to_owned()));
+                    cx.write_to_clipboard(ClipboardItem::new_string(
+                        buffer.text()[selection].to_owned(),
+                    ));
                 }
             }
             return;

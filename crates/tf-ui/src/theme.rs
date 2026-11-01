@@ -17,8 +17,8 @@ pub struct ThemeInput {
 impl ThemeInput {
     /// The default dark theme.
     pub const DARK: Self = Self {
-        base: Rgb::new(0x0b, 0x0b, 0x0d),
-        accent: Rgb::new(0x5e, 0x6a, 0xd2),
+        base: Rgb::new(0x1c, 0x1e, 0x27),
+        accent: Rgb::new(0x8b, 0xa9, 0xcc),
         contrast: 30,
     };
     /// The default light theme.

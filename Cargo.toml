@@ -5,11 +5,6 @@ members = [
     "bins/*",
     "xtask",
 ]
-default-members = [
-    "crates/*",
-    "bins/forged",
-    "bins/tf",
-]
 
 [workspace.package]
 version = "0.1.0"

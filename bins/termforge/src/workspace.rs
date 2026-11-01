@@ -1,7 +1,197 @@
-//! Workspace metadata that is not terminal state: git branch discovery and
-//! the layout document persisted by `forged` between UI launches.
+//! Workspace metadata that is not terminal state: git branch discovery,
+//! Blender-style spatial layout presets, and the layout document persisted by
+//! `forged` between UI launches.
 
 use std::path::{Path, PathBuf};
+
+use crate::panes::{
+    AreaId, Axis, CanvasState, EditorKind, InspectorState, LogStreamState, PaneTree,
+};
+
+/// Spatial workspace layout presets modeled on Blender's top-bar workspaces.
+#[allow(dead_code)] // Retained temporarily for legacy layout tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum WorkspacePreset {
+    /// 70% GraphCanvas (Architecture & Function Flow) on the left, 30% Right split (Inspector top, Terminal bottom).
+    #[default]
+    TopologyFlow,
+    /// Modern Code Studio: Outliner tree on left, Code Editor center, Function-Flow Canvas & Terminal on right.
+    CodeStudio,
+    /// AI Agent & Cloud Fleet (`cmux` command center) on left, live Agent PTY + Timeline on right.
+    AgentFleet,
+    /// 2x2 full-bleed split terminal (`cmux`) matrix.
+    ConsoleMatrix,
+    /// 50% Timeline log waterfall + 50% State/Config Inspector.
+    StateDebug,
+}
+
+#[allow(dead_code)] // Retained temporarily for legacy layout tests.
+impl WorkspacePreset {
+    pub const ALL: [Self; 5] = [
+        Self::TopologyFlow,
+        Self::CodeStudio,
+        Self::AgentFleet,
+        Self::ConsoleMatrix,
+        Self::StateDebug,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::TopologyFlow => "Architecture",
+            Self::CodeStudio => "Code",
+            Self::AgentFleet => "Agents",
+            Self::ConsoleMatrix => "Terminals",
+            Self::StateDebug => "Telemetry",
+        }
+    }
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::TopologyFlow => "topology",
+            Self::CodeStudio => "code",
+            Self::AgentFleet => "agents",
+            Self::ConsoleMatrix => "console",
+            Self::StateDebug => "debug",
+        }
+    }
+
+    #[cfg(test)]
+    pub fn from_id(id: &str) -> Self {
+        match id {
+            "code" => Self::CodeStudio,
+            "agents" => Self::AgentFleet,
+            "console" => Self::ConsoleMatrix,
+            "debug" => Self::StateDebug,
+            _ => Self::TopologyFlow,
+        }
+    }
+
+    /// Number of areas required by this preset's binary split tree.
+    pub const fn area_count(self) -> usize {
+        match self {
+            Self::TopologyFlow | Self::CodeStudio | Self::AgentFleet => 3,
+            Self::ConsoleMatrix => 4,
+            Self::StateDebug => 2,
+        }
+    }
+
+    /// Construct the binary split tree for this preset using the provided area ids
+    /// (falling back to sequential ids if fewer are supplied).
+    pub fn build_tree(self, ids: &[AreaId]) -> PaneTree {
+        let id_at = |idx: usize| -> AreaId {
+            ids.get(idx).copied().unwrap_or_else(|| {
+                let base = ids.last().copied().unwrap_or(0);
+                base + (idx.saturating_sub(ids.len().saturating_sub(1)) as u64).max(1)
+            })
+        };
+        match self {
+            Self::TopologyFlow => {
+                let canvas_id = id_at(0);
+                let inspector_id = id_at(1);
+                let terminal_id = id_at(2);
+                let mut tree = PaneTree::new_with_editor(
+                    canvas_id,
+                    EditorKind::GraphCanvas(CanvasState::default()),
+                );
+                let _ = tree.split_with_editor(
+                    canvas_id,
+                    Axis::Horizontal,
+                    0.7,
+                    inspector_id,
+                    EditorKind::Inspector(InspectorState::default()),
+                );
+                let _ = tree.split_with_editor(
+                    inspector_id,
+                    Axis::Vertical,
+                    0.5,
+                    terminal_id,
+                    EditorKind::Terminal(terminal_id),
+                );
+                let _ = tree.set_focus(terminal_id);
+                tree
+            }
+            Self::CodeStudio => {
+                let editor_id = id_at(0);
+                let canvas_id = id_at(1);
+                let terminal_id = id_at(2);
+                let mut tree = PaneTree::new_with_editor(editor_id, EditorKind::CodeEditor);
+                let _ = tree.split_with_editor(
+                    editor_id,
+                    Axis::Horizontal,
+                    0.62,
+                    canvas_id,
+                    EditorKind::GraphCanvas(CanvasState {
+                        lens: crate::panes::CanvasLens::FunctionFlow,
+                        ..CanvasState::default()
+                    }),
+                );
+                let _ = tree.split_with_editor(
+                    canvas_id,
+                    Axis::Vertical,
+                    0.55,
+                    terminal_id,
+                    EditorKind::Terminal(terminal_id),
+                );
+                let _ = tree.set_focus(editor_id);
+                tree
+            }
+            Self::AgentFleet => {
+                let fleet_id = id_at(0);
+                let terminal_id = id_at(1);
+                let timeline_id = id_at(2);
+                let mut tree = PaneTree::new_with_editor(fleet_id, EditorKind::AgentFleet);
+                let _ = tree.split_with_editor(
+                    fleet_id,
+                    Axis::Horizontal,
+                    0.56,
+                    terminal_id,
+                    EditorKind::Terminal(terminal_id),
+                );
+                let _ = tree.split_with_editor(
+                    terminal_id,
+                    Axis::Vertical,
+                    0.62,
+                    timeline_id,
+                    EditorKind::Timeline(LogStreamState::default()),
+                );
+                let _ = tree.set_focus(terminal_id);
+                tree
+            }
+            Self::ConsoleMatrix => {
+                let a0 = id_at(0);
+                let a1 = id_at(1);
+                let a2 = id_at(2);
+                let a3 = id_at(3);
+                let mut tree = PaneTree::new_with_editor(a0, EditorKind::Terminal(a0));
+                let _ =
+                    tree.split_with_editor(a0, Axis::Horizontal, 0.5, a1, EditorKind::Terminal(a1));
+                let _ =
+                    tree.split_with_editor(a0, Axis::Vertical, 0.5, a2, EditorKind::Terminal(a2));
+                let _ =
+                    tree.split_with_editor(a1, Axis::Vertical, 0.5, a3, EditorKind::Terminal(a3));
+                let _ = tree.set_focus(a0);
+                tree
+            }
+            Self::StateDebug => {
+                let timeline_id = id_at(0);
+                let inspector_id = id_at(1);
+                let mut tree = PaneTree::new_with_editor(
+                    timeline_id,
+                    EditorKind::Timeline(LogStreamState::default()),
+                );
+                let _ = tree.split_with_editor(
+                    timeline_id,
+                    Axis::Horizontal,
+                    0.5,
+                    inspector_id,
+                    EditorKind::Inspector(InspectorState::default()),
+                );
+                let _ = tree.set_focus(timeline_id);
+                tree
+            }
+        }
+    }
+}
 
 /// Branch name (or short commit id when detached) for the repository
 /// containing `dir`, read straight from `.git` without spawning `git`.
@@ -433,5 +623,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn workspace_presets_construct_expected_polymorphic_trees() {
+        for preset in WorkspacePreset::ALL {
+            assert_eq!(WorkspacePreset::from_id(preset.id()), preset);
+        }
+        let topology = WorkspacePreset::TopologyFlow.build_tree(&[10, 11, 12]);
+        assert_eq!(topology.encode(), "h0.700(10:c,v0.500(11:i,12))");
+        assert_eq!(topology.focused(), 12);
+
+        let console = WorkspacePreset::ConsoleMatrix.build_tree(&[1, 2, 3, 4]);
+        assert_eq!(console.encode(), "h0.500(v0.500(1,3),v0.500(2,4))");
+        assert_eq!(console.len(), 4);
+
+        let debug = WorkspacePreset::StateDebug.build_tree(&[20, 21]);
+        assert_eq!(debug.encode(), "h0.500(20:l,21:i)");
+        assert_eq!(debug.focused(), 20);
     }
 }

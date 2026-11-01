@@ -107,6 +107,9 @@ impl IpcClient {
                 result: Err(ProtoError::Unauthorized),
                 ..
             }) => Err(IpcError::Unauthorized),
+            Some(ServerMsg::Response {
+                result: Err(error), ..
+            }) => Err(IpcError::Protocol(error)),
             Some(other) => Err(IpcError::Protocol(ProtoError::Internal(format!(
                 "expected welcome, got {:?}",
                 other

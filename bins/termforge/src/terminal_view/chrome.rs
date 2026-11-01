@@ -188,29 +188,34 @@ impl TerminalView {
 
     pub(super) fn header(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let t = &self.theme;
-        let tab_count = self.tabs.len();
         let branch = self
             .tabs
             .get(self.active_tab)
             .and_then(|tab| tab.branch.as_deref());
         div()
-            .h(px(if self.show_tab_strip { 68.0 } else { 38.0 }))
+            .w_full()
+            .flex_none()
             .flex()
             .flex_col()
+            .overflow_hidden()
             .bg(hsla(t.bg_toolbar))
             .border_b_1()
             .border_color(hsla(t.border))
             .child(
                 div()
-                    .h(px(38.0))
-                    .px(px(tokens::space::MD))
+                    .h(px(36.0))
+                    .w_full()
+                    .px(px(tokens::space::SM))
                     .flex()
                     .items_center()
+                    .gap(px(tokens::space::SM))
+                    .overflow_hidden()
                     .child(
                         div()
+                            .flex_none()
                             .flex()
                             .items_center()
-                            .gap(px(tokens::space::SM))
+                            .gap(px(6.0))
                             .when(!self.show_sidebar, |d| {
                                 d.child(self.icon_button(
                                     "header-show-sidebar",
@@ -220,115 +225,218 @@ impl TerminalView {
                             })
                             .child(
                                 div()
-                                    .text_size(px(tokens::text::SM))
-                                    .text_color(hsla(t.text))
-                                    .child(SharedString::from(self.project_name())),
-                            )
-                            .when_some(branch, |d, branch| {
-                                d.child(div().text_color(hsla(t.text_faint)).child("·"))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(5.0))
+                                    .px(px(6.0))
+                                    .h(px(22.0))
+                                    .rounded(px(tokens::radius::SM))
+                                    .bg(hsla(t.bg_app))
+                                    .border_1()
+                                    .border_color(hsla(t.border))
                                     .child(
                                         div()
-                                            .max_w(px(180.0))
+                                            .text_size(px(10.0))
+                                            .text_color(hsla(t.accent))
+                                            .child("◆"),
+                                    )
+                                    .child(
+                                        div()
+                                            .max_w(px(110.0))
                                             .overflow_hidden()
                                             .whitespace_nowrap()
                                             .text_size(px(tokens::text::XS))
-                                            .text_color(hsla(t.text_faint))
-                                            .child(SharedString::from(format!("⎇ {branch}"))),
+                                            .text_color(hsla(t.text))
+                                            .child(SharedString::from(self.project_name())),
                                     )
-                            })
-                            .child(
-                                div()
-                                    .w(px(1.0))
-                                    .h(px(14.0))
-                                    .bg(with_alpha(hsla(t.border), 0.75)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(tokens::text::XS))
-                                    .text_color(hsla(t.text_faint))
-                                    .child("Workspace"),
+                                    .when_some(branch, |d, branch| {
+                                        d.child(
+                                            div()
+                                                .max_w(px(96.0))
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_size(px(10.0))
+                                                .text_color(hsla(t.text_faint))
+                                                .child(SharedString::from(format!("⎇ {branch}"))),
+                                        )
+                                    }),
                             )
                             .child(self.context_badge("header-context-badge", cx)),
                     )
-                    .child(self.drag_region("header-drag").flex_1().h_full())
                     .child(
                         div()
+                            .w(px(1.0))
+                            .h(px(14.0))
+                            .flex_none()
+                            .bg(with_alpha(hsla(t.border), 0.7)),
+                    )
+                    .child(
+                        // Activity navigation keeps project tools in the foreground.
+                        div()
+                            .flex_none()
+                            .h_full()
                             .flex()
                             .items_center()
-                            .gap(px(tokens::space::SM))
+                            .gap(px(2.0))
+                            .children(
+                                [
+                                    WorkspaceArtifact::Tasks,
+                                    WorkspaceArtifact::Files,
+                                    WorkspaceArtifact::Sessions,
+                                    WorkspaceArtifact::Changes,
+                                ]
+                                .into_iter()
+                                .map(|artifact| {
+                                    let active = self.workspace_artifact == artifact;
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "header-workspace-{}",
+                                            artifact.label()
+                                        )))
+                                        .h_full()
+                                        .px(px(9.0))
+                                        .flex()
+                                        .items_center()
+                                        .text_size(px(tokens::text::XS))
+                                        .border_b_2()
+                                        .border_color(if active {
+                                            hsla(t.accent)
+                                        } else {
+                                            gpui::transparent_black()
+                                        })
+                                        .when(active, |d| {
+                                            d.bg(with_alpha(hsla(t.accent), 0.10))
+                                                .text_color(hsla(t.text))
+                                        })
+                                        .when(!active, |d| {
+                                            d.text_color(hsla(t.text_muted)).hover(|style| {
+                                                style.bg(hsla(t.bg_hover)).text_color(hsla(t.text))
+                                            })
+                                        })
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if this.workspace_artifact != artifact
+                                                || this.terminal_maximized
+                                            {
+                                                this.workspace_artifact = artifact;
+                                                this.terminal_maximized = false;
+                                                this.show_tab_strip =
+                                                    artifact == WorkspaceArtifact::Sessions;
+                                                if artifact == WorkspaceArtifact::Changes {
+                                                    this.refresh_changes(cx);
+                                                }
+                                                this.persist_layout();
+                                                cx.notify();
+                                            }
+                                        }))
+                                        .child(artifact.label())
+                                }),
+                            ),
+                    )
+                    .child(
+                        self.drag_region("header-drag")
+                            .flex_1()
+                            .min_w(px(8.0))
+                            .h_full(),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
                             .child(
                                 div()
                                     .id("header-command-palette")
+                                    .h(px(22.0))
                                     .px(px(7.0))
-                                    .py(px(3.0))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.0))
                                     .rounded(px(tokens::radius::SM))
                                     .border_1()
                                     .border_color(hsla(t.border))
+                                    .bg(hsla(t.bg_app))
                                     .text_size(px(tokens::text::XS))
-                                    .text_color(hsla(t.text_faint))
+                                    .text_color(hsla(t.text_muted))
+                                    .cursor_pointer()
                                     .hover(|style| {
                                         style.bg(hsla(t.bg_hover)).text_color(hsla(t.text))
                                     })
                                     .on_click(cx.listener(|this, _, _, cx| this.open_palette(cx)))
-                                    .child("⌕  Search"),
+                                    .child(div().text_color(hsla(t.accent)).child("⌘K"))
+                                    .child("Search"),
                             )
                             .child(self.icon_button(
                                 "header-toggle-utility-dock",
                                 "▱",
                                 cx.listener(|this, _, _, cx| this.toggle_utility_dock(cx)),
                             ))
-                            .child(
-                                div()
-                                    .px(px(6.0))
-                                    .py(px(1.0))
-                                    .text_size(px(tokens::text::XS))
-                                    .text_color(hsla(t.text_muted))
-                                    .bg(hsla(t.bg_elevated))
-                                    .rounded(px(tokens::radius::SM))
-                                    .child(SharedString::from(format!(
-                                        "{tab_count} tab{}",
-                                        if tab_count == 1 { "" } else { "s" }
-                                    ))),
-                            )
                             .child(self.icon_button(
                                 "header-settings",
                                 "⚙",
                                 cx.listener(|this, _, _, cx| this.open_settings(cx)),
-                            )),
-                    )
-                    .when(self.client_decorated, |d| d.child(self.window_controls(cx))),
+                            ))
+                            .when(self.client_decorated, |d| d.child(self.window_controls(cx))),
+                    ),
             )
             .when(self.show_tab_strip, |header| {
                 header.child(
                     div()
-                        .h(px(30.0))
+                        .h(px(34.0))
                         .px(px(tokens::space::SM))
                         .flex()
-                        .items_end()
+                        .items_center()
                         .gap(px(2.0))
+                        .border_t_1()
+                        .border_color(hsla(t.border))
+                        .bg(hsla(t.bg_toolbar))
                         .children(self.tabs.iter().enumerate().map(|(index, tab)| {
                             let active = index == self.active_tab;
                             let is_ssh = tab.spawn.ssh_host.is_some();
-                            let label = Self::tab_label(tab);
+                            let base_label =
+                                tab.name.clone().unwrap_or_else(|| Self::tab_label(tab));
+                            let repeated = tab.name.is_none()
+                                && self
+                                    .tabs
+                                    .iter()
+                                    .filter(|other| {
+                                        other.name.is_none() && Self::tab_label(other) == base_label
+                                    })
+                                    .count()
+                                    > 1;
+                            let label = if repeated {
+                                let number = self.tabs[..=index]
+                                    .iter()
+                                    .filter(|other| {
+                                        other.name.is_none() && Self::tab_label(other) == base_label
+                                    })
+                                    .count();
+                                format!("{base_label} {number}")
+                            } else {
+                                base_label
+                            };
                             let indicator_color = self.tab_status_color(tab, active, t);
                             let tab_id = tab.id;
                             let is_dragging = self.drag_state.is_dragging
                                 && self.drag_state.dragged_index == Some(index);
                             div()
                                 .id(("workspace-tab", tab.id as usize))
-                                .h(px(30.0))
-                                .max_w(px(220.0))
-                                .px(px(tokens::space::MD))
+                                .h(px(28.0))
+                                .max_w(px(160.0))
+                                .px(px(7.0))
                                 .flex()
                                 .items_center()
-                                .gap(px(tokens::space::SM))
-                                .text_size(px(tokens::text::SM))
-                                .border_b_1()
-                                .border_color(hsla(if active { t.accent } else { t.bg_toolbar }))
-                                .when(active, |d| d.text_color(hsla(t.text)))
+                                .gap(px(5.0))
+                                .rounded(px(tokens::radius::SM))
+                                .text_size(px(tokens::text::XS))
+                                .when(active, |d| {
+                                    d.bg(hsla(t.bg_elevated)).text_color(hsla(t.text))
+                                })
                                 .when(!active, |d| {
-                                    d.text_color(hsla(t.text_muted))
-                                        .hover(|style| style.text_color(hsla(t.text)))
+                                    d.text_color(hsla(t.text_muted)).hover(|style| {
+                                        style.bg(hsla(t.bg_hover)).text_color(hsla(t.text))
+                                    })
                                 })
                                 .when(is_dragging, |d| d.opacity(0.5).bg(hsla(t.accent)))
                                 .child(
@@ -337,7 +445,7 @@ impl TerminalView {
                                         .flex_1()
                                         .flex()
                                         .items_center()
-                                        .gap(px(tokens::space::SM))
+                                        .gap(px(5.0))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.select_tab(index, cx);
                                         }))
@@ -367,8 +475,6 @@ impl TerminalView {
                                                     if this.drag_state.is_dragging {
                                                         this.drag_state.drag_start =
                                                             Some(ev.position);
-                                                        // Find target tab index under cursor
-                                                        // For simplicity, we'll handle reorder on mouse_up
                                                         cx.notify();
                                                     }
                                                 }
@@ -380,8 +486,6 @@ impl TerminalView {
                                                 if this.drag_state.dragged_index == Some(index)
                                                     && this.drag_state.is_dragging
                                                 {
-                                                    // Find the tab under the cursor by checking all tab positions
-                                                    // For now, we'll use a simple approach: find nearest tab
                                                     let Some(dragged) =
                                                         this.drag_state.dragged_index
                                                     else {
@@ -395,7 +499,6 @@ impl TerminalView {
                                                             index
                                                         };
                                                         this.tabs.insert(insert_at, tab);
-                                                        // Update active_tab if it was affected
                                                         if this.active_tab == dragged {
                                                             this.active_tab = insert_at;
                                                         } else if dragged < this.active_tab
@@ -413,7 +516,6 @@ impl TerminalView {
                                                 } else if this.drag_state.dragged_index
                                                     == Some(index)
                                                 {
-                                                    // Click without drag - reset drag state
                                                     this.drag_state = DragState::default();
                                                     cx.notify();
                                                 }
@@ -421,7 +523,7 @@ impl TerminalView {
                                         )
                                         .child(
                                             div()
-                                                .size(px(6.0))
+                                                .size(px(5.0))
                                                 .rounded_full()
                                                 .bg(hsla(indicator_color)),
                                         )
@@ -438,43 +540,45 @@ impl TerminalView {
                                         .child(
                                             div()
                                                 .overflow_hidden()
+                                                .whitespace_nowrap()
                                                 .child(SharedString::from(label)),
                                         ),
                                 )
-                                // Close button
-                                .child(
-                                    div()
-                                        .id(("close-workspace-tab", tab_id as usize))
-                                        .size(px(22.0))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded(px(tokens::radius::SM))
-                                        .text_color(hsla(t.text_faint))
-                                        .hover(|style| {
-                                            style.bg(hsla(t.bg_hover)).text_color(hsla(t.text))
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if this.active_tab < this.tabs.len()
-                                                && this.tabs[this.active_tab].id == tab_id
-                                            {
-                                                this.close_active_tab(cx);
-                                            }
-                                        }))
-                                        .child("×"),
-                                )
+                                .when(active, |d| {
+                                    d.child(
+                                        div()
+                                            .id(("close-workspace-tab", tab_id as usize))
+                                            .size(px(16.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(3.0))
+                                            .text_color(hsla(t.text_faint))
+                                            .hover(|style| {
+                                                style.bg(hsla(t.bg_hover)).text_color(hsla(t.text))
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if this.active_tab < this.tabs.len()
+                                                    && this.tabs[this.active_tab].id == tab_id
+                                                {
+                                                    this.close_active_tab(cx);
+                                                }
+                                            }))
+                                            .child("×"),
+                                    )
+                                })
                         }))
                         .child(
                             div()
                                 .id("new-workspace-tab")
-                                .h(px(24.0))
-                                .mb(px(3.0))
-                                .px(px(tokens::space::SM))
+                                .size(px(20.0))
                                 .flex()
                                 .items_center()
-                                .text_size(px(tokens::text::SM))
-                                .rounded(px(tokens::radius::MD))
+                                .justify_center()
+                                .text_size(px(tokens::text::XS))
+                                .rounded(px(tokens::radius::SM))
                                 .text_color(hsla(t.text_muted))
+                                .cursor_pointer()
                                 .hover(|style| style.bg(hsla(t.bg_hover)).text_color(hsla(t.text)))
                                 .on_click(cx.listener(|this, _, _, cx| this.new_local_tab(cx)))
                                 .child("+"),
@@ -503,8 +607,14 @@ impl TerminalView {
 
     pub(super) fn status_bar(&self, grid: Option<GridSize>) -> impl IntoElement {
         let t = &self.theme;
+        let area_count = self
+            .tabs
+            .get(self.active_tab)
+            .map_or(1, |tab| tab.layout.len());
         let mut left = format!(
-            "{} command{}",
+            "WORKSPACE · {} ({area_count} area{})  ·  {} cmd{}",
+            self.workspace_artifact.label(),
+            if area_count == 1 { "" } else { "s" },
             self.commands,
             if self.commands == 1 { "" } else { "s" }
         );
@@ -530,6 +640,15 @@ impl TerminalView {
             }
         }
         let mut right = String::new();
+        if let Some(daemon_label) = crate::remote_session::daemon_status().status_bar_label() {
+            right.push_str(&daemon_label);
+            right.push_str("  ·  ");
+        } else {
+            right.push_str(&format!(
+                "forged v{} online  ·  ",
+                tf_proto::PROTOCOL_VERSION
+            ));
+        }
         if let Some(host) = self.spawn.ssh_host.as_deref() {
             right.push_str("SSH ");
             right.push_str(host);
@@ -544,18 +663,32 @@ impl TerminalView {
             right.push_str("Ctrl+click to open  ·  ");
         }
         if let Some(g) = grid {
-            right.push_str(&format!("{}×{}", g.cols, g.rows));
+            right.push_str(&format!("PTY {}×{}", g.cols, g.rows));
         }
         div()
             .h(px(tokens::layout::STATUSBAR_H))
-            .px(px(tokens::space::SM))
+            .px(px(tokens::space::MD))
             .flex()
             .items_center()
             .justify_between()
+            .border_t_1()
+            .border_color(hsla(t.border))
             .text_size(px(tokens::text::XS))
             .text_color(hsla(t.text_faint))
-            .bg(hsla(t.bg_app))
-            .child(SharedString::from(left))
+            .bg(hsla(t.bg_toolbar))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .size(px(6.0))
+                            .rounded_full()
+                            .bg(hsla(self.status_color())),
+                    )
+                    .child(SharedString::from(left)),
+            )
             .child(SharedString::from(right))
     }
 

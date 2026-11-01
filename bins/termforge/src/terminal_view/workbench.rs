@@ -53,8 +53,19 @@ pub(super) struct ProjectFileEntry {
 
 type EditorLine = Vec<(String, Option<tf_editor::HighlightKind>, bool)>;
 
-fn highlighted_editor_lines(text: &str, spans: &[tf_editor::HighlightSpan], selection: std::ops::Range<usize>) -> Vec<EditorLine> {
-    fn push_segment(segments: &mut EditorLine, text: &str, start: usize, end: usize, kind: Option<tf_editor::HighlightKind>, selection: &std::ops::Range<usize>) {
+fn highlighted_editor_lines(
+    text: &str,
+    spans: &[tf_editor::HighlightSpan],
+    selection: std::ops::Range<usize>,
+) -> Vec<EditorLine> {
+    fn push_segment(
+        segments: &mut EditorLine,
+        text: &str,
+        start: usize,
+        end: usize,
+        kind: Option<tf_editor::HighlightKind>,
+        selection: &std::ops::Range<usize>,
+    ) {
         let selected_start = selection.start.clamp(start, end);
         let selected_end = selection.end.clamp(start, end);
         if start < selected_start {
@@ -313,36 +324,11 @@ impl TerminalView {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn toggle_terminal_maximized(&mut self, cx: &mut Context<'_, Self>) {
         self.terminal_maximized = !self.terminal_maximized;
         self.dock_collapsed = false;
         self.dock_tool = DockTool::Terminal;
-        self.persist_layout();
-        cx.notify();
-    }
-
-    fn select_workspace_artifact(
-        &mut self,
-        artifact: WorkspaceArtifact,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.workspace_artifact = artifact;
-        if artifact == WorkspaceArtifact::Files
-            && self.project_files_checked_at.is_none()
-            && !self.project_files_loading
-        {
-            self.refresh_project_files(cx);
-        }
-        if matches!(
-            artifact,
-            WorkspaceArtifact::Overview | WorkspaceArtifact::Changes
-        ) {
-            self.refresh_changes(cx);
-        }
-        if artifact == WorkspaceArtifact::Tasks {
-            self.refresh_tasks(cx);
-            self.refresh_task_suggestions();
-        }
         self.persist_layout();
         cx.notify();
     }
@@ -1057,73 +1043,6 @@ impl TerminalView {
             self.collapsed_file_groups.remove(group);
         }
         cx.notify();
-    }
-
-    fn select_dock_tool(&mut self, tool: DockTool, cx: &mut Context<'_, Self>) {
-        self.dock_tool = tool;
-        self.dock_collapsed = false;
-        self.persist_layout();
-        cx.notify();
-    }
-
-    pub(super) fn toggle_dock_collapsed(&mut self, cx: &mut Context<'_, Self>) {
-        self.dock_collapsed = !self.dock_collapsed;
-        self.terminal_maximized = false;
-        self.persist_layout();
-        cx.notify();
-    }
-
-    pub(super) fn workspace_tab_strip(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let t = &self.theme;
-        let tabs = [
-            (WorkspaceArtifact::Overview, "⌂", "Project"),
-            (WorkspaceArtifact::Files, "▤", "Files"),
-            (WorkspaceArtifact::Changes, "⑂", "Git"),
-            (WorkspaceArtifact::Tasks, "✓", "Tasks"),
-            (WorkspaceArtifact::Sessions, ">_", "Terminal"),
-        ];
-        div()
-            .h(px(46.0))
-            .flex_none()
-            .px(px(tokens::space::MD))
-            .flex()
-            .items_center()
-            .gap(px(tokens::space::XS))
-            .border_b_1()
-            .border_color(hsla(t.border))
-            .bg(hsla(t.bg_panel))
-            .children(tabs.into_iter().map(|(artifact, icon, label)| {
-                let active = artifact == self.workspace_artifact;
-                div()
-                    .id(SharedString::from(format!("artifact-{label}")))
-                    .h(px(30.0))
-                    .px(px(tokens::space::MD))
-                    .flex()
-                    .items_center()
-                    .gap(px(tokens::space::SM))
-                    .rounded(px(tokens::radius::MD))
-                    .text_size(px(tokens::text::SM))
-                    .when(active, |d| {
-                        d.bg(hsla(t.bg_selected))
-                            .text_color(hsla(t.text))
-                            .border_1()
-                            .border_color(hsla(t.border_strong))
-                    })
-                    .when(!active, |d| {
-                        d.text_color(hsla(t.text_muted))
-                            .hover(|style| style.bg(hsla(t.bg_hover)).text_color(hsla(t.text)))
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.select_workspace_artifact(artifact, cx);
-                    }))
-                    .child(
-                        div()
-                            .text_size(px(tokens::text::XS))
-                            .text_color(hsla(if active { t.accent } else { t.text_faint }))
-                            .child(icon),
-                    )
-                    .child(label)
-            }))
     }
 
     pub(super) fn workspace_artifact_content(
@@ -2194,33 +2113,37 @@ impl TerminalView {
                                             .font_family(self.font.family.clone())
                                             .text_size(px(self.font_size - 1.0))
                                             .text_color(hsla(t.text_muted))
-                                            .children(segments.into_iter().map(|(text, kind, selected)| {
-                                                let color = match kind {
-                                                    Some(tf_editor::HighlightKind::Comment) => {
-                                                        t.text_faint
-                                                    }
-                                                    Some(tf_editor::HighlightKind::String) => {
-                                                        t.success
-                                                    }
-                                                    Some(tf_editor::HighlightKind::Number) => {
-                                                        t.warning
-                                                    }
-                                                    Some(tf_editor::HighlightKind::Keyword) => {
-                                                        t.accent
-                                                    }
-                                                    Some(tf_editor::HighlightKind::Type) => {
-                                                        t.ansi[6]
-                                                    }
-                                                    Some(tf_editor::HighlightKind::Heading) => {
-                                                        t.accent
-                                                    }
-                                                    None => t.text_muted,
-                                                };
-                                                div()
-                                                    .when(selected, |d| d.bg(with_alpha(hsla(t.accent), 0.25)))
-                                                    .text_color(hsla(color))
-                                                    .child(SharedString::from(text))
-                                            })),
+                                            .children(segments.into_iter().map(
+                                                |(text, kind, selected)| {
+                                                    let color = match kind {
+                                                        Some(tf_editor::HighlightKind::Comment) => {
+                                                            t.text_faint
+                                                        }
+                                                        Some(tf_editor::HighlightKind::String) => {
+                                                            t.success
+                                                        }
+                                                        Some(tf_editor::HighlightKind::Number) => {
+                                                            t.warning
+                                                        }
+                                                        Some(tf_editor::HighlightKind::Keyword) => {
+                                                            t.accent
+                                                        }
+                                                        Some(tf_editor::HighlightKind::Type) => {
+                                                            t.ansi[6]
+                                                        }
+                                                        Some(tf_editor::HighlightKind::Heading) => {
+                                                            t.accent
+                                                        }
+                                                        None => t.text_muted,
+                                                    };
+                                                    div()
+                                                        .when(selected, |d| {
+                                                            d.bg(with_alpha(hsla(t.accent), 0.25))
+                                                        })
+                                                        .text_color(hsla(color))
+                                                        .child(SharedString::from(text))
+                                                },
+                                            )),
                                     )
                             }),
                     ),
@@ -2667,127 +2590,1576 @@ impl TerminalView {
     }
 
     pub(super) fn workbench_overview(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let t = &self.theme;
-        let (open_tasks, active_tasks, blocked_tasks) = self.task_summary();
-        let branch = self
+        self.render_graph_canvas(None, &self.canvas_state, cx)
+    }
+
+    /// Build the actionable system nodes and topology edges for the 2D `GraphCanvas` viewport.
+    pub(super) fn build_canvas_nodes(
+        &self,
+    ) -> (Vec<surface::CanvasNode>, Vec<surface::CanvasEdge>) {
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+
+        let daemon_status = crate::remote_session::daemon_status();
+        let (daemon_subtitle, daemon_detail, daemon_healthy) = match &daemon_status {
+            crate::remote_session::DaemonStatus::Connected => (
+                format!("IPC connected · protocol v{}", tf_proto::PROTOCOL_VERSION),
+                "Background session supervisor & SQLite store online".to_owned(),
+                true,
+            ),
+            crate::remote_session::DaemonStatus::VersionMismatch { server, client } => (
+                format!("Protocol mismatch · server v{server} != client v{client}"),
+                "Running in non-blocking embedded PTY fallback mode".to_owned(),
+                false,
+            ),
+            crate::remote_session::DaemonStatus::Offline(reason) => (
+                "Embedded PTY fallback".to_owned(),
+                if reason.is_empty() {
+                    "forged daemon offline · local PTYs remain active".to_owned()
+                } else {
+                    format!("forged offline ({reason}) · local PTYs remain active")
+                },
+                false,
+            ),
+        };
+        let daemon_id = "daemon:forged".to_owned();
+        nodes.push(surface::CanvasNode {
+            id: daemon_id.clone(),
+            title: "forged daemon".into(),
+            subtitle: daemon_subtitle,
+            detail: daemon_detail,
+            kind: surface::CanvasNodeKind::Daemon,
+            world_x: 36.0,
+            world_y: 44.0,
+            healthy: daemon_healthy,
+            session_pane: None,
+            file_target: None,
+        });
+
+        // AI Agent CLI discovery nodes in column 0 below the daemon
+        for (agent_idx, &(label, exe)) in surface::AGENT_CLIS.iter().enumerate() {
+            let installed = surface::on_path(exe);
+            let agent_id = format!("agent:{exe}");
+            nodes.push(surface::CanvasNode {
+                id: agent_id.clone(),
+                title: format!("✦ {label}"),
+                subtitle: if installed {
+                    format!("{exe} · CLI ready")
+                } else {
+                    format!("{exe} · not on PATH")
+                },
+                detail: "Click or launch in Agent Fleet".into(),
+                kind: surface::CanvasNodeKind::Agent,
+                world_x: 36.0,
+                world_y: 164.0 + (agent_idx as f32 * 108.0),
+                healthy: installed,
+                session_pane: None,
+                file_target: None,
+            });
+        }
+
+        let active_branch = self
             .tabs
             .get(self.active_tab)
             .and_then(|tab| tab.branch.clone())
-            .unwrap_or_else(|| "No branch".into());
-        let context = self
-            .active_context()
-            .map_or("No context", |context| context.name.as_str())
-            .to_owned();
-        let attention = self
-            .program_status_summary()
-            .and_then(|(_, detail)| detail)
-            .unwrap_or_else(|| "All sessions are quiet".into());
-        let task_value = if self.tasks.loading {
-            "…".into()
-        } else if self.tasks.error.is_some() {
-            "Unavailable".into()
-        } else {
-            open_tasks.to_string()
-        };
-        let task_detail = if self.tasks.loading {
-            "Loading tasks…".into()
-        } else if self.tasks.error.is_some() {
-            "Open Tasks to retry".into()
-        } else {
-            format!("{active_tasks} active · {blocked_tasks} blocked")
-        };
-        let git_value = if self.git_loading {
-            "…".into()
-        } else if self.git_error.is_some() {
-            "Unavailable".into()
-        } else {
-            self.changes
-                .as_ref()
-                .map_or_else(|| "—".into(), |changes| changes.len().to_string())
-        };
-        let git_detail = if self.git_loading {
-            "Reading working tree…".into()
-        } else if self.git_error.is_some() {
-            "Open Git for details".into()
-        } else if let Some(changes) = &self.changes {
-            format!(
+            .or_else(|| self.discover_branch())
+            .unwrap_or_else(|| "main".into());
+        let changes_summary = match &self.changes {
+            Some(changes) => format!(
                 "{} staged · {} unstaged",
-                changes.iter().filter(|change| change.staged).count(),
-                changes.iter().filter(|change| change.unstaged).count()
-            )
-        } else {
-            "Working tree not loaded".into()
+                changes.iter().filter(|c| c.staged).count(),
+                changes.iter().filter(|c| c.unstaged).count()
+            ),
+            None => "Working tree ready".into(),
         };
-        let mut recent_tasks: Vec<_> = self
+        let primary_wt_id = format!("worktree:{active_branch}");
+        nodes.push(surface::CanvasNode {
+            id: primary_wt_id.clone(),
+            title: format!("⎇ {active_branch}"),
+            subtitle: self.project_name(),
+            detail: changes_summary,
+            kind: surface::CanvasNodeKind::Worktree,
+            world_x: 280.0,
+            world_y: 44.0,
+            healthy: self.git_error.is_none(),
+            session_pane: None,
+            file_target: None,
+        });
+        edges.push(surface::CanvasEdge {
+            from: daemon_id.clone(),
+            to: primary_wt_id.clone(),
+        });
+
+        for (wt_idx, wt) in self.worktrees.iter().take(2).enumerate() {
+            let branch_label = wt.branch.as_deref().unwrap_or("detached");
+            if branch_label == active_branch {
+                continue;
+            }
+            let wt_id = format!("worktree:{branch_label}");
+            nodes.push(surface::CanvasNode {
+                id: wt_id.clone(),
+                title: format!("⎇ {branch_label}"),
+                subtitle: wt.path.clone(),
+                detail: "Linked Git worktree".into(),
+                kind: surface::CanvasNodeKind::Worktree,
+                world_x: 280.0,
+                world_y: 164.0 + (wt_idx as f32 * 110.0),
+                healthy: true,
+                session_pane: None,
+                file_target: None,
+            });
+            edges.push(surface::CanvasEdge {
+                from: daemon_id.clone(),
+                to: wt_id,
+            });
+        }
+
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            let focused_id = tab.layout.focused();
+            let mut pane_ids = tab.layout.ids();
+            for retained_id in tab.retained_panes.keys() {
+                if !pane_ids.contains(retained_id) {
+                    pane_ids.push(*retained_id);
+                }
+            }
+            for (idx, pane_id) in pane_ids.into_iter().enumerate() {
+                let (title, cwd, running) = if pane_id == focused_id {
+                    let label = self
+                        .title
+                        .clone()
+                        .or_else(|| tab.name.clone())
+                        .unwrap_or_else(|| format!("{} #{pane_id}", self.spawn.profile.name));
+                    let location = self.cwd.clone().unwrap_or_else(|| self.project_name());
+                    (label, location, self.exited().is_none())
+                } else if let Some(slot) = tab
+                    .panes
+                    .get(&pane_id)
+                    .or_else(|| tab.retained_panes.get(&pane_id))
+                {
+                    let label = slot
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| format!("{} #{pane_id}", slot.spawn.profile.name));
+                    let location = slot.cwd.clone().unwrap_or_else(|| self.project_name());
+                    let alive = slot
+                        .session
+                        .as_ref()
+                        .is_none_or(|s| s.exit_status().is_none());
+                    (label, location, alive)
+                } else {
+                    (format!("Area #{pane_id}"), self.project_name(), true)
+                };
+                let node_id = format!("session:{pane_id}");
+                nodes.push(surface::CanvasNode {
+                    id: node_id.clone(),
+                    title,
+                    subtitle: format!("PTY Area #{pane_id}"),
+                    detail: cwd,
+                    kind: surface::CanvasNodeKind::Session,
+                    world_x: 540.0,
+                    world_y: 44.0 + (idx as f32 * 108.0),
+                    healthy: running,
+                    session_pane: Some(pane_id),
+                    file_target: None,
+                });
+                edges.push(surface::CanvasEdge {
+                    from: primary_wt_id.clone(),
+                    to: node_id,
+                });
+            }
+        }
+
+        for (task_idx, task) in self
             .tasks
             .items
             .iter()
-            .filter(|task| task.state != tf_proto::TaskState::Done)
+            .filter(|t| t.state != tf_proto::TaskState::Done)
+            .take(3)
+            .enumerate()
+        {
+            let task_id = format!("task:{}", task.id);
+            let cmd = task
+                .command
+                .clone()
+                .unwrap_or_else(|| "Interactive task target".into());
+            nodes.push(surface::CanvasNode {
+                id: task_id.clone(),
+                title: task.title.clone(),
+                subtitle: format!("{:?} target", task.state),
+                detail: cmd,
+                kind: surface::CanvasNodeKind::Task,
+                world_x: 800.0,
+                world_y: 44.0 + (task_idx as f32 * 108.0),
+                healthy: task.state != tf_proto::TaskState::Blocked,
+                session_pane: None,
+                file_target: None,
+            });
+            edges.push(surface::CanvasEdge {
+                from: primary_wt_id.clone(),
+                to: task_id,
+            });
+        }
+
+        // Execution targets: devcontainers, Dockerfiles, and configured SSH hosts.
+        let mut target_idx = self
+            .tasks
+            .items
+            .iter()
+            .filter(|t| t.state != tf_proto::TaskState::Done)
+            .take(3)
+            .count();
+        if let Some(root) = self
+            .local_project_root
+            .as_ref()
+            .or(self.project_root.as_ref())
+        {
+            for candidate in [
+                ".devcontainer/devcontainer.json",
+                "Dockerfile",
+                "compose.yaml",
+                "docker-compose.yml",
+            ] {
+                if root.join(candidate).is_file() {
+                    let container_id = format!("container:{candidate}");
+                    nodes.push(surface::CanvasNode {
+                        id: container_id.clone(),
+                        title: candidate.into(),
+                        subtitle: "Container Target".into(),
+                        detail: root.join(candidate).display().to_string(),
+                        kind: surface::CanvasNodeKind::Container,
+                        world_x: 800.0,
+                        world_y: 44.0 + (target_idx as f32 * 108.0),
+                        healthy: true,
+                        session_pane: None,
+                        file_target: None,
+                    });
+                    edges.push(surface::CanvasEdge {
+                        from: primary_wt_id.clone(),
+                        to: container_id,
+                    });
+                    target_idx += 1;
+                    break;
+                }
+            }
+        }
+        for host in self.ssh_hosts.iter().take(2) {
+            let ssh_id = format!("container:ssh:{host}");
+            nodes.push(surface::CanvasNode {
+                id: ssh_id.clone(),
+                title: format!("ssh://{host}"),
+                subtitle: "Remote Execution Target".into(),
+                detail: format!("SSH host {host}"),
+                kind: surface::CanvasNodeKind::Container,
+                world_x: 800.0,
+                world_y: 44.0 + (target_idx as f32 * 108.0),
+                healthy: self.spawn.ssh_host.as_deref() == Some(host.as_str()),
+                session_pane: None,
+                file_target: None,
+            });
+            edges.push(surface::CanvasEdge {
+                from: daemon_id.clone(),
+                to: ssh_id,
+            });
+            target_idx += 1;
+        }
+
+        (nodes, edges)
+    }
+
+    pub(super) fn build_canvas_nodes_for_lens(
+        &self,
+        lens: crate::panes::CanvasLens,
+    ) -> (Vec<surface::CanvasNode>, Vec<surface::CanvasEdge>) {
+        match lens {
+            crate::panes::CanvasLens::SystemAgents => self.build_canvas_nodes(),
+            crate::panes::CanvasLens::Architecture => {
+                if let Some(root) = self
+                    .local_project_root
+                    .as_ref()
+                    .or(self.project_root.as_ref())
+                {
+                    let (mut arch_nodes, arch_edges) =
+                        surface::analyze_workspace_architecture(root);
+                    if !arch_nodes.is_empty() {
+                        let (runtime_nodes, _) = self.build_canvas_nodes();
+                        for mut rnode in runtime_nodes {
+                            if rnode.session_pane.is_some() {
+                                rnode.world_x = 868.0;
+                                arch_nodes.push(rnode);
+                            }
+                        }
+                        return (arch_nodes, arch_edges);
+                    }
+                }
+                self.build_canvas_nodes()
+            }
+            crate::panes::CanvasLens::FunctionFlow => {
+                if let Some(buf) = &self.editor_buffer {
+                    let (fn_nodes, fn_edges) =
+                        surface::analyze_function_flow(buf.path(), buf.text());
+                    if !fn_nodes.is_empty() {
+                        return (fn_nodes, fn_edges);
+                    }
+                }
+                if let Some(root) = self
+                    .local_project_root
+                    .as_ref()
+                    .or(self.project_root.as_ref())
+                {
+                    let fallback_rel = PathBuf::from("bins/termforge/src/panes.rs");
+                    let candidate = if root.join(&fallback_rel).is_file() {
+                        Some(fallback_rel)
+                    } else {
+                        self.project_file_entries
+                            .iter()
+                            .find(|e| {
+                                !e.is_dir
+                                    && e.path.extension().and_then(|s| s.to_str()) == Some("rs")
+                            })
+                            .map(|e| e.path.clone())
+                    };
+                    if let Some(rel) = candidate {
+                        if let Ok(source) = std::fs::read_to_string(root.join(&rel)) {
+                            let (fn_nodes, fn_edges) =
+                                surface::analyze_function_flow(&rel, &source);
+                            if !fn_nodes.is_empty() {
+                                return (fn_nodes, fn_edges);
+                            }
+                        }
+                    }
+                }
+                self.build_canvas_nodes()
+            }
+        }
+    }
+
+    pub(super) fn set_canvas_lens(
+        &mut self,
+        area_id: Option<AreaId>,
+        lens: crate::panes::CanvasLens,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.canvas_state.lens = lens;
+        self.canvas_state.reset_view();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            for area in tab.layout.areas_mut() {
+                if area_id.is_none() || area_id == Some(area.id) {
+                    if let EditorKind::GraphCanvas(state) = &mut area.editor {
+                        state.lens = lens;
+                        state.reset_view();
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Select a node on the 2D `GraphCanvas` viewport:
+    /// - Updates `selected_node` on the canvas state
+    /// - Routes the node's properties into any visible `Inspector` area (`inspector_state`)
+    /// - Routes its streaming I/O or PTY attach into any visible `Terminal` area
+    /// - Or opens its source file + line in `CodeEditor` if it's an Architecture/Function node
+    pub(super) fn select_canvas_node(&mut self, node_id: String, cx: &mut Context<'_, Self>) {
+        let (lens_nodes, _) = self.build_canvas_nodes_for_lens(self.canvas_state.lens);
+        let matched = lens_nodes
+            .into_iter()
+            .find(|n| n.id == node_id)
+            .or_else(|| {
+                let (fallback_nodes, _) = self.build_canvas_nodes();
+                fallback_nodes.into_iter().find(|n| n.id == node_id)
+            });
+        self.canvas_state.selected_node = Some(node_id.clone());
+        self.inspector_state.target = Some(node_id.clone());
+        self.inspector_state.section = matched
+            .as_ref()
+            .map(|n| n.kind.badge().to_owned())
+            .unwrap_or_else(|| "NODE".into());
+
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            for area in tab.layout.areas_mut() {
+                match &mut area.editor {
+                    EditorKind::GraphCanvas(state) => {
+                        state.selected_node = Some(node_id.clone());
+                    }
+                    EditorKind::Inspector(state) => {
+                        state.target = Some(node_id.clone());
+                        state.section = self.inspector_state.section.clone();
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some((rel_path, line)) = matched.as_ref().and_then(|n| n.file_target.clone()) {
+            self.open_project_file(rel_path.clone(), cx);
+            if let Some(line_no) = line {
+                if let Some(root) = self
+                    .local_project_root
+                    .as_ref()
+                    .or(self.project_root.as_ref())
+                {
+                    self.editor_pending_position = Some((
+                        root.join(&rel_path),
+                        tf_editor::TextPosition {
+                            line: line_no.saturating_sub(1),
+                            utf16_column: 0,
+                        },
+                    ));
+                    self.apply_pending_editor_position();
+                }
+            }
+        }
+
+        if let Some(pane_id) = matched.and_then(|n| n.session_pane) {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                let terminal_area = tab
+                    .layout
+                    .areas()
+                    .into_iter()
+                    .find(|area| matches!(area.editor, EditorKind::Terminal(_)))
+                    .map(|area| area.id);
+                if let Some(term_id) = terminal_area {
+                    let _ = tab
+                        .layout
+                        .set_editor(term_id, EditorKind::Terminal(pane_id));
+                }
+            }
+            self.focus_pane(pane_id, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn zoom_canvas(
+        &mut self,
+        area_id: Option<AreaId>,
+        delta: f32,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.canvas_state.zoom_by(delta);
+        let next = self.canvas_state.clone();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            for area in tab.layout.areas_mut() {
+                if area_id.is_none() || area_id == Some(area.id) {
+                    if let EditorKind::GraphCanvas(state) = &mut area.editor {
+                        *state = next.clone();
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn pan_canvas(
+        &mut self,
+        area_id: Option<AreaId>,
+        dx: f32,
+        dy: f32,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.canvas_state.pan_by(dx, dy);
+        let next = self.canvas_state.clone();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            for area in tab.layout.areas_mut() {
+                if area_id.is_none() || area_id == Some(area.id) {
+                    if let EditorKind::GraphCanvas(state) = &mut area.editor {
+                        *state = next.clone();
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn reset_canvas_view(
+        &mut self,
+        area_id: Option<AreaId>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.canvas_state.reset_view();
+        let next = self.canvas_state.clone();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            for area in tab.layout.areas_mut() {
+                if area_id.is_none() || area_id == Some(area.id) {
+                    if let EditorKind::GraphCanvas(state) = &mut area.editor {
+                        *state = next.clone();
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Render the interactive 2D pan/zoom `GraphCanvas` surface.
+    pub(super) fn render_graph_canvas(
+        &self,
+        area_id: Option<AreaId>,
+        state: &CanvasState,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let t = &self.theme;
+        let active_lens = state.lens;
+        let (nodes, edges) = self.build_canvas_nodes_for_lens(active_lens);
+        let node_count = nodes.len();
+        let edge_count = edges.len();
+        let selected_id = state
+            .selected_node
+            .as_deref()
+            .or(self.canvas_state.selected_node.as_deref());
+        let zoom_pct = (state.zoom * 100.0).round() as i32;
+        let card_w = (224.0 * state.zoom).clamp(164.0, 320.0);
+        let port_y_offset = 42.0 * state.zoom;
+        let node_positions: HashMap<String, (f32, f32)> = nodes
+            .iter()
+            .map(|n| (n.id.clone(), state.world_to_screen(n.world_x, n.world_y)))
             .collect();
-        recent_tasks.sort_by_key(|task| std::cmp::Reverse(task.updated_at));
-        let recent_tasks = recent_tasks.into_iter().take(5).collect::<Vec<_>>();
+        let (origin_x, origin_y) = state.world_to_screen(0.0, 0.0);
+
         div()
-            .id("workbench-overview")
+            .id(SharedString::from(match area_id {
+                Some(id) => format!("graph-canvas-area-{id}"),
+                None => "workbench-overview".into(),
+            }))
             .flex_1()
+            .size_full()
             .min_h(px(0.0))
-            .overflow_y_scroll()
-            .p(px(tokens::space::LG))
+            .relative()
+            .overflow_hidden()
             .bg(hsla(t.bg_app))
-            .child(self.artifact_heading(
-                "Project overview",
-                &format!("{} · {branch} · {context}", self.project_name()),
-                cx,
-            ))
+            .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, _, cx| {
+                let delta = ev.delta.pixel_delta(px(20.0));
+                if ev.modifiers.control || ev.modifiers.platform {
+                    let zoom_step = if delta.y > px(0.0) { 0.1 } else { -0.1 };
+                    this.zoom_canvas(area_id, zoom_step, cx);
+                } else {
+                    this.pan_canvas(area_id, f32::from(delta.x), f32::from(delta.y), cx);
+                }
+            }))
+            .child(
+                // Multi-scale 2D studio coordinate grid + origin crosshair axes
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .bottom(px(0.0))
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(0.0))
+                            .right(px(0.0))
+                            .top(px(origin_y))
+                            .h(px(1.0))
+                            .bg(with_alpha(hsla(t.border_strong), 0.25)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(0.0))
+                            .bottom(px(0.0))
+                            .left(px(origin_x))
+                            .w(px(1.0))
+                            .bg(with_alpha(hsla(t.border_strong), 0.25)),
+                    )
+                    .children((0..12).flat_map(|row| {
+                        (0..16).map(move |col| {
+                            let wx = (col as f32) * 96.0 + 16.0;
+                            let wy = (row as f32) * 72.0 + 16.0;
+                            let (sx, sy) = state.world_to_screen(wx, wy);
+                            let major = row % 3 == 0 && col % 3 == 0;
+                            div()
+                                .absolute()
+                                .left(px(sx))
+                                .top(px(sy))
+                                .size(px(if major { 3.5 } else { 2.0 }))
+                                .rounded_full()
+                                .bg(with_alpha(
+                                    hsla(t.border_strong),
+                                    if major { 0.45 } else { 0.22 },
+                                ))
+                        })
+                    })),
+            )
+            .children(edges.into_iter().filter_map(|edge| {
+                let &(x1, y1) = node_positions.get(&edge.from)?;
+                let &(x2, y2) = node_positions.get(&edge.to)?;
+                let start_x = x1 + card_w;
+                let start_y = y1 + port_y_offset;
+                let end_x = x2;
+                let end_y = y2 + port_y_offset;
+                let mid_x = (start_x + end_x) * 0.5;
+                let h1_left = start_x.min(mid_x);
+                let h1_w = (mid_x - start_x).abs().max(2.0);
+                let v_top = start_y.min(end_y);
+                let v_h = (end_y - start_y).abs().max(2.0);
+                let h2_left = mid_x.min(end_x);
+                let h2_w = (end_x - mid_x).abs().max(2.0);
+                let wire_color = with_alpha(hsla(t.accent), 0.45);
+                Some(
+                    div()
+                        .absolute()
+                        .top(px(0.0))
+                        .left(px(0.0))
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(h1_left))
+                                .top(px(start_y))
+                                .w(px(h1_w))
+                                .h(px(2.0))
+                                .bg(wire_color),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(mid_x))
+                                .top(px(v_top))
+                                .w(px(2.0))
+                                .h(px(v_h))
+                                .bg(wire_color),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(h2_left))
+                                .top(px(end_y))
+                                .w(px(h2_w))
+                                .h(px(2.0))
+                                .bg(wire_color),
+                        ),
+                )
+            }))
+            .children(nodes.into_iter().map(|node| {
+                let (sx, sy) = state.world_to_screen(node.world_x, node.world_y);
+                let is_selected = selected_id == Some(node.id.as_str());
+                let badge_color = match node.kind {
+                    surface::CanvasNodeKind::Daemon | surface::CanvasNodeKind::Agent => {
+                        if node.healthy {
+                            t.success
+                        } else {
+                            t.warning
+                        }
+                    }
+                    surface::CanvasNodeKind::Worktree
+                    | surface::CanvasNodeKind::Crate
+                    | surface::CanvasNodeKind::Symbol => t.accent,
+                    surface::CanvasNodeKind::Session | surface::CanvasNodeKind::Function => {
+                        t.success
+                    }
+                    surface::CanvasNodeKind::Task | surface::CanvasNodeKind::Container => {
+                        if node.healthy {
+                            t.accent
+                        } else {
+                            t.warning
+                        }
+                    }
+                };
+                let status_pill = if is_selected {
+                    "SELECTED"
+                } else if node.file_target.is_some() {
+                    "OPEN CODE"
+                } else if node.healthy {
+                    "READY"
+                } else {
+                    "ATTENTION"
+                };
+                let node_id = node.id.clone();
+                div()
+                    .id(SharedString::from(format!("canvas-node-{}", node.id)))
+                    .absolute()
+                    .left(px(sx))
+                    .top(px(sy))
+                    .w(px(card_w))
+                    .rounded(px(tokens::radius::MD))
+                    .border_1()
+                    .border_color(hsla(if is_selected {
+                        t.accent
+                    } else {
+                        t.border_strong
+                    }))
+                    .bg(hsla(if is_selected {
+                        t.bg_selected
+                    } else {
+                        t.bg_panel
+                    }))
+                    .shadow_md()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(hsla(t.bg_hover)).border_color(hsla(t.accent)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_canvas_node(node_id.clone(), cx);
+                    }))
+                    // Left input socket port
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(-4.0))
+                            .top(px(port_y_offset - 3.0))
+                            .size(px(7.0))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(hsla(t.bg_app))
+                            .bg(hsla(badge_color)),
+                    )
+                    // Right output socket port
+                    .child(
+                        div()
+                            .absolute()
+                            .right(px(-4.0))
+                            .top(px(port_y_offset - 3.0))
+                            .size(px(7.0))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(hsla(t.bg_app))
+                            .bg(hsla(badge_color)),
+                    )
+                    // Node header bar
+                    .child(
+                        div()
+                            .h(px(24.0))
+                            .px(px(tokens::space::SM))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .border_b_1()
+                            .border_color(hsla(t.border))
+                            .bg(with_alpha(hsla(badge_color), 0.12))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(5.0))
+                                    .child(div().size(px(6.0)).rounded_full().bg(hsla(badge_color)))
+                                    .child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .text_color(hsla(badge_color))
+                                            .child(node.kind.badge()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .px(px(4.0))
+                                    .py(px(1.0))
+                                    .rounded(px(3.0))
+                                    .bg(hsla(t.bg_app))
+                                    .text_size(px(9.0))
+                                    .text_color(hsla(if is_selected {
+                                        t.accent
+                                    } else {
+                                        t.text_faint
+                                    }))
+                                    .child(status_pill),
+                            ),
+                    )
+                    // Node body & telemetry footer
+                    .child(
+                        div()
+                            .p(px(tokens::space::SM))
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.0))
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_size(px(tokens::text::SM))
+                                    .text_color(hsla(t.text))
+                                    .child(SharedString::from(node.title)),
+                            )
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_size(px(tokens::text::XS))
+                                    .text_color(hsla(t.text_muted))
+                                    .child(SharedString::from(node.subtitle)),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(3.0))
+                                    .px(px(6.0))
+                                    .py(px(3.0))
+                                    .rounded(px(tokens::radius::SM))
+                                    .bg(hsla(t.bg_app))
+                                    .border_1()
+                                    .border_color(hsla(t.border))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_size(px(10.0))
+                                    .text_color(hsla(t.text_faint))
+                                    .child(SharedString::from(node.detail)),
+                            ),
+                    )
+            }))
+            .child(
+                // Top-left Canvas Lens Switcher (Architecture | Function Flow | Agents & Runtime)
+                div()
+                    .absolute()
+                    .top(px(tokens::space::SM))
+                    .left(px(tokens::space::SM))
+                    .px(px(4.0))
+                    .h(px(28.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(3.0))
+                    .rounded(px(tokens::radius::MD))
+                    .border_1()
+                    .border_color(hsla(t.border))
+                    .bg(hsla(t.bg_elevated))
+                    .text_size(px(tokens::text::XS))
+                    .children(crate::panes::CanvasLens::ALL.iter().copied().map(|lens| {
+                        let active = lens == active_lens;
+                        div()
+                            .id(SharedString::from(format!("canvas-lens-{}", lens.id())))
+                            .px(px(7.0))
+                            .h(px(20.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .rounded(px(tokens::radius::SM))
+                            .bg(if active {
+                                with_alpha(hsla(t.accent), 0.16)
+                            } else {
+                                hsla(t.bg_elevated)
+                            })
+                            .text_color(hsla(if active { t.accent } else { t.text_muted }))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(hsla(t.bg_hover)).text_color(hsla(t.text)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_canvas_lens(area_id, lens, cx);
+                            }))
+                            .child(div().text_size(px(10.0)).child(lens.icon()))
+                            .child(lens.label())
+                    }))
+                    .child(div().px(px(3.0)).text_color(hsla(t.text_faint)).child("·"))
+                    .child(div().pr(px(4.0)).text_color(hsla(t.text_faint)).child(
+                        SharedString::from(format!("{node_count} nodes · {edge_count} links")),
+                    )),
+            )
+            .child(
+                // Viewport HUD toolbar (top-right)
+                div()
+                    .absolute()
+                    .top(px(tokens::space::SM))
+                    .right(px(tokens::space::SM))
+                    .px(px(tokens::space::SM))
+                    .h(px(26.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(tokens::space::XS))
+                    .rounded(px(tokens::radius::MD))
+                    .border_1()
+                    .border_color(hsla(t.border))
+                    .bg(hsla(t.bg_elevated))
+                    .text_size(px(tokens::text::XS))
+                    .text_color(hsla(t.text_muted))
+                    .child(
+                        div()
+                            .id("canvas-pan-left")
+                            .px(px(4.0))
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(hsla(t.text)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.pan_canvas(area_id, -40.0, 0.0, cx);
+                            }))
+                            .child("←"),
+                    )
+                    .child(
+                        div()
+                            .id("canvas-pan-up")
+                            .px(px(4.0))
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(hsla(t.text)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.pan_canvas(area_id, 0.0, -30.0, cx);
+                            }))
+                            .child("↑"),
+                    )
+                    .child(
+                        div()
+                            .id("canvas-pan-down")
+                            .px(px(4.0))
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(hsla(t.text)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.pan_canvas(area_id, 0.0, 30.0, cx);
+                            }))
+                            .child("↓"),
+                    )
+                    .child(
+                        div()
+                            .id("canvas-pan-right")
+                            .px(px(4.0))
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(hsla(t.text)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.pan_canvas(area_id, 40.0, 0.0, cx);
+                            }))
+                            .child("→"),
+                    )
+                    .child(div().text_color(hsla(t.text_faint)).child("·"))
+                    .child(
+                        div()
+                            .id("canvas-zoom-out")
+                            .px(px(4.0))
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(hsla(t.text)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.zoom_canvas(area_id, -0.15, cx);
+                            }))
+                            .child("−"),
+                    )
+                    .child(
+                        div()
+                            .id("canvas-zoom-reset")
+                            .px(px(5.0))
+                            .py(px(1.0))
+                            .rounded(px(3.0))
+                            .bg(hsla(t.bg_app))
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(hsla(t.text)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.reset_canvas_view(area_id, cx);
+                            }))
+                            .child(SharedString::from(format!("{zoom_pct}%"))),
+                    )
+                    .child(
+                        div()
+                            .id("canvas-zoom-in")
+                            .px(px(4.0))
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(hsla(t.text)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.zoom_canvas(area_id, 0.15, cx);
+                            }))
+                            .child("+"),
+                    )
+                    .child(div().text_color(hsla(t.text_faint)).child("·"))
+                    .child(
+                        div()
+                            .id("artifact-primary-action")
+                            .px(px(6.0))
+                            .py(px(1.0))
+                            .rounded(px(tokens::radius::SM))
+                            .bg(with_alpha(hsla(t.accent), 0.15))
+                            .text_color(hsla(t.accent))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(hsla(t.bg_hover)))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.new_local_tab(cx);
+                            }))
+                            .child("+ Terminal"),
+                    ),
+            )
+            .child(
+                // Bottom-left Topology Legend & Camera Coordinates HUD
+                div()
+                    .absolute()
+                    .bottom(px(tokens::space::SM))
+                    .left(px(tokens::space::SM))
+                    .px(px(tokens::space::SM))
+                    .h(px(24.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(tokens::space::SM))
+                    .rounded(px(tokens::radius::MD))
+                    .border_1()
+                    .border_color(hsla(t.border))
+                    .bg(hsla(t.bg_elevated))
+                    .text_size(px(10.0))
+                    .text_color(hsla(t.text_faint))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(div().size(px(5.0)).rounded_full().bg(hsla(t.success)))
+                            .child("Agents / Functions / PTY"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(div().size(px(5.0)).rounded_full().bg(hsla(t.accent)))
+                            .child("Crates / Types / Git"),
+                    )
+                    .child(div().child("·"))
+                    .child(SharedString::from(format!(
+                        "X:{:.0} Y:{:.0} · {zoom_pct}%",
+                        state.pan_x, state.pan_y
+                    ))),
+            )
+    }
+
+    /// Render a non-terminal [`EditorKind`] mounted inside a polymorphic split-tree leaf.
+    pub(super) fn render_non_terminal_area(
+        &self,
+        id: AreaId,
+        editor: &EditorKind,
+        cx: &mut Context<'_, Self>,
+    ) -> gpui::AnyElement {
+        match editor {
+            EditorKind::GraphCanvas(state) => self
+                .render_graph_canvas(Some(id), state, cx)
+                .into_any_element(),
+            EditorKind::Inspector(state) => {
+                self.render_area_inspector(id, state, cx).into_any_element()
+            }
+            EditorKind::Outliner(state) => {
+                self.render_area_outliner(id, state, cx).into_any_element()
+            }
+            EditorKind::Timeline(state) => {
+                self.render_area_timeline(id, state, cx).into_any_element()
+            }
+            EditorKind::CodeEditor => self.workbench_files(cx).into_any_element(),
+            EditorKind::GitDiff => self.workbench_changes(cx).into_any_element(),
+            EditorKind::TaskBoard => self.workbench_tasks(cx).into_any_element(),
+            EditorKind::AgentFleet => self.render_area_agent_fleet(id, cx).into_any_element(),
+            EditorKind::Terminal(_) => div().size_full().into_any_element(),
+        }
+    }
+
+    fn render_area_agent_fleet(&self, id: AreaId, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let t = &self.theme;
+        let daemon_label = crate::remote_session::daemon_status()
+            .status_bar_label()
+            .unwrap_or_else(|| "forged · connected".to_owned());
+        let active_tab_idx = self.active_tab;
+
+        div()
+            .id(SharedString::from(format!("area-agent-fleet-{id}")))
+            .flex_1()
+            .size_full()
+            .min_h(px(0.0))
+            .p(px(tokens::space::MD))
+            .flex()
+            .flex_col()
+            .gap(px(tokens::space::MD))
+            .overflow_hidden()
+            .bg(hsla(t.bg_panel))
+            // Header
             .child(
                 div()
                     .flex()
-                    .flex_wrap()
-                    .gap(px(tokens::space::MD))
-                    .child(div().id("overview-open-tasks").flex_1().min_w(px(190.0)).cursor_pointer().on_click(cx.listener(|this, _, _, cx| this.select_workspace_artifact(WorkspaceArtifact::Tasks, cx))).child(self.overview_metric(
-                        "TASKS",
-                        &task_value,
-                        &task_detail,
-                        t.accent,
-                    )))
-                    .child(div().id("overview-open-sessions").flex_1().min_w(px(190.0)).cursor_pointer().on_click(cx.listener(|this, _, _, cx| this.select_workspace_artifact(WorkspaceArtifact::Sessions, cx))).child(self.overview_metric(
-                        "SESSIONS",
-                        &self.tabs.len().to_string(),
-                        &attention,
-                        t.success,
-                    )))
-                    .child(div().id("overview-open-git").flex_1().min_w(px(190.0)).cursor_pointer().on_click(cx.listener(|this, _, _, cx| this.select_workspace_artifact(WorkspaceArtifact::Changes, cx))).child(self.overview_metric(
-                        "CHANGED FILES", &git_value, &git_detail, t.warning,
-                    ))),
+                    .items_center()
+                    .justify_between()
+                    .pb(px(tokens::space::SM))
+                    .border_b_1()
+                    .border_color(hsla(t.border))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(tokens::space::SM))
+                            .child(div().text_color(hsla(t.accent)).child("✦"))
+                            .child(
+                                div()
+                                    .text_size(px(tokens::text::SM))
+                                    .text_color(hsla(t.text))
+                                    .child("AI AGENTS, CMUX MULTIPLEXER & CLOUD INFRASTRUCTURE"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .rounded(px(tokens::radius::SM))
+                            .bg(hsla(t.bg_app))
+                            .text_size(px(10.0))
+                            .text_color(hsla(t.text_muted))
+                            .child(SharedString::from(daemon_label)),
+                    ),
+            )
+            // 1. AI Coding Agents section
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(tokens::space::XS))
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(hsla(t.text_faint))
+                            .child("AI CODING AGENTS · ISOLATED PTY SESSIONS"),
+                    )
+                    .child(div().flex().gap(px(tokens::space::SM)).children(
+                        surface::AGENT_CLIS.iter().copied().map(|(label, exe)| {
+                            let installed = surface::on_path(exe);
+                            let cmd_str = exe.to_owned();
+                            let title_str = label.to_owned();
+                            div()
+                                .id(SharedString::from(format!("launch-agent-{id}-{exe}")))
+                                .flex_1()
+                                .p(px(tokens::space::SM))
+                                .rounded(px(tokens::radius::MD))
+                                .border_1()
+                                .border_color(hsla(t.border))
+                                .bg(hsla(t.bg_app))
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.0))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(hsla(t.bg_hover)).border_color(hsla(t.accent)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.start_managed(
+                                        title_str.clone(),
+                                        cmd_str.clone(),
+                                        true,
+                                        cx,
+                                    );
+                                }))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(
+                                            div()
+                                                .text_size(px(tokens::text::SM))
+                                                .text_color(hsla(t.text))
+                                                .child(label),
+                                        )
+                                        .child(
+                                            div()
+                                                .px(px(5.0))
+                                                .py(px(1.0))
+                                                .rounded(px(3.0))
+                                                .bg(with_alpha(
+                                                    hsla(if installed {
+                                                        t.success
+                                                    } else {
+                                                        t.warning
+                                                    }),
+                                                    0.15,
+                                                ))
+                                                .text_size(px(9.0))
+                                                .text_color(hsla(if installed {
+                                                    t.success
+                                                } else {
+                                                    t.warning
+                                                }))
+                                                .child(if installed { "READY" } else { "CLI" }),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .text_color(hsla(t.text_muted))
+                                        .child(SharedString::from(format!("▶ Spawn `{exe}`"))),
+                                )
+                        }),
+                    )),
+            )
+            // 2. Active cmux Sessions section
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(tokens::space::XS))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(hsla(t.text_faint))
+                                    .child(SharedString::from(format!(
+                                        "CMUX SESSION MULTIPLEXER ({} WORKSPACES)",
+                                        self.tabs.len()
+                                    ))),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("agent-fleet-new-shell-{id}")))
+                                    .px(px(6.0))
+                                    .py(px(1.0))
+                                    .rounded(px(tokens::radius::SM))
+                                    .bg(with_alpha(hsla(t.accent), 0.14))
+                                    .text_size(px(10.0))
+                                    .text_color(hsla(t.accent))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(hsla(t.bg_hover)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.new_local_tab(cx);
+                                    }))
+                                    .child("+ New cmux Session"),
+                            ),
+                    )
+                    .children(self.tabs.iter().enumerate().take(5).map(|(idx, tab)| {
+                        let is_active = idx == active_tab_idx;
+                        let title = tab
+                            .name
+                            .clone()
+                            .or_else(|| tab.title.clone())
+                            .unwrap_or_else(|| format!("Session #{}", idx + 1));
+                        let cwd = tab.cwd.clone().unwrap_or_else(|| self.project_name());
+                        let area_count = tab.layout.ids().len();
+                        div()
+                            .id(SharedString::from(format!("cmux-row-{id}-{idx}")))
+                            .px(px(tokens::space::SM))
+                            .py(px(6.0))
+                            .rounded(px(tokens::radius::SM))
+                            .border_1()
+                            .border_color(hsla(if is_active { t.accent } else { t.border }))
+                            .bg(hsla(if is_active { t.bg_selected } else { t.bg_app }))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(hsla(t.bg_hover)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.select_tab(idx, cx);
+                            }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(tokens::space::SM))
+                                    .child(
+                                        div().size(px(6.0)).rounded_full().bg(hsla(if is_active {
+                                            t.accent
+                                        } else {
+                                            t.success
+                                        })),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(tokens::text::XS))
+                                            .text_color(hsla(t.text))
+                                            .child(SharedString::from(title)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .text_color(hsla(t.text_faint))
+                                            .child(SharedString::from(cwd)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(hsla(t.text_muted))
+                                    .child(SharedString::from(format!("{area_count} areas"))),
+                            )
+                    })),
+            )
+            // 3. Cloud SSH & Infrastructure Targets
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(tokens::space::XS))
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(hsla(t.text_faint))
+                            .child("CLOUD & REMOTE SSH INFRASTRUCTURE"),
+                    )
+                    .children(if self.ssh_hosts.is_empty() {
+                        vec![div()
+                            .px(px(tokens::space::SM))
+                            .py(px(6.0))
+                            .rounded(px(tokens::radius::SM))
+                            .border_1()
+                            .border_color(hsla(t.border))
+                            .bg(hsla(t.bg_app))
+                            .text_size(px(tokens::text::XS))
+                            .text_color(hsla(t.text_muted))
+                            .child(
+                                "No SSH hosts found in ~/.ssh/config · local forged runtime active",
+                            )
+                            .into_any_element()]
+                    } else {
+                        self.ssh_hosts
+                            .iter()
+                            .take(4)
+                            .map(|host| {
+                                let host_str = host.clone();
+                                div()
+                                    .id(SharedString::from(format!("fleet-ssh-{id}-{host}")))
+                                    .px(px(tokens::space::SM))
+                                    .py(px(6.0))
+                                    .rounded(px(tokens::radius::SM))
+                                    .border_1()
+                                    .border_color(hsla(t.border))
+                                    .bg(hsla(t.bg_app))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(hsla(t.bg_hover)).border_color(hsla(t.accent)))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.new_ssh_tab(host_str.clone(), cx);
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.0))
+                                            .child(div().text_color(hsla(t.accent)).child("⇄"))
+                                            .child(
+                                                div()
+                                                    .text_size(px(tokens::text::XS))
+                                                    .text_color(hsla(t.text))
+                                                    .child(SharedString::from(format!(
+                                                        "ssh://{host}"
+                                                    ))),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .text_color(hsla(t.accent))
+                                            .child("Connect →"),
+                                    )
+                                    .into_any_element()
+                            })
+                            .collect()
+                    }),
+            )
+    }
+
+    fn render_area_inspector(
+        &self,
+        id: AreaId,
+        state: &InspectorState,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let t = &self.theme;
+        let target_id = state
+            .target
+            .as_deref()
+            .or(self.inspector_state.target.as_deref());
+        let (lens_nodes, _) = self.build_canvas_nodes_for_lens(self.canvas_state.lens);
+        let selected_node = target_id.and_then(|tid| {
+            lens_nodes.into_iter().find(|n| n.id == tid).or_else(|| {
+                let (fallback_nodes, _) = self.build_canvas_nodes();
+                fallback_nodes.into_iter().find(|n| n.id == tid)
+            })
+        });
+        let (section_title, badge_text, facts): (&str, String, Vec<(&'static str, String)>) =
+            if let Some(node) = selected_node {
+                (
+                    "NODE PROPERTIES",
+                    node.kind.badge().to_owned(),
+                    vec![
+                        ("ID", node.id),
+                        ("TYPE", node.kind.badge().to_owned()),
+                        ("TITLE", node.title),
+                        ("CONTEXT", node.subtitle),
+                        ("TELEMETRY", node.detail),
+                        (
+                            "COORDS",
+                            format!("X {:.0} · Y {:.0}", node.world_x, node.world_y),
+                        ),
+                    ],
+                )
+            } else {
+                let (open, active, blocked) = self.task_summary();
+                (
+                    "WORKSPACE PROPERTIES",
+                    self.active_preset.label().to_owned(),
+                    vec![
+                        ("PROJECT", self.project_name()),
+                        (
+                            "BRANCH",
+                            self.discover_branch().unwrap_or_else(|| "main".into()),
+                        ),
+                        ("LAYOUT", self.active_preset.label().to_owned()),
+                        (
+                            "TASKS",
+                            format!("{open} open · {active} active · {blocked} blocked"),
+                        ),
+                        (
+                            "DAEMON",
+                            crate::remote_session::daemon_status()
+                                .status_bar_label()
+                                .unwrap_or_else(|| "Connected (v10)".into()),
+                        ),
+                    ],
+                )
+            };
+        div()
+            .id(("area-inspector", id))
+            .size_full()
+            .overflow_y_scroll()
+            .p(px(tokens::space::SM))
+            .bg(hsla(t.bg_panel))
+            .flex()
+            .flex_col()
+            .gap(px(tokens::space::SM))
+            .child(
+                div()
+                    .rounded(px(tokens::radius::MD))
+                    .border_1()
+                    .border_color(hsla(t.border))
+                    .bg(hsla(t.bg_app))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .h(px(26.0))
+                            .px(px(tokens::space::SM))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .border_b_1()
+                            .border_color(hsla(t.border))
+                            .bg(hsla(t.bg_elevated))
+                            .text_size(px(10.0))
+                            .child(
+                                div()
+                                    .text_color(hsla(t.text_muted))
+                                    .child(SharedString::from(section_title.to_owned())),
+                            )
+                            .child(
+                                div()
+                                    .px(px(5.0))
+                                    .py(px(1.0))
+                                    .rounded(px(3.0))
+                                    .bg(with_alpha(hsla(t.accent), 0.16))
+                                    .text_color(hsla(t.accent))
+                                    .child(SharedString::from(badge_text)),
+                            ),
+                    )
+                    .child(
+                        div().flex().flex_col().children(
+                            facts
+                                .into_iter()
+                                .map(|(label, value)| self.inspector_fact(label, &value)),
+                        ),
+                    ),
             )
             .child(
                 div()
-                    .mt(px(tokens::space::MD))
-                    .p(px(tokens::space::LG))
-                    .rounded(px(tokens::radius::LG))
-                    .border_1()
-                    .border_color(hsla(t.border))
-                    .bg(hsla(t.bg_panel))
-                    .child(div().text_color(hsla(t.text)).child("Continue working"))
-                    .when(self.tasks.loading, |d| d.child(div().mt(px(tokens::space::SM)).text_size(px(tokens::text::SM)).text_color(hsla(t.text_faint)).child("Loading project tasks…")))
-                    .when_some(self.tasks.error.clone(), |d, error| d.child(div().mt(px(tokens::space::SM)).text_size(px(tokens::text::SM)).text_color(hsla(t.warning)).child(SharedString::from(error))))
-                    .when(!self.tasks.loading && self.tasks.error.is_none() && recent_tasks.is_empty(), |d| d.child(div().mt(px(tokens::space::SM)).text_size(px(tokens::text::SM)).text_color(hsla(t.text_faint)).child("No open tasks. Create one in Tasks to track your next piece of work.")))
-                    .children(recent_tasks.into_iter().map(|task| {
-                        let id = task.id;
-                        let label = match task.state { tf_proto::TaskState::Active => "In progress", tf_proto::TaskState::Blocked => "Blocked", tf_proto::TaskState::Planned => "Planned", tf_proto::TaskState::Done => "Completed" };
-                        let color = if task.state == tf_proto::TaskState::Blocked { t.warning } else { t.accent };
-                        div().id(SharedString::from(format!("overview-task-{id}")))
-                            .mt(px(tokens::space::XS)).px(px(tokens::space::SM)).py(px(tokens::space::SM))
-                            .flex().items_center().gap(px(tokens::space::SM)).rounded(px(tokens::radius::SM))
-                            .cursor_pointer().hover(|style| style.bg(hsla(t.bg_hover)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.tasks.selected = Some(id);
-                                this.select_workspace_artifact(WorkspaceArtifact::Tasks, cx);
-                            }))
-                            .child(div().size(px(6.0)).rounded_full().bg(hsla(color)))
-                            .child(div().flex_1().min_w(px(0.0)).overflow_hidden().whitespace_nowrap().text_color(hsla(t.text)).child(SharedString::from(task.title.clone())))
-                            .child(div().text_size(px(tokens::text::XS)).text_color(hsla(t.text_faint)).child(label))
-                    })),
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(self.inspector_action(
+                        "area-inspector-new-terminal",
+                        "+  Spawn Terminal Session",
+                        cx.listener(|this, _, _, cx| this.new_local_tab(cx)),
+                    ))
+                    .child(self.inspector_action(
+                        "area-inspector-new-task",
+                        "○  Create Project Task",
+                        cx.listener(|this, _, _, cx| this.open_task_form("", "", cx)),
+                    ))
+                    .child(self.inspector_action(
+                        "area-inspector-palette",
+                        "⌘  Open Command Palette",
+                        cx.listener(|this, _, _, cx| this.open_palette(cx)),
+                    )),
             )
+    }
+
+    fn render_area_outliner(
+        &self,
+        id: AreaId,
+        _state: &ProjectTreeState,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let t = &self.theme;
+        let entries = &self.project_file_entries;
+        div()
+            .id(("area-outliner", id))
+            .size_full()
+            .overflow_y_scroll()
+            .p(px(tokens::space::SM))
+            .bg(hsla(t.bg_panel))
+            .child(self.file_tree(entries, cx))
+    }
+
+    fn render_area_timeline(
+        &self,
+        id: AreaId,
+        _state: &LogStreamState,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let t = &self.theme;
+        let daemon_line = crate::remote_session::daemon_status()
+            .status_bar_label()
+            .unwrap_or_else(|| {
+                format!(
+                    "forged daemon connected · protocol v{}",
+                    tf_proto::PROTOCOL_VERSION
+                )
+            });
+        let mut events: Vec<(String, String, Rgb, Option<crate::lsp::Diagnostic>)> =
+            vec![("IPC".into(), daemon_line, t.accent, None)];
+        for (idx, tab) in self.tabs.iter().enumerate() {
+            let label = Self::tab_label(tab);
+            let detail = format!(
+                "{} command(s) · {} area(s) · last exit {:?}",
+                tab.commands,
+                tab.layout.len(),
+                tab.last_exit
+            );
+            events.push((
+                format!("TAB #{}", idx + 1),
+                format!("{label} — {detail}"),
+                t.success,
+                None,
+            ));
+        }
+        for diagnostic in self.lsp_diagnostics.iter().take(10) {
+            events.push((
+                "LSP".into(),
+                format!("{}: {}", diagnostic.path.display(), diagnostic.message),
+                t.warning,
+                Some(diagnostic.clone()),
+            ));
+        }
+        div()
+            .id(("area-timeline", id))
+            .size_full()
+            .overflow_y_scroll()
+            .p(px(tokens::space::SM))
+            .bg(hsla(t.bg_panel))
+            .flex()
+            .flex_col()
+            .gap(px(tokens::space::XS))
+            .children(events.into_iter().enumerate().map(
+                |(row_idx, (tag, message, color, diag))| {
+                    div()
+                        .id(("timeline-event", row_idx))
+                        .px(px(tokens::space::SM))
+                        .py(px(6.0))
+                        .rounded(px(tokens::radius::SM))
+                        .border_1()
+                        .border_color(hsla(t.border))
+                        .bg(hsla(t.bg_app))
+                        .flex()
+                        .items_center()
+                        .gap(px(tokens::space::SM))
+                        .text_size(px(tokens::text::XS))
+                        .when_some(diag, |d, diagnostic| {
+                            d.cursor_pointer()
+                                .hover(|style| style.bg(hsla(t.bg_hover)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open_diagnostic(&diagnostic, cx);
+                                }))
+                        })
+                        .child(
+                            div()
+                                .px(px(5.0))
+                                .py(px(1.0))
+                                .rounded(px(tokens::radius::SM))
+                                .bg(with_alpha(hsla(color), 0.14))
+                                .text_color(hsla(color))
+                                .child(SharedString::from(tag)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_color(hsla(t.text_muted))
+                                .child(SharedString::from(message)),
+                        )
+                },
+            ))
     }
 
     pub(super) fn workbench_sessions(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
@@ -3358,51 +4730,6 @@ impl TerminalView {
             )
     }
 
-    fn overview_metric(
-        &self,
-        label: &'static str,
-        value: &str,
-        detail: &str,
-        color: Rgb,
-    ) -> impl IntoElement {
-        let t = &self.theme;
-        div()
-            .flex_1()
-            .min_w(px(150.0))
-            .p(px(tokens::space::MD))
-            .rounded(px(tokens::radius::LG))
-            .border_1()
-            .border_color(hsla(t.border))
-            .bg(hsla(t.bg_panel))
-            .child(
-                div()
-                    .text_size(px(tokens::text::XS))
-                    .text_color(hsla(t.text_faint))
-                    .child(label),
-            )
-            .child(
-                div()
-                    .mt(px(tokens::space::SM))
-                    .flex()
-                    .items_center()
-                    .gap(px(tokens::space::SM))
-                    .child(div().size(px(7.0)).rounded_full().bg(hsla(color)))
-                    .child(
-                        div()
-                            .text_size(px(tokens::text::XL))
-                            .text_color(hsla(t.text))
-                            .child(SharedString::from(value.to_owned())),
-                    ),
-            )
-            .child(
-                div()
-                    .mt(px(2.0))
-                    .text_size(px(tokens::text::XS))
-                    .text_color(hsla(t.text_faint))
-                    .child(SharedString::from(detail.to_owned())),
-            )
-    }
-
     fn workbench_card_header(&self, title: &'static str, trailing: &str) -> impl IntoElement {
         let t = &self.theme;
         div()
@@ -3417,344 +4744,6 @@ impl TerminalView {
             .text_color(hsla(t.text_faint))
             .child(title)
             .child(SharedString::from(trailing.to_owned()))
-    }
-
-    pub(super) fn terminal_panel_header(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let t = &self.theme;
-        let tools = [
-            (DockTool::Terminal, "Terminal"),
-            (DockTool::Problems, "Problems"),
-            (DockTool::Output, "Output"),
-        ];
-        div()
-            .id("terminal-panel-header")
-            .h(px(32.0))
-            .flex_none()
-            .px(px(tokens::space::SM))
-            .flex()
-            .items_center()
-            .border_t_1()
-            .border_b_1()
-            .border_color(hsla(t.border))
-            .bg(hsla(t.bg_app))
-            .children(tools.into_iter().map(|(tool, label)| {
-                let active = self.dock_tool == tool;
-                div()
-                    .id(SharedString::from(format!("dock-{label}")))
-                    .h_full()
-                    .px(px(tokens::space::SM))
-                    .flex()
-                    .items_center()
-                    .text_size(px(tokens::text::SM))
-                    .when(active, |d| {
-                        d.border_b_1()
-                            .border_color(hsla(t.accent))
-                            .text_color(hsla(t.text))
-                    })
-                    .when(!active, |d| {
-                        d.text_color(hsla(t.text_faint))
-                            .hover(|style| style.text_color(hsla(t.text)))
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.select_dock_tool(tool, cx);
-                    }))
-                    .child(label)
-            }))
-            .child(
-                div()
-                    .ml(px(tokens::space::SM))
-                    .text_size(px(tokens::text::XS))
-                    .text_color(hsla(t.text_faint))
-                    .child(SharedString::from(
-                        self.spawn
-                            .ssh_host
-                            .as_ref()
-                            .map(|host| format!("SSH · {host}"))
-                            .unwrap_or_else(|| self.spawn.profile.name.clone()),
-                    )),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .id("dock-collapse")
-                    .size(px(24.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(tokens::radius::SM))
-                    .text_color(hsla(t.text_faint))
-                    .hover(|style| style.bg(hsla(t.bg_hover)).text_color(hsla(t.text)))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_dock_collapsed(cx)))
-                    .child(if self.dock_collapsed { "⌃" } else { "⌄" }),
-            )
-            .child(
-                div()
-                    .id("terminal-panel-maximize")
-                    .size(px(24.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(tokens::radius::SM))
-                    .text_color(hsla(t.text_faint))
-                    .hover(|style| style.bg(hsla(t.bg_hover)).text_color(hsla(t.text)))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_terminal_maximized(cx)))
-                    .child(if self.terminal_maximized {
-                        "↙"
-                    } else {
-                        "↗"
-                    }),
-            )
-    }
-
-    pub(super) fn dock_placeholder(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let t = &self.theme;
-        let (title, detail) = match self.dock_tool {
-            DockTool::Terminal => ("Terminal", "Interactive project shells"),
-            DockTool::Problems => (
-                if self.lsp_diagnostics.is_empty() {
-                    "No diagnostics to show"
-                } else {
-                    "Project problems"
-                },
-                if self.lsp_diagnostics.is_empty() {
-                    "Language-server diagnostics will appear here when available."
-                } else {
-                    "Select a problem to open its location"
-                },
-            ),
-            DockTool::Output => (
-                "No captured output",
-                "Task and background-process output will appear here.",
-            ),
-        };
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .text_color(hsla(t.text_muted))
-            .child(title)
-            .child(
-                div()
-                    .mt(px(tokens::space::XS))
-                    .text_size(px(tokens::text::XS))
-                    .text_color(hsla(t.text_faint))
-                    .child(detail),
-            )
-            .when(
-                self.dock_tool == DockTool::Problems && !self.lsp_diagnostics.is_empty(),
-                |d| {
-                    d.mt(px(tokens::space::MD)).children(
-                        self.lsp_diagnostics.iter().take(50).enumerate().map(
-                            |(index, diagnostic)| {
-                                let color = match diagnostic.severity {
-                                    crate::lsp::Severity::Error => t.danger,
-                                    crate::lsp::Severity::Warning => t.warning,
-                                    crate::lsp::Severity::Information => t.accent,
-                                    crate::lsp::Severity::Hint => t.text_faint,
-                                };
-                                let selected = diagnostic.clone();
-                                let path = self
-                                    .local_project_root
-                                    .as_ref()
-                                    .and_then(|root| diagnostic.path.strip_prefix(root).ok())
-                                    .unwrap_or(&diagnostic.path)
-                                    .display()
-                                    .to_string();
-                                div()
-                                    .id(("problem-row", index))
-                                    .max_w(px(720.0))
-                                    .py(px(2.0))
-                                    .flex()
-                                    .gap(px(tokens::space::SM))
-                                    .text_size(px(tokens::text::XS))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(hsla(t.bg_hover)))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.open_diagnostic(&selected, cx)
-                                    }))
-                                    .child(div().text_color(hsla(color)).child("●"))
-                                    .child(SharedString::from(format!(
-                                        "{}:{}:{}  {}",
-                                        path,
-                                        diagnostic.start.line + 1,
-                                        diagnostic.start.utf16_column + 1,
-                                        diagnostic.message
-                                    )))
-                            },
-                        ),
-                    )
-                },
-            )
-    }
-
-    pub(super) fn workbench_inspector(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let t = &self.theme;
-        let branch = self.discover_branch().unwrap_or_else(|| "No branch".into());
-        let context = self
-            .active_context()
-            .map_or("No context", |context| context.name.as_str())
-            .to_owned();
-        let attention = self
-            .program_status_summary()
-            .and_then(|(_, detail)| detail)
-            .unwrap_or_else(|| "No session needs attention".into());
-        let (heading, facts): (&str, Vec<(&str, String)>) = match self.workspace_artifact {
-            WorkspaceArtifact::Overview => (
-                "PROJECT INSPECTOR",
-                vec![
-                    ("PROJECT", self.project_name()),
-                    ("BRANCH", branch),
-                    ("ACCOUNT", context),
-                    ("ATTENTION", attention),
-                ],
-            ),
-            WorkspaceArtifact::Files => (
-                "FILE EXPLORER",
-                vec![
-                    (
-                        "VIEW",
-                        match self.file_explorer_mode {
-                            FileExplorerMode::Smart => "Smart groups",
-                            FileExplorerMode::Tree => "Folders & files",
-                        }
-                        .into(),
-                    ),
-                    ("ITEMS", self.project_file_entries.len().to_string()),
-                    ("PROJECT", self.project_name()),
-                ],
-            ),
-            WorkspaceArtifact::Changes => (
-                "CHANGE INSPECTOR",
-                vec![
-                    (
-                        "FILES",
-                        self.changes.as_ref().map_or(0, Vec::len).to_string(),
-                    ),
-                    (
-                        "SELECTED",
-                        match &self.inspector {
-                            Inspector::Diff(path) => path.clone(),
-                            Inspector::Session => "None".into(),
-                        },
-                    ),
-                    ("BRANCH", branch),
-                    ("PROJECT", self.project_name()),
-                ],
-            ),
-            WorkspaceArtifact::Tasks => {
-                let (open, active, blocked) = self.task_summary();
-                (
-                    "TASK INSPECTOR",
-                    vec![
-                        ("OPEN", open.to_string()),
-                        ("ACTIVE", active.to_string()),
-                        ("BLOCKED", blocked.to_string()),
-                        ("PROJECT", self.project_name()),
-                    ],
-                )
-            }
-            WorkspaceArtifact::Sessions => {
-                let tab = self.tabs.get(self.active_tab);
-                let name = tab
-                    .and_then(|tab| tab.name.clone().or_else(|| tab.title.clone()))
-                    .unwrap_or_else(|| "Current session".into());
-                let location = tab
-                    .and_then(|tab| tab.cwd.clone())
-                    .unwrap_or_else(|| "Unknown directory".into());
-                let connection = tab
-                    .and_then(|tab| tab.spawn.ssh_host.clone())
-                    .map(|host| format!("SSH · {host}"))
-                    .unwrap_or_else(|| "Local".into());
-                (
-                    "SESSION INSPECTOR",
-                    vec![
-                        ("SESSION", name),
-                        ("LOCATION", location),
-                        ("CONNECTION", connection),
-                        ("STATUS", attention),
-                    ],
-                )
-            }
-        };
-        div()
-            .id("workbench-inspector")
-            .w(px(240.0))
-            .min_w(px(220.0))
-            .h_full()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .border_l_1()
-            .border_color(hsla(t.border))
-            .bg(hsla(t.bg_panel))
-            .child(
-                div()
-                    .h(px(38.0))
-                    .px(px(tokens::space::MD))
-                    .flex()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(hsla(t.border))
-                    .text_size(px(tokens::text::XS))
-                    .text_color(hsla(t.text_faint))
-                    .child(SharedString::from(heading.to_owned())),
-            )
-            .child(
-                div()
-                    .p(px(tokens::space::LG))
-                    .flex()
-                    .flex_col()
-                    .gap(px(tokens::space::LG))
-                    .children(
-                        facts
-                            .into_iter()
-                            .map(|(label, value)| self.inspector_fact(label, &value)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(tokens::space::XS))
-                            .child(self.inspector_action(
-                                "inspector-new-terminal",
-                                "+  New terminal",
-                                cx.listener(|this, _, _, cx| this.new_local_tab(cx)),
-                            ))
-                            .child(self.inspector_action(
-                                "inspector-new-task",
-                                "○  New task",
-                                cx.listener(|this, _, _, cx| this.open_task_form("", "", cx)),
-                            ))
-                            .child(self.inspector_action(
-                                "inspector-command-palette",
-                                "⌘  Command palette",
-                                cx.listener(|this, _, _, cx| this.open_palette(cx)),
-                            )),
-                    ),
-            )
-    }
-
-    fn inspector_fact(&self, label: &'static str, value: &str) -> impl IntoElement {
-        let t = &self.theme;
-        div()
-            .pb(px(tokens::space::MD))
-            .border_b_1()
-            .border_color(hsla(t.border))
-            .child(
-                div()
-                    .mb(px(tokens::space::XS))
-                    .text_size(px(tokens::text::XS))
-                    .text_color(hsla(t.text_faint))
-                    .child(label),
-            )
-            .child(
-                div()
-                    .text_size(px(tokens::text::SM))
-                    .text_color(hsla(t.text_muted))
-                    .child(SharedString::from(value.to_owned())),
-            )
     }
 
     pub(super) fn git_dialog_overlay(
@@ -3892,6 +4881,37 @@ impl TerminalView {
         )
     }
 
+    fn inspector_fact(&self, label: &'static str, value: &str) -> impl IntoElement {
+        let t = &self.theme;
+        div()
+            .px(px(tokens::space::SM))
+            .py(px(6.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(tokens::space::SM))
+            .border_b_1()
+            .border_color(hsla(t.border))
+            .child(
+                div()
+                    .w(px(68.0))
+                    .flex_none()
+                    .text_size(px(10.0))
+                    .text_color(hsla(t.text_faint))
+                    .child(label),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(px(tokens::text::XS))
+                    .text_color(hsla(t.text))
+                    .child(SharedString::from(value.to_owned())),
+            )
+    }
+
     fn inspector_action(
         &self,
         id: &'static str,
@@ -3901,15 +4921,17 @@ impl TerminalView {
         let t = &self.theme;
         div()
             .id(id)
-            .h(px(32.0))
+            .h(px(28.0))
             .px(px(tokens::space::SM))
             .flex()
             .items_center()
-            .rounded(px(tokens::radius::MD))
+            .rounded(px(tokens::radius::SM))
             .border_1()
             .border_color(hsla(t.border))
-            .text_size(px(tokens::text::SM))
+            .bg(hsla(t.bg_app))
+            .text_size(px(tokens::text::XS))
             .text_color(hsla(t.text_muted))
+            .cursor_pointer()
             .hover(|style| style.bg(hsla(t.bg_hover)).text_color(hsla(t.text)))
             .on_click(on_click)
             .child(label)
@@ -3959,7 +4981,15 @@ mod tests {
         let start = text.find('α').unwrap();
         let end = text.find("next").unwrap() + 2;
         let lines = super::highlighted_editor_lines(text, &spans, start..end);
-        let selected: Vec<String> = lines.iter().map(|line| line.iter().filter(|(_, _, selected)| *selected).map(|(text, _, _)| text.as_str()).collect()).collect();
+        let selected: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .filter(|(_, _, selected)| *selected)
+                    .map(|(text, _, _)| text.as_str())
+                    .collect()
+            })
+            .collect();
         assert_eq!(selected, vec!["α = 1", "ne"]);
     }
 

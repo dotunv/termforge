@@ -38,11 +38,16 @@ use tf_ui::{tokens, Rgb, Theme};
 use crate::appearance::Appearance;
 use crate::fonts::{ui_family, MonoFont};
 use crate::paint::{hsla, paint_grid, with_alpha, BlockMark, Metrics, Overlay, PaintArgs};
-use crate::panes::{Axis, Dir, PaneId, PaneTree, Rect as PaneRect};
+use crate::panes::{
+    AreaId, Axis, CanvasState, Dir, EditorKind, EditorKindTag, InspectorState, LogStreamState,
+    PaneId, PaneTree, ProjectTreeState, Rect as PaneRect,
+};
 use crate::remote_session::{self, Attach, SessionHandle};
 use crate::surface::{self, DockTab, GitChange, Inspector};
 use crate::updates::UpdateNotice;
-use crate::workspace::{self, Layout, SavedChrome, SavedPanes, SavedTab, SavedWorkbench};
+use crate::workspace::{
+    self, Layout, SavedChrome, SavedPanes, SavedTab, SavedWorkbench, WorkspacePreset,
+};
 
 mod accounts;
 mod chrome;
@@ -345,6 +350,12 @@ struct WorkspaceTab {
     /// panes' state is parked in `panes` until focus moves to them.
     layout: PaneTree,
     panes: HashMap<PaneId, PaneSlot>,
+    /// Live pane sessions retained across workspace preset switches so
+    /// switching split trees never kills active PTY processes.
+    retained_panes: HashMap<PaneId, PaneSlot>,
+    /// Layouts visited in this tab, kept independently while the app runs.
+    #[allow(dead_code)] // Legacy layouts remain available to the migration tests.
+    preset_layouts: HashMap<WorkspacePreset, PaneTree>,
 }
 
 /// Everything about one pane that `TerminalView` swaps in when it takes
@@ -468,12 +479,24 @@ enum SidebarSection {
 /// separate from terminal tabs: a shell session is a tool, not the workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum WorkspaceArtifact {
-    #[default]
     Overview,
+    #[default]
     Files,
     Changes,
     Tasks,
     Sessions,
+}
+
+impl WorkspaceArtifact {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Project",
+            Self::Files => "Explore",
+            Self::Changes => "Review",
+            Self::Tasks => "Work",
+            Self::Sessions => "Terminal",
+        }
+    }
 }
 
 /// The file browser starts with an intent-oriented project map, but never
@@ -694,6 +717,21 @@ pub struct TerminalView {
     /// Client/account identity assigned to the local project.
     context_id: Option<String>,
     identity_check: crate::contexts::IdentityCheck,
+    /// Active Blender-style spatial workspace preset.
+    active_preset: WorkspacePreset,
+    /// Area whose top-left editor selector dropdown is currently open.
+    open_area_selector: Option<AreaId>,
+    /// Area maximized inside the split tree, if any.
+    maximized_area: Option<AreaId>,
+    /// Central interactive 2D viewport pan/zoom/selection state.
+    canvas_state: CanvasState,
+    /// Shared inspector target state routed from node selection.
+    inspector_state: InspectorState,
+    /// Shared project outliner state.
+    #[allow(dead_code)] // Legacy layout state pending removal with the spatial presets.
+    outliner_state: ProjectTreeState,
+    /// Shared timeline waterfall state.
+    timeline_state: LogStreamState,
 
     _pump: Option<Task<()>>,
     _update_check: Option<Task<()>>,
@@ -808,7 +846,7 @@ impl TerminalView {
             computed_grid_size: None,
             drag_state: DragState::default(),
             collapsed_sections: std::collections::HashSet::from([SidebarSection::Tasks]),
-            show_sidebar: true,
+            show_sidebar: false,
             sidebar_hover: true,
             sidebar_peek: false,
             sidebar_width: 216.0,
@@ -885,6 +923,13 @@ impl TerminalView {
             update_notice: None,
             context_id,
             identity_check,
+            active_preset: WorkspacePreset::default(),
+            open_area_selector: None,
+            maximized_area: None,
+            canvas_state: CanvasState::default(),
+            inspector_state: InspectorState::default(),
+            outliner_state: ProjectTreeState::default(),
+            timeline_state: LogStreamState::default(),
             _pump: None,
             _update_check: None,
             _appearance_watch: None,
@@ -1301,25 +1346,38 @@ impl Render for TerminalView {
         )
         .size_full();
 
-        // Split panes: the focused pane keeps the interactive canvas above;
-        // parked panes get a plain read-only canvas each.
-        let split_layout = self
-            .tabs
-            .get(self.active_tab)
-            .filter(|tab| tab.layout.len() > 1)
-            .map(|tab| {
-                let rects = tab.layout.layout(PaneRect::new(0.0, 0.0, 1.0, 1.0));
-                let parked: Vec<(PaneId, Option<Arc<SessionHandle>>, Option<Attention>)> = tab
-                    .panes
-                    .iter()
-                    .map(|(id, slot)| (*id, slot.session.clone(), slot.attention))
-                    .collect();
-                let dividers = tab.layout.dividers(PaneRect::new(0.0, 0.0, 1.0, 1.0));
-                (rects, tab.layout.focused(), parked, dividers)
-            });
+        // Split panes / polymorphic areas: the focused terminal area keeps the
+        // interactive canvas above; parked terminal areas get a plain read-only
+        // canvas each, and non-terminal EditorKind leaves render their spatial
+        // editor surface with a standardized Blender-style area header strip.
+        let split_layout = self.tabs.get(self.active_tab).map(|tab| {
+            let mut rects = tab.layout.layout(PaneRect::new(0.0, 0.0, 1.0, 1.0));
+            if let Some(max_id) = self.maximized_area {
+                if rects.iter().any(|(id, _)| *id == max_id) {
+                    rects = vec![(max_id, PaneRect::new(0.0, 0.0, 1.0, 1.0))];
+                }
+            }
+            let parked: Vec<(PaneId, Option<Arc<SessionHandle>>, Option<Attention>)> = tab
+                .panes
+                .iter()
+                .map(|(id, slot)| (*id, slot.session.clone(), slot.attention))
+                .collect();
+            let editors: HashMap<PaneId, EditorKind> = tab
+                .layout
+                .areas()
+                .into_iter()
+                .map(|area| (area.id, area.editor.clone()))
+                .collect();
+            let dividers = if self.maximized_area.is_some() {
+                Vec::new()
+            } else {
+                tab.layout.dividers(PaneRect::new(0.0, 0.0, 1.0, 1.0))
+            };
+            (rects, tab.layout.focused(), parked, dividers, editors)
+        });
         let (single_content, split_content) = match split_layout {
             None => (Some((grid_canvas, error, exit_overlay)), None),
-            Some((rects, focused_id, parked, dividers)) => {
+            Some((rects, focused_id, parked, dividers, editors)) => {
                 let mut focused_content = Some((grid_canvas, error, exit_overlay));
                 let mut panes: Vec<gpui::AnyElement> = Vec::new();
                 // Records where the panes tile so a divider drag can turn the
@@ -1340,18 +1398,66 @@ impl Render for TerminalView {
                         .into_any_element(),
                 );
                 for (id, rect) in rects {
+                    let editor = editors
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or(EditorKind::Terminal(id));
+                    let selector_open = self.open_area_selector == Some(id);
                     let mut pane = div()
+                        .id(("workspace-area", id))
                         .absolute()
                         .left(relative(rect.x))
                         .top(relative(rect.y))
                         .w(relative(rect.w))
                         .h(relative(rect.h))
+                        .p(px(1.0))
+                        .flex()
+                        .flex_col();
+                    let mut tile = div()
+                        .relative()
+                        .size_full()
+                        .flex()
+                        .flex_col()
                         .border_1()
-                        .overflow_hidden();
-                    if id == focused_id {
-                        pane = pane.border_color(hsla(theme.accent));
+                        .bg(hsla(theme.term_bg))
+                        .overflow_hidden()
+                        .child(self.area_header_strip(id, editor.tag(), id == focused_id, cx));
+                    if !matches!(editor, EditorKind::Terminal(_)) {
+                        let border = if id == focused_id {
+                            hsla(theme.accent)
+                        } else {
+                            hsla(theme.border_strong)
+                        };
+                        let surface = self.render_non_terminal_area(id, &editor, cx);
+                        tile = tile
+                            .border_color(border)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                    this.focus_pane(id, cx);
+                                }),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(0.0))
+                                    .relative()
+                                    .overflow_hidden()
+                                    .child(surface),
+                            );
+                    } else if id == focused_id {
+                        tile = tile.border_color(hsla(theme.border_strong));
                         if let Some((grid, error, exit)) = focused_content.take() {
-                            pane = pane.child(grid).children(error).children(exit);
+                            tile = tile.child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(0.0))
+                                    .relative()
+                                    .overflow_hidden()
+                                    .child(grid)
+                                    .children(error)
+                                    .children(exit),
+                            );
                         }
                     } else {
                         let (parked_session, attention) = parked
@@ -1360,7 +1466,8 @@ impl Render for TerminalView {
                             .map_or((None, None), |(_, session, attention)| {
                                 (session.clone(), *attention)
                             });
-                        let border = hsla(attention.map_or(theme.border, |a| a.color(&theme)));
+                        let border =
+                            hsla(attention.map_or(theme.border_strong, |a| a.color(&theme)));
                         let (view, theme, font) = (view.clone(), Arc::clone(&theme), font.clone());
                         let plain = canvas(
                             move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
@@ -1397,7 +1504,7 @@ impl Render for TerminalView {
                             },
                         )
                         .size_full();
-                        pane = pane
+                        tile = tile
                             .border_color(border)
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -1412,15 +1519,32 @@ impl Render for TerminalView {
                                     cx.stop_propagation();
                                 },
                             ))
-                            .child(plain);
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(0.0))
+                                    .relative()
+                                    .overflow_hidden()
+                                    .child(plain),
+                            );
                     }
+                    if selector_open {
+                        tile = tile.child(self.render_area_selector_popover(id, editor.tag(), cx));
+                    }
+                    pane = pane.child(tile);
                     panes.push(pane.into_any_element());
                 }
                 // Grab handles sit on top of the panes, centred on each split.
-                const GRAB: f32 = 6.0;
+                const GRAB: f32 = 8.0;
                 for (index, divider) in dividers.into_iter().enumerate() {
                     let p = divider.parent;
-                    let handle = div().id(("pane-divider", index)).absolute();
+                    let handle = div()
+                        .id(("pane-divider", index))
+                        .absolute()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .hover(|style| style.bg(with_alpha(hsla(self.theme.accent), 0.22)));
                     let handle = match divider.axis {
                         Axis::Horizontal => handle
                             .left(relative(p.x + p.w * divider.ratio))
@@ -1428,14 +1552,28 @@ impl Render for TerminalView {
                             .w(px(GRAB))
                             .top(relative(p.y))
                             .h(relative(p.h))
-                            .cursor_col_resize(),
+                            .cursor_col_resize()
+                            .child(
+                                div()
+                                    .w(px(2.0))
+                                    .h(px(28.0))
+                                    .rounded_full()
+                                    .bg(with_alpha(hsla(self.theme.border_strong), 0.7)),
+                            ),
                         Axis::Vertical => handle
                             .top(relative(p.y + p.h * divider.ratio))
                             .mt(px(-GRAB / 2.0))
                             .h(px(GRAB))
                             .left(relative(p.x))
                             .w(relative(p.w))
-                            .cursor_row_resize(),
+                            .cursor_row_resize()
+                            .child(
+                                div()
+                                    .h(px(2.0))
+                                    .w(px(28.0))
+                                    .rounded_full()
+                                    .bg(with_alpha(hsla(self.theme.border_strong), 0.7)),
+                            ),
                     };
                     panes.push(
                         handle
@@ -1566,83 +1704,55 @@ impl Render for TerminalView {
                                     .min_w(px(0.0))
                                     .flex()
                                     .flex_col()
-                                    .child(self.workspace_tab_strip(cx))
                                     .when(
-                                        self.workspace_artifact != WorkspaceArtifact::Sessions
-                                            && !self.terminal_maximized,
+                                        matches!(
+                                            self.workspace_artifact,
+                                            WorkspaceArtifact::Files
+                                                | WorkspaceArtifact::Changes
+                                                | WorkspaceArtifact::Tasks
+                                        ) && !self.terminal_maximized,
                                         |d| d.child(self.workspace_artifact_content(cx)),
                                     )
                                     .when(
-                                        self.workspace_artifact == WorkspaceArtifact::Overview
-                                            || self.workspace_artifact
-                                                == WorkspaceArtifact::Sessions
-                                            || self.terminal_maximized,
-                                        |d| d.child(self.terminal_panel_header(cx)),
-                                    )
-                                    .when(
-                                        !self.dock_collapsed
-                                            && (self.workspace_artifact
-                                                == WorkspaceArtifact::Overview
-                                                || self.workspace_artifact
-                                                    == WorkspaceArtifact::Sessions
-                                                || self.terminal_maximized),
+                                        self.terminal_maximized
+                                            || matches!(
+                                                self.workspace_artifact,
+                                                WorkspaceArtifact::Overview
+                                                    | WorkspaceArtifact::Sessions
+                                            ),
                                         |d| {
                                             d.child(
-                                        div()
-                                            .id("terminal")
-                                            .relative()
-                                            .overflow_hidden()
-                                            .bg(hsla(self.theme.term_bg))
-                                            .on_scroll_wheel(cx.listener(Self::scroll_wheel))
-                                            .on_modifiers_changed(cx.listener(
-                                                |this,
-                                                 ev: &gpui::ModifiersChangedEvent,
-                                                 window,
-                                                 cx| {
-                                                    let at = this
-                                                        .hit(window.mouse_position(), window)
-                                                        .map(|(_, p)| p);
-                                                    this.update_hover(ev.modifiers, at, cx);
-                                                },
-                                            ))
-                                            .when(
-                                                self.terminal_maximized
-                                                    || self.workspace_artifact
-                                                        == WorkspaceArtifact::Sessions,
-                                                |d| d.flex_1(),
+                                                div()
+                                                    .id("terminal")
+                                                    .flex_1()
+                                                    .min_h(px(0.0))
+                                                    .relative()
+                                                    .overflow_hidden()
+                                                    .bg(hsla(self.theme.bg_app))
+                                                    .on_scroll_wheel(cx.listener(Self::scroll_wheel))
+                                                    .on_modifiers_changed(cx.listener(
+                                                        |this,
+                                                         ev: &gpui::ModifiersChangedEvent,
+                                                         window,
+                                                         cx| {
+                                                            let at = this
+                                                                .hit(window.mouse_position(), window)
+                                                                .map(|(_, p)| p);
+                                                            this.update_hover(ev.modifiers, at, cx);
+                                                        },
+                                                    ))
+                                                    .when_some(
+                                                        single_content,
+                                                        |d, (grid, error, exit)| {
+                                                            d.child(grid)
+                                                                .children(error)
+                                                                .children(exit)
+                                                        },
+                                                    )
+                                                    .children(split_content.into_iter().flatten()),
                                             )
-                                            .when(
-                                                !self.terminal_maximized
-                                                    && self.workspace_artifact
-                                                        == WorkspaceArtifact::Overview,
-                                                |d| {
-                                                d.h(px(236.0)).flex_none()
-                                            },
-                                            )
-                                            .when(self.dock_tool != DockTool::Terminal, |d| {
-                                                d.h(px(168.0)).flex_none()
-                                            })
-                                            .when_some(single_content, |d, (grid, error, exit)| {
-                                                if self.dock_tool == DockTool::Terminal {
-                                                    d.child(grid).children(error).children(exit)
-                                                } else {
-                                                    d
-                                                }
-                                            })
-                                            .when(self.dock_tool == DockTool::Terminal, |d| {
-                                                d.children(split_content.into_iter().flatten())
-                                            })
-                                            .when(self.dock_tool != DockTool::Terminal, |d| {
-                                                d.child(self.dock_placeholder(cx))
-                                            }),
-                                    )
                                         },
                                     ),
-                            )
-                            .when(
-                                !self.terminal_maximized
-                                    && self.workspace_artifact == WorkspaceArtifact::Overview,
-                                |d| d.child(self.workbench_inspector(cx)),
                             )
                             .when(self.show_utility_dock, |d| {
                                 d.child(self.utility_dock(metrics, cx))

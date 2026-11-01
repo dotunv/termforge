@@ -100,9 +100,13 @@ async fn workbench_starts_project_first_and_terminal_can_maximize(cx: &mut TestA
     redraw(cx);
     assert!(!view.read_with(cx, |view, _| view.terminal_maximized));
 
-    view.update(cx, |view, cx| view.toggle_dock_collapsed(cx));
+    let area = focused(&view, cx);
+    view.update(cx, |view, cx| view.toggle_area_maximized(area, cx));
     redraw(cx);
-    assert!(view.read_with(cx, |view, _| view.dock_collapsed));
+    assert_eq!(
+        view.read_with(cx, |view, _| view.maximized_area),
+        Some(area)
+    );
 }
 
 #[gpui::test]
@@ -261,8 +265,6 @@ async fn dragging_a_divider_changes_the_ratio(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn hidden_sidebar_opens_when_the_left_edge_is_hovered(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
-    view.update(cx, |view, cx| view.toggle_sidebar(cx));
-    redraw(cx);
     assert!(!view.read_with(cx, |view, _| view.show_sidebar));
 
     cx.simulate_event(MouseMoveEvent {
@@ -836,12 +838,41 @@ async fn files_clipboard_shortcuts_edit_the_buffer(cx: &mut TestAppContext) {
     open_file(&view, cx, "file.txt");
     redraw(cx);
     cx.simulate_keystrokes("ctrl-a ctrl-c ctrl-end ctrl-v");
-    assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("hello 🙂"));
-    assert_eq!(view.read_with(cx, |view, _| view.editor_buffer.as_ref().unwrap().text().to_owned()), "hello 🙂hello 🙂");
+    assert_eq!(
+        cx.read_from_clipboard()
+            .and_then(|item| item.text())
+            .as_deref(),
+        Some("hello 🙂")
+    );
+    assert_eq!(
+        view.read_with(cx, |view, _| view
+            .editor_buffer
+            .as_ref()
+            .unwrap()
+            .text()
+            .to_owned()),
+        "hello 🙂hello 🙂"
+    );
     cx.simulate_keystrokes("ctrl-a ctrl-x");
-    assert_eq!(view.read_with(cx, |view, _| view.editor_buffer.as_ref().unwrap().text().to_owned()), "");
+    assert_eq!(
+        view.read_with(cx, |view, _| view
+            .editor_buffer
+            .as_ref()
+            .unwrap()
+            .text()
+            .to_owned()),
+        ""
+    );
     cx.simulate_keystrokes("ctrl-z");
-    assert_eq!(view.read_with(cx, |view, _| view.editor_buffer.as_ref().unwrap().text().to_owned()), "hello 🙂hello 🙂");
+    assert_eq!(
+        view.read_with(cx, |view, _| view
+            .editor_buffer
+            .as_ref()
+            .unwrap()
+            .text()
+            .to_owned()),
+        "hello 🙂hello 🙂"
+    );
 }
 
 #[gpui::test]
@@ -1210,7 +1241,10 @@ async fn native_close_confirms_unsaved_buffers_in_other_files(cx: &mut TestAppCo
     });
     redraw(cx);
     cx.simulate_keystrokes("ctrl-shift-q");
-    assert!(cx.has_pending_prompt(), "the quit shortcut must confirm dirty files");
+    assert!(
+        cx.has_pending_prompt(),
+        "the quit shortcut must confirm dirty files"
+    );
     cx.simulate_prompt_answer("Keep editing");
     cx.run_until_parked();
     assert!(!cx.simulate_close());
@@ -1348,4 +1382,226 @@ async fn workbench_state_round_trips_and_rejects_unsafe_files(cx: &mut TestAppCo
     });
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[gpui::test]
+async fn area_editor_kind_swaps_in_place_without_killing_session(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let (area_id, original_session) = view.read_with(cx, |v, _| {
+        let id = v.tabs[v.active_tab].layout.focused();
+        let session = v.session.clone().unwrap();
+        (id, session)
+    });
+
+    for tag in [
+        crate::panes::EditorKindTag::GraphCanvas,
+        crate::panes::EditorKindTag::Inspector,
+        crate::panes::EditorKindTag::Outliner,
+        crate::panes::EditorKindTag::Timeline,
+        crate::panes::EditorKindTag::Terminal,
+    ] {
+        view.update(cx, |v, cx| v.set_area_editor(area_id, tag, cx));
+        redraw(cx);
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.tabs[v.active_tab].layout.editor(area_id).unwrap().tag(),
+                tag,
+                "area editor kind must update in place"
+            );
+            let current_session = v.session.as_ref().unwrap();
+            assert!(
+                Arc::ptr_eq(&original_session, current_session),
+                "swapping editor kind in place must never drop or replace the PTY session"
+            );
+        });
+    }
+}
+
+#[gpui::test]
+async fn workspace_switch_restores_the_previous_area_layout(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    view.update(cx, |v, cx| {
+        v.apply_workspace_preset(crate::workspace::WorkspacePreset::TopologyFlow, cx);
+        let layout = &mut v.tabs[v.active_tab].layout;
+        assert!(layout.set_ratio(&[], 0.4));
+        let first = layout.ids()[0];
+        assert!(layout.set_editor_tag(first, crate::panes::EditorKindTag::Outliner));
+    });
+    let expected = view.read_with(cx, |v, _| v.tabs[v.active_tab].layout.encode());
+    view.update(cx, |v, cx| {
+        v.apply_workspace_preset(crate::workspace::WorkspacePreset::ConsoleMatrix, cx);
+        v.apply_workspace_preset(crate::workspace::WorkspacePreset::TopologyFlow, cx);
+    });
+    view.read_with(cx, |v, _| {
+        assert_eq!(v.tabs[v.active_tab].layout.encode(), expected);
+    });
+}
+
+#[gpui::test]
+async fn workspace_presets_swap_split_trees_and_preserve_live_sessions(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let initial_session = view.read_with(cx, |v, _| v.session.clone().unwrap());
+
+    view.update(cx, |v, cx| {
+        v.apply_workspace_preset(crate::workspace::WorkspacePreset::TopologyFlow, cx)
+    });
+    redraw(cx);
+    view.read_with(cx, |v, _| {
+        assert_eq!(
+            v.active_preset,
+            crate::workspace::WorkspacePreset::TopologyFlow
+        );
+        let tab = &v.tabs[v.active_tab];
+        let leaves = tab.layout.ids();
+        assert_eq!(leaves.len(), 3);
+        assert_eq!(
+            tab.layout.editor(leaves[0]).unwrap().tag(),
+            crate::panes::EditorKindTag::GraphCanvas
+        );
+        assert_eq!(
+            tab.layout.editor(leaves[1]).unwrap().tag(),
+            crate::panes::EditorKindTag::Inspector
+        );
+        assert_eq!(
+            tab.layout.editor(leaves[2]).unwrap().tag(),
+            crate::panes::EditorKindTag::Terminal
+        );
+    });
+
+    view.update(cx, |v, cx| {
+        v.apply_workspace_preset(crate::workspace::WorkspacePreset::ConsoleMatrix, cx)
+    });
+    redraw(cx);
+    let four_sessions: Vec<_> = view.read_with(cx, |v, _| {
+        let tab = &v.tabs[v.active_tab];
+        let leaves = tab.layout.ids();
+        assert_eq!(leaves.len(), 4);
+        for &id in &leaves {
+            assert_eq!(
+                tab.layout.editor(id).unwrap().tag(),
+                crate::panes::EditorKindTag::Terminal
+            );
+        }
+        let focused_id = tab.layout.focused();
+        leaves
+            .iter()
+            .map(|&id| {
+                if id == focused_id {
+                    v.session.clone().unwrap()
+                } else {
+                    tab.panes[&id].session.clone().unwrap()
+                }
+            })
+            .collect()
+    });
+    assert!(
+        four_sessions
+            .iter()
+            .any(|s| Arc::ptr_eq(s, &initial_session)),
+        "initial PTY session must remain alive across preset transitions"
+    );
+
+    // Switching to 2-area StateDebug must retain the extra 2 sessions without dropping them.
+    view.update(cx, |v, cx| {
+        v.apply_workspace_preset(crate::workspace::WorkspacePreset::StateDebug, cx)
+    });
+    redraw(cx);
+    view.read_with(cx, |v, _| {
+        let tab = &v.tabs[v.active_tab];
+        assert_eq!(tab.layout.ids().len(), 2);
+        assert_eq!(
+            tab.retained_panes.len(),
+            2,
+            "extra panes must be held in retained_panes rather than dropped"
+        );
+    });
+
+    // Switching back to ConsoleMatrix remounts the retained sessions without spawning new ones.
+    view.update(cx, |v, cx| {
+        v.apply_workspace_preset(crate::workspace::WorkspacePreset::ConsoleMatrix, cx)
+    });
+    redraw(cx);
+    view.read_with(cx, |v, _| {
+        let tab = &v.tabs[v.active_tab];
+        let focused_id = tab.layout.focused();
+        let remounted: Vec<_> = tab
+            .layout
+            .ids()
+            .iter()
+            .map(|&id| {
+                if id == focused_id {
+                    v.session.clone().unwrap()
+                } else {
+                    tab.panes[&id].session.clone().unwrap()
+                }
+            })
+            .collect();
+        for original in &four_sessions {
+            assert!(
+                remounted.iter().any(|s| Arc::ptr_eq(s, original)),
+                "every session from ConsoleMatrix must be preserved after round-trip through StateDebug"
+            );
+        }
+    });
+}
+
+#[gpui::test]
+async fn canvas_node_selection_routes_to_inspector_and_terminal_area(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    view.update(cx, |v, cx| {
+        v.apply_workspace_preset(crate::workspace::WorkspacePreset::TopologyFlow, cx)
+    });
+    redraw(cx);
+
+    let (inspector_area, terminal_area, target_node_id) = view.read_with(cx, |v, _| {
+        let leaves = v.tabs[v.active_tab].layout.ids();
+        let inspector_area = leaves[1];
+        let terminal_area = leaves[2];
+        let node_id = format!("pty:{terminal_area}");
+        (inspector_area, terminal_area, node_id)
+    });
+
+    view.update(cx, |v, cx| {
+        v.select_canvas_node(target_node_id.clone(), cx);
+    });
+    redraw(cx);
+
+    view.read_with(cx, |v, _| {
+        let tab = &v.tabs[v.active_tab];
+        assert_eq!(
+            v.canvas_state.selected_node.as_deref(),
+            Some(target_node_id.as_str())
+        );
+        assert_eq!(
+            v.inspector_state.target.as_deref(),
+            Some(target_node_id.as_str())
+        );
+        assert_eq!(tab.layout.focused(), terminal_area);
+        match tab.layout.editor(inspector_area) {
+            Some(crate::panes::EditorKind::Inspector(state)) => {
+                assert_eq!(state.target.as_deref(), Some(target_node_id.as_str()));
+            }
+            other => panic!("expected Inspector editor in area 2, got {other:?}"),
+        }
+    });
+}
+
+#[gpui::test]
+async fn prepare_workbench_keeps_the_existing_terminal_session(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    assert_eq!(count(&view, cx), 1);
+
+    view.update(cx, |v, cx| v.prepare_workbench(cx));
+    redraw(cx);
+
+    assert_eq!(count(&view, cx), 1);
+    view.read_with(cx, |v, _| {
+        let tags: Vec<_> = v.tabs[v.active_tab]
+            .layout
+            .areas()
+            .into_iter()
+            .map(|a| a.editor.tag())
+            .collect();
+        assert_eq!(tags, vec![crate::panes::EditorKindTag::Terminal]);
+    });
 }

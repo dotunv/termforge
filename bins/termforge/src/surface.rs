@@ -31,6 +31,359 @@ pub enum Inspector {
     Diff(String),
 }
 
+/// Kind of actionable system or code node rendered on the 2D `GraphCanvas` viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanvasNodeKind {
+    /// Background daemon / worker (`forged`).
+    Daemon,
+    /// Git worktree / branch (`main`, feature worktrees).
+    Worktree,
+    /// Active PTY session or execution target.
+    Session,
+    /// Project task / execution target.
+    Task,
+    /// Container or remote execution target (`devcontainer`, `Dockerfile`, SSH host).
+    Container,
+    /// AI coding agent (`Claude Code`, `Codex`, `Gemini CLI`).
+    Agent,
+    /// Workspace crate, package, or module node in the Architecture lens.
+    Crate,
+    /// Function or method node in the Function Flow lens.
+    Function,
+    /// Struct, enum, or trait type node in the Function Flow lens.
+    Symbol,
+}
+
+impl CanvasNodeKind {
+    pub const fn badge(self) -> &'static str {
+        match self {
+            Self::Daemon => "DAEMON",
+            Self::Worktree => "WORKTREE",
+            Self::Session => "SESSION",
+            Self::Task => "TARGET",
+            Self::Container => "CLOUD / INFRA",
+            Self::Agent => "AI AGENT",
+            Self::Crate => "CRATE / MODULE",
+            Self::Function => "FUNCTION",
+            Self::Symbol => "TYPE / STRUCT",
+        }
+    }
+}
+
+/// An actionable node positioned in world coordinates on `GraphCanvas`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CanvasNode {
+    pub id: String,
+    pub title: String,
+    pub subtitle: String,
+    pub detail: String,
+    pub kind: CanvasNodeKind,
+    pub world_x: f32,
+    pub world_y: f32,
+    pub healthy: bool,
+    pub session_pane: Option<u64>,
+    pub file_target: Option<(PathBuf, Option<u32>)>,
+}
+
+/// Directed link between two [`CanvasNode`]s on the topology viewport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanvasEdge {
+    pub from: String,
+    pub to: String,
+}
+
+/// Lightweight, bounded static analyzer that builds the crate/module architecture
+/// DAG for `root` by inspecting `bins/*` and `crates/*` manifests (or `src/` files).
+pub fn analyze_workspace_architecture(root: &Path) -> (Vec<CanvasNode>, Vec<CanvasEdge>) {
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut pkgs: Vec<(String, PathBuf, String, Vec<String>, bool)> = Vec::new();
+
+    for (subdir, is_bin) in [("bins", true), ("crates", false)] {
+        let dir = root.join(subdir);
+        let Ok(read_dir) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut entries: Vec<_> = read_dir.filter_map(Result::ok).collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let manifest = path.join("Cargo.toml");
+            let Ok(text) = std::fs::read_to_string(&manifest) else {
+                continue;
+            };
+            let folder_name = entry.file_name().to_string_lossy().into_owned();
+            let mut pkg_name = folder_name.clone();
+            let mut deps = Vec::new();
+            let mut in_pkg = false;
+            let mut in_deps = false;
+            for raw_line in text.lines() {
+                let line = raw_line.trim();
+                if line.starts_with('[') {
+                    in_pkg = line == "[package]";
+                    in_deps = line.starts_with("[dependencies")
+                        || line.starts_with("[target.") && line.ends_with(".dependencies]");
+                    continue;
+                }
+                if in_pkg {
+                    if let Some(rest) = line.strip_prefix("name") {
+                        if let Some((_, val)) = rest.split_once('=') {
+                            let cleaned = val.trim().trim_matches('"').trim_matches('\'');
+                            if !cleaned.is_empty() {
+                                pkg_name = cleaned.to_owned();
+                            }
+                        }
+                    }
+                } else if in_deps {
+                    if let Some((dep_key, _)) = line.split_once('=') {
+                        let dep = dep_key.trim();
+                        if !dep.is_empty() && !dep.starts_with('#') {
+                            deps.push(dep.to_owned());
+                        }
+                    }
+                }
+            }
+            let entry_rel = if path.join("src/main.rs").is_file() {
+                PathBuf::from(subdir).join(&folder_name).join("src/main.rs")
+            } else {
+                PathBuf::from(subdir).join(&folder_name).join("src/lib.rs")
+            };
+            let rel_label = entry_rel.display().to_string();
+            pkgs.push((pkg_name, entry_rel, rel_label, deps, is_bin));
+        }
+    }
+
+    if pkgs.is_empty() {
+        return (nodes, edges);
+    }
+
+    let known_names: std::collections::HashSet<String> =
+        pkgs.iter().map(|(n, ..)| n.clone()).collect();
+    let mut col0_idx = 0usize;
+    let mut col1_idx = 0usize;
+    let mut col2_idx = 0usize;
+
+    for (name, entry_rel, rel_label, deps, is_bin) in &pkgs {
+        let internal_deps: Vec<&String> = deps
+            .iter()
+            .filter(|d| known_names.contains(d.as_str()))
+            .collect();
+        let (col, row_idx) = if *is_bin {
+            let r = col0_idx;
+            col0_idx += 1;
+            (0, r)
+        } else if internal_deps.len() >= 2 {
+            let r = col1_idx;
+            col1_idx += 1;
+            (1, r)
+        } else {
+            let r = col2_idx;
+            col2_idx += 1;
+            (2, r)
+        };
+        let world_x = match col {
+            0 => 28.0,
+            1 => 308.0,
+            _ => 588.0,
+        };
+        let world_y = 28.0 + (row_idx as f32) * 106.0;
+        let node_id = format!("crate:{name}");
+        let role = if *is_bin {
+            "Binary Target"
+        } else if col == 1 {
+            "Domain Runtime Crate"
+        } else {
+            "Foundation Crate"
+        };
+        nodes.push(CanvasNode {
+            id: node_id.clone(),
+            title: name.clone(),
+            subtitle: format!("{role} · {rel_label}"),
+            detail: if internal_deps.is_empty() {
+                "0 internal crate deps · leaf module".into()
+            } else {
+                format!(
+                    "{} internal dep(s): {}",
+                    internal_deps.len(),
+                    internal_deps
+                        .iter()
+                        .take(3)
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            },
+            kind: CanvasNodeKind::Crate,
+            world_x,
+            world_y,
+            healthy: true,
+            session_pane: None,
+            file_target: Some((entry_rel.clone(), Some(1))),
+        });
+        for dep in internal_deps {
+            edges.push(CanvasEdge {
+                from: node_id.clone(),
+                to: format!("crate:{dep}"),
+            });
+        }
+    }
+
+    (nodes, edges)
+}
+
+/// Lightweight, bounded static analyzer that extracts `struct`/`enum`/`trait` types
+/// and `fn` definitions from `source` along with intra-file function call edges.
+pub fn analyze_function_flow(rel_path: &Path, source: &str) -> (Vec<CanvasNode>, Vec<CanvasEdge>) {
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let file_label = rel_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("source.rs");
+
+    struct FnRecord {
+        id: String,
+        name: String,
+        sig: String,
+        is_pub: bool,
+        line: u32,
+        body_start: usize,
+        body_end: usize,
+    }
+
+    let lines: Vec<&str> = source.lines().collect();
+    let mut types: Vec<(String, &'static str, u32)> = Vec::new();
+    let mut fns: Vec<FnRecord> = Vec::new();
+
+    for (idx, &raw) in lines.iter().enumerate() {
+        let trimmed = raw.trim();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        let line_no = (idx + 1) as u32;
+        for (kw, kind_label) in [
+            ("pub struct ", "struct"),
+            ("struct ", "struct"),
+            ("pub enum ", "enum"),
+            ("enum ", "enum"),
+            ("pub trait ", "trait"),
+            ("trait ", "trait"),
+        ] {
+            if let Some(rest) = trimmed.strip_prefix(kw) {
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() && types.len() < 6 {
+                    types.push((name, kind_label, line_no));
+                }
+                break;
+            }
+        }
+
+        let is_pub = trimmed.starts_with("pub ");
+        if let Some(fn_pos) = trimmed.find("fn ") {
+            let prefix = &trimmed[..fn_pos];
+            if prefix.is_empty()
+                || prefix.split_whitespace().all(|tok| {
+                    matches!(tok, "pub" | "pub(super)" | "pub(crate)" | "const" | "async")
+                })
+            {
+                let after_fn = &trimmed[fn_pos + 3..];
+                let name: String = after_fn
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() && fns.len() < 12 {
+                    let sig = after_fn
+                        .split('{')
+                        .next()
+                        .unwrap_or(after_fn)
+                        .trim()
+                        .to_owned();
+                    let body_end = (idx + 45).min(lines.len());
+                    fns.push(FnRecord {
+                        id: format!("fn:{name}:{line_no}"),
+                        name,
+                        sig,
+                        is_pub,
+                        line: line_no,
+                        body_start: idx + 1,
+                        body_end,
+                    });
+                }
+            }
+        }
+    }
+
+    for (i, (type_name, kind_label, line_no)) in types.into_iter().enumerate() {
+        nodes.push(CanvasNode {
+            id: format!("type:{type_name}:{line_no}"),
+            title: type_name,
+            subtitle: format!("{kind_label} · {file_label}:{line_no}"),
+            detail: "Click to jump to type definition in Code Editor".into(),
+            kind: CanvasNodeKind::Symbol,
+            world_x: 28.0,
+            world_y: 28.0 + (i as f32) * 104.0,
+            healthy: true,
+            session_pane: None,
+            file_target: Some((rel_path.to_path_buf(), Some(line_no))),
+        });
+    }
+
+    let mut pub_row = 0usize;
+    let mut priv_row = 0usize;
+    for record in &fns {
+        let (world_x, row) = if record.is_pub {
+            let r = pub_row;
+            pub_row += 1;
+            (308.0, r)
+        } else {
+            let r = priv_row;
+            priv_row += 1;
+            (588.0, r)
+        };
+        nodes.push(CanvasNode {
+            id: record.id.clone(),
+            title: format!("fn {}", record.name),
+            subtitle: format!(
+                "{} · {file_label}:{}",
+                if record.is_pub {
+                    "pub fn"
+                } else {
+                    "internal fn"
+                },
+                record.line
+            ),
+            detail: record.sig.clone(),
+            kind: CanvasNodeKind::Function,
+            world_x,
+            world_y: 28.0 + (row as f32) * 104.0,
+            healthy: true,
+            session_pane: None,
+            file_target: Some((rel_path.to_path_buf(), Some(record.line))),
+        });
+    }
+
+    for caller in &fns {
+        let body_slice = &lines[caller.body_start.min(lines.len())..caller.body_end];
+        for callee in &fns {
+            if caller.id == callee.id {
+                continue;
+            }
+            let needle = format!("{}(", callee.name);
+            if body_slice.iter().any(|l| l.contains(&needle)) {
+                edges.push(CanvasEdge {
+                    from: caller.id.clone(),
+                    to: callee.id.clone(),
+                });
+            }
+        }
+    }
+
+    (nodes, edges)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeKind {
     Modified,
@@ -859,5 +1212,34 @@ mod tests {
             "retained content\n"
         );
         assert!(!root.join("old.txt").exists());
+    }
+
+    #[test]
+    fn analyze_function_flow_extracts_types_functions_and_call_edges() {
+        let src = r#"
+pub struct EngineState {
+    pub ready: bool,
+}
+
+pub fn dispatch_request(input: &str) -> bool {
+    validate_payload(input)
+}
+
+fn validate_payload(raw: &str) -> bool {
+    !raw.is_empty()
+}
+"#;
+        let (nodes, edges) = analyze_function_flow(Path::new("src/engine.rs"), src);
+        assert_eq!(nodes.len(), 3);
+        assert!(nodes
+            .iter()
+            .any(|n| n.kind == CanvasNodeKind::Symbol && n.title == "EngineState"));
+        assert!(nodes
+            .iter()
+            .any(|n| n.kind == CanvasNodeKind::Function && n.title == "fn dispatch_request"));
+        assert!(nodes
+            .iter()
+            .any(|n| n.kind == CanvasNodeKind::Function && n.title == "fn validate_payload"));
+        assert_eq!(edges.len(), 1);
     }
 }
