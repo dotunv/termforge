@@ -678,7 +678,7 @@ impl TerminalView {
         }
         let relative = relative.to_path_buf();
         let path = diagnostic.path.clone();
-        self.workspace_artifact = WorkspaceArtifact::Files;
+        self.show_workspace(Workspace::Explore, cx);
         self.open_project_file(relative, cx);
         self.editor_pending_position = Some((path, diagnostic.start));
         self.apply_pending_editor_position();
@@ -1043,19 +1043,6 @@ impl TerminalView {
             self.collapsed_file_groups.remove(group);
         }
         cx.notify();
-    }
-
-    pub(super) fn workspace_artifact_content(
-        &self,
-        cx: &mut Context<'_, Self>,
-    ) -> gpui::AnyElement {
-        match self.workspace_artifact {
-            WorkspaceArtifact::Overview => self.workbench_overview(cx).into_any_element(),
-            WorkspaceArtifact::Files => self.workbench_files(cx).into_any_element(),
-            WorkspaceArtifact::Changes => self.workbench_changes(cx).into_any_element(),
-            WorkspaceArtifact::Tasks => self.workbench_tasks(cx).into_any_element(),
-            WorkspaceArtifact::Sessions => self.workbench_sessions(cx).into_any_element(),
-        }
     }
 
     pub(super) fn workbench_changes(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
@@ -2589,10 +2576,6 @@ impl TerminalView {
         }
     }
 
-    pub(super) fn workbench_overview(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        self.render_graph_canvas(None, &self.canvas_state, cx)
-    }
-
     /// Build the actionable system nodes and topology edges for the 2D `GraphCanvas` viewport.
     pub(super) fn build_canvas_nodes(
         &self,
@@ -3960,14 +3943,14 @@ impl TerminalView {
                 let (open, active, blocked) = self.task_summary();
                 (
                     "WORKSPACE PROPERTIES",
-                    self.active_preset.label().to_owned(),
+                    self.workspace.label().to_owned(),
                     vec![
                         ("PROJECT", self.project_name()),
                         (
                             "BRANCH",
                             self.discover_branch().unwrap_or_else(|| "main".into()),
                         ),
-                        ("LAYOUT", self.active_preset.label().to_owned()),
+                        ("LAYOUT", self.workspace.label().to_owned()),
                         (
                             "TASKS",
                             format!("{open} open · {active} active · {blocked} blocked"),
@@ -4160,101 +4143,6 @@ impl TerminalView {
                         )
                 },
             ))
-    }
-
-    pub(super) fn workbench_sessions(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let t = &self.theme;
-
-        let session_rows: Vec<gpui::AnyElement> = self
-            .tabs
-            .iter()
-            .enumerate()
-            .map(|(index, tab)| {
-                let active = index == self.active_tab;
-                let label = tab
-                    .name
-                    .clone()
-                    .or_else(|| tab.title.clone())
-                    .unwrap_or_else(|| Self::tab_label(tab));
-                let detail = if let Some(host) = tab.spawn.ssh_host.as_deref() {
-                    format!("SSH · {host}")
-                } else {
-                    tab.cwd
-                        .clone()
-                        .unwrap_or_else(|| tab.spawn.profile.name.clone())
-                };
-                let status = self.tab_status_color(tab, active, t);
-                div()
-                    .id(("workbench-session", index))
-                    .h(px(42.0))
-                    .px(px(tokens::space::SM))
-                    .flex()
-                    .items_center()
-                    .gap(px(tokens::space::SM))
-                    .rounded(px(tokens::radius::SM))
-                    .hover(|style| style.bg(hsla(t.bg_hover)))
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_tab(index, cx)))
-                    .child(div().size(px(7.0)).rounded_full().bg(hsla(status)))
-                    .child(
-                        div()
-                            .id("workbench-task-list")
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .child(
-                                div()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_color(hsla(t.text))
-                                    .child(SharedString::from(label)),
-                            )
-                            .child(
-                                div()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_size(px(tokens::text::XS))
-                                    .text_color(hsla(t.text_faint))
-                                    .child(SharedString::from(detail)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .px(px(6.0))
-                            .py(px(2.0))
-                            .rounded(px(tokens::radius::SM))
-                            .border_1()
-                            .border_color(hsla(t.border))
-                            .text_size(px(tokens::text::XS))
-                            .text_color(hsla(if active { t.accent } else { t.text_faint }))
-                            .child(if active { "Focused" } else { "Open" }),
-                    )
-                    .into_any_element()
-            })
-            .collect();
-
-        div()
-            .id("workbench-sessions")
-            .flex_1()
-            .min_h(px(0.0))
-            .overflow_y_scroll()
-            .p(px(tokens::space::LG))
-            .bg(hsla(t.bg_app))
-            .child(self.artifact_heading(
-                "Sessions",
-                "Local and SSH shells associated with this project",
-                cx,
-            ))
-            .child(
-                div()
-                    .rounded(px(tokens::radius::LG))
-                    .border_1()
-                    .border_color(hsla(t.border))
-                    .bg(hsla(t.bg_panel))
-                    .overflow_hidden()
-                    .child(
-                        self.workbench_card_header("OPEN SESSIONS", &self.tabs.len().to_string()),
-                    )
-                    .child(div().p(px(tokens::space::XS)).children(session_rows)),
-            )
     }
 
     pub(super) fn workbench_tasks(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
@@ -4682,7 +4570,7 @@ impl TerminalView {
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let t = &self.theme;
-        let tasks = self.workspace_artifact == WorkspaceArtifact::Tasks;
+        let tasks = self.workspace == Workspace::Work;
         div()
             .mb(px(tokens::space::LG))
             .flex()

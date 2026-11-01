@@ -8,7 +8,7 @@
 use super::*;
 
 /// Keep a runaway shortcut from creating an unusable grid of tiny panes.
-const MAX_PANES: usize = 8;
+pub(super) const MAX_PANES: usize = 8;
 
 impl PaneSlot {
     /// The focused pane's state as the tab currently mirrors it.
@@ -274,8 +274,8 @@ impl TerminalView {
             Axis::Vertical => (fy - drag.parent.y) / drag.parent.h,
         };
         let path = drag.path.clone();
-        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            if tab.layout.set_ratio(&path, ratio) {
+        if let Some(tree) = self.current_tree_mut() {
+            if tree.set_ratio(&path, ratio) {
                 cx.notify();
             }
         }
@@ -320,10 +320,15 @@ impl TerminalView {
         cx: &mut Context<'_, Self>,
     ) {
         self.open_area_selector = None;
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        // Build's tree holds sessions and so only terminals; every other
+        // workspace's areas never own a process.
+        if (tag == EditorKindTag::Terminal) != self.workspace.hosts_sessions() {
+            return;
+        }
+        let Some(tree) = self.current_tree_mut() else {
             return;
         };
-        if tab.layout.set_editor_tag(id, tag) {
+        if tree.set_editor_tag(id, tag) {
             self.persist_layout();
             cx.notify();
         }
@@ -331,23 +336,25 @@ impl TerminalView {
 
     /// Split a specific area `id` along `axis`.
     pub(super) fn split_area(&mut self, id: AreaId, axis: Axis, cx: &mut Context<'_, Self>) {
+        if !self.workspace.hosts_sessions() {
+            self.split_tree_area(id, axis, cx);
+            return;
+        }
         self.focus_pane(id, cx);
         self.split_pane(axis, cx);
     }
 
-    /// Recover the terminal sessions from older spatial layouts without
-    /// starting new shells or displaying the retired graph and inspector areas.
+    /// Keep session trees terminal-only. Layouts written by older builds
+    /// could mount non-terminal areas in a tab's tree; those areas now live
+    /// in the session-free workspace layouts instead.
     pub fn prepare_workbench(&mut self, cx: &mut Context<'_, Self>) {
-        if self.workspace_artifact == WorkspaceArtifact::Overview {
-            self.workspace_artifact = WorkspaceArtifact::Files;
-            self.terminal_maximized = false;
-        }
+        self.ensure_workspace_layouts();
         for tab in &mut self.tabs {
             for id in tab.layout.ids() {
                 tab.layout.set_editor_tag(id, EditorKindTag::Terminal);
             }
         }
-        self.show_tab_strip = self.workspace_artifact == WorkspaceArtifact::Sessions;
+        self.show_tab_strip = self.workspace == Workspace::Build;
         cx.notify();
     }
 
@@ -363,112 +370,15 @@ impl TerminalView {
 
     /// Close a specific area `id`.
     pub(super) fn close_area(&mut self, id: AreaId, cx: &mut Context<'_, Self>) {
+        if !self.workspace.hosts_sessions() {
+            self.close_tree_area(id, cx);
+            return;
+        }
         if self.maximized_area == Some(id) {
             self.maximized_area = None;
         }
         self.focus_pane(id, cx);
         self.close_pane(cx);
-    }
-
-    /// Apply a Blender-style workspace layout preset (`TopologyFlow`, `ConsoleMatrix`,
-    /// `StateDebug`) by swapping the active tab's split tree and remounting existing
-    /// live session handles without ever killing active PTY sessions.
-    #[allow(dead_code)] // Legacy preset migration remains covered by tests.
-    pub(super) fn apply_workspace_preset(
-        &mut self,
-        preset: WorkspacePreset,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if self.tabs.is_empty() {
-            return;
-        }
-        self.sync_active_tab();
-        let needed = preset.area_count();
-
-        let mut pool: Vec<(PaneId, PaneSlot)> = {
-            let tab = &mut self.tabs[self.active_tab];
-            if preset != self.active_preset {
-                tab.preset_layouts
-                    .insert(self.active_preset, tab.layout.clone());
-            }
-            let focused_id = tab.layout.focused();
-            let mut items = vec![(focused_id, PaneSlot::from_tab(tab))];
-            items.extend(tab.panes.drain());
-            items.extend(tab.retained_panes.drain());
-            items.sort_by_key(|(id, _)| *id);
-            items.dedup_by_key(|(id, _)| *id);
-            items
-        };
-
-        while pool.len() < needed {
-            let new_id = self.next_pane_id;
-            self.next_pane_id += 1;
-            if self.spawn.ssh_host.is_none() {
-                if let Some(cwd) = &self.cwd {
-                    self.spawn.cwd = Some(workspace::local_path(cwd));
-                }
-            }
-            self.start_session(false);
-            pool.push((new_id, PaneSlot::from_view(self)));
-        }
-
-        let saved = self.tabs[self.active_tab]
-            .preset_layouts
-            .get(&preset)
-            .filter(|tree| {
-                tree.ids()
-                    .iter()
-                    .all(|id| pool.iter().any(|(key, _)| key == id))
-            })
-            .cloned();
-        let mut tree = saved.unwrap_or_else(|| {
-            let ids: Vec<PaneId> = pool.iter().take(needed).map(|(id, _)| *id).collect();
-            preset.build_tree(&ids)
-        });
-        // Sync shared canvas/inspector states into the preset's newly constructed leaves.
-        for area in tree.areas_mut() {
-            match &mut area.editor {
-                EditorKind::GraphCanvas(state) => {
-                    let preset_lens = state.lens;
-                    *state = self.canvas_state.clone();
-                    if preset == WorkspacePreset::CodeStudio {
-                        state.lens = preset_lens;
-                    }
-                }
-                EditorKind::Inspector(state) => *state = self.inspector_state.clone(),
-                EditorKind::Outliner(state) => *state = self.outliner_state.clone(),
-                EditorKind::Timeline(state) => *state = self.timeline_state.clone(),
-                EditorKind::Terminal(_)
-                | EditorKind::CodeEditor
-                | EditorKind::GitDiff
-                | EditorKind::TaskBoard
-                | EditorKind::AgentFleet => {}
-            }
-        }
-        let next_focus = tree.focused();
-        let active_ids = tree.ids();
-
-        let tab = &mut self.tabs[self.active_tab];
-        tab.layout = tree;
-        for (id, slot) in pool {
-            if active_ids.contains(&id) {
-                if id == next_focus {
-                    slot.make_focused(tab);
-                } else {
-                    tab.panes.insert(id, slot);
-                }
-            } else {
-                tab.retained_panes.insert(id, slot);
-            }
-        }
-        let updated_tab = tab.clone();
-        self.active_preset = preset;
-        self.maximized_area = None;
-        self.open_area_selector = None;
-        self.load_tab_state(updated_tab);
-        self.on_output(cx);
-        self.persist_layout();
-        cx.notify();
     }
 
     /// Standardized Blender-style area header strip containing:

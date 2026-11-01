@@ -270,7 +270,7 @@ impl TerminalView {
             PaletteAction::OpenSettings => self.open_settings(cx),
             PaletteAction::NewTask => self.open_task_form("", "", cx),
             PaletteAction::ListTasks => {
-                self.workspace_artifact = WorkspaceArtifact::Tasks;
+                self.show_workspace(Workspace::Work, cx);
                 self.refresh_tasks(cx);
                 self.refresh_task_suggestions();
                 self.persist_layout();

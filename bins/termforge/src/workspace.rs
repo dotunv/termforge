@@ -1,195 +1,116 @@
 //! Workspace metadata that is not terminal state: git branch discovery,
-//! Blender-style spatial layout presets, and the layout document persisted by
+//! the workbench workspaces and their default layouts, and the layout document persisted by
 //! `forged` between UI launches.
 
 use std::path::{Path, PathBuf};
 
-use crate::panes::{
-    AreaId, Axis, CanvasState, EditorKind, InspectorState, LogStreamState, PaneTree,
-};
+use crate::panes::{AreaId, Axis, EditorKind, InspectorState, LogStreamState, PaneTree};
 
-/// Spatial workspace layout presets modeled on Blender's top-bar workspaces.
-#[allow(dead_code)] // Retained temporarily for legacy layout tests.
+/// The top-level activities of the workbench.
+///
+/// Each workspace owns a layout of areas. Only [`Workspace::Build`] holds
+/// terminal sessions (its layout is the active tab's pane tree); every other
+/// workspace is a pure view layout whose areas never own a process, so
+/// switching workspaces never starts, moves or closes a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum WorkspacePreset {
-    /// 70% GraphCanvas (Architecture & Function Flow) on the left, 30% Right split (Inspector top, Terminal bottom).
+pub enum Workspace {
+    /// Work items and what needs attention.
+    Work,
+    /// Understand the project: files, source and structure.
     #[default]
-    TopologyFlow,
-    /// Modern Code Studio: Outliner tree on left, Code Editor center, Function-Flow Canvas & Terminal on right.
-    CodeStudio,
-    /// AI Agent & Cloud Fleet (`cmux` command center) on left, live Agent PTY + Timeline on right.
-    AgentFleet,
-    /// 2x2 full-bleed split terminal (`cmux`) matrix.
-    ConsoleMatrix,
-    /// 50% Timeline log waterfall + 50% State/Config Inspector.
-    StateDebug,
+    Explore,
+    /// Change and run things: terminal sessions.
+    Build,
+    /// Understand and stage changes.
+    Review,
+    /// Running systems and agents.
+    Operate,
 }
 
-#[allow(dead_code)] // Retained temporarily for legacy layout tests.
-impl WorkspacePreset {
+impl Workspace {
     pub const ALL: [Self; 5] = [
-        Self::TopologyFlow,
-        Self::CodeStudio,
-        Self::AgentFleet,
-        Self::ConsoleMatrix,
-        Self::StateDebug,
+        Self::Work,
+        Self::Explore,
+        Self::Build,
+        Self::Review,
+        Self::Operate,
     ];
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::TopologyFlow => "Architecture",
-            Self::CodeStudio => "Code",
-            Self::AgentFleet => "Agents",
-            Self::ConsoleMatrix => "Terminals",
-            Self::StateDebug => "Telemetry",
+            Self::Work => "Work",
+            Self::Explore => "Explore",
+            Self::Build => "Build",
+            Self::Review => "Review",
+            Self::Operate => "Operate",
         }
     }
 
     pub const fn id(self) -> &'static str {
         match self {
-            Self::TopologyFlow => "topology",
-            Self::CodeStudio => "code",
-            Self::AgentFleet => "agents",
-            Self::ConsoleMatrix => "console",
-            Self::StateDebug => "debug",
+            Self::Work => "work",
+            Self::Explore => "explore",
+            Self::Build => "build",
+            Self::Review => "review",
+            Self::Operate => "operate",
         }
     }
 
-    #[cfg(test)]
-    pub fn from_id(id: &str) -> Self {
-        match id {
-            "code" => Self::CodeStudio,
-            "agents" => Self::AgentFleet,
-            "console" => Self::ConsoleMatrix,
-            "debug" => Self::StateDebug,
-            _ => Self::TopologyFlow,
-        }
+    /// Parses a saved id. Ids written before the workspaces were named
+    /// (`tasks`, `files`, `git`, `terminal`, `project`) still load.
+    pub fn from_id(id: &str) -> Option<Self> {
+        Some(match id {
+            "work" | "tasks" => Self::Work,
+            "explore" | "files" | "project" => Self::Explore,
+            "build" | "terminal" => Self::Build,
+            "review" | "git" => Self::Review,
+            "operate" => Self::Operate,
+            _ => return None,
+        })
     }
 
-    /// Number of areas required by this preset's binary split tree.
-    pub const fn area_count(self) -> usize {
-        match self {
-            Self::TopologyFlow | Self::CodeStudio | Self::AgentFleet => 3,
-            Self::ConsoleMatrix => 4,
-            Self::StateDebug => 2,
-        }
+    /// Whether this workspace's layout is the active tab's session tree.
+    pub const fn hosts_sessions(self) -> bool {
+        matches!(self, Self::Build)
     }
 
-    /// Construct the binary split tree for this preset using the provided area ids
-    /// (falling back to sequential ids if fewer are supplied).
-    pub fn build_tree(self, ids: &[AreaId]) -> PaneTree {
-        let id_at = |idx: usize| -> AreaId {
-            ids.get(idx).copied().unwrap_or_else(|| {
-                let base = ids.last().copied().unwrap_or(0);
-                base + (idx.saturating_sub(ids.len().saturating_sub(1)) as u64).max(1)
-            })
+    /// Default session-free layout, or `None` for [`Workspace::Build`].
+    /// `next_id` hands out area ids that are unique across the window.
+    pub fn default_layout(self, mut next_id: impl FnMut() -> AreaId) -> Option<PaneTree> {
+        let tree = match self {
+            Self::Build => return None,
+            Self::Work => {
+                let board = next_id();
+                let inspector = next_id();
+                let mut tree = PaneTree::new_with_editor(board, EditorKind::TaskBoard);
+                let _ = tree.split_with_editor(
+                    board,
+                    Axis::Horizontal,
+                    0.68,
+                    inspector,
+                    EditorKind::Inspector(InspectorState::default()),
+                );
+                let _ = tree.set_focus(board);
+                tree
+            }
+            Self::Explore => PaneTree::new_with_editor(next_id(), EditorKind::CodeEditor),
+            Self::Review => PaneTree::new_with_editor(next_id(), EditorKind::GitDiff),
+            Self::Operate => {
+                let fleet = next_id();
+                let timeline = next_id();
+                let mut tree = PaneTree::new_with_editor(fleet, EditorKind::AgentFleet);
+                let _ = tree.split_with_editor(
+                    fleet,
+                    Axis::Horizontal,
+                    0.6,
+                    timeline,
+                    EditorKind::Timeline(LogStreamState::default()),
+                );
+                let _ = tree.set_focus(fleet);
+                tree
+            }
         };
-        match self {
-            Self::TopologyFlow => {
-                let canvas_id = id_at(0);
-                let inspector_id = id_at(1);
-                let terminal_id = id_at(2);
-                let mut tree = PaneTree::new_with_editor(
-                    canvas_id,
-                    EditorKind::GraphCanvas(CanvasState::default()),
-                );
-                let _ = tree.split_with_editor(
-                    canvas_id,
-                    Axis::Horizontal,
-                    0.7,
-                    inspector_id,
-                    EditorKind::Inspector(InspectorState::default()),
-                );
-                let _ = tree.split_with_editor(
-                    inspector_id,
-                    Axis::Vertical,
-                    0.5,
-                    terminal_id,
-                    EditorKind::Terminal(terminal_id),
-                );
-                let _ = tree.set_focus(terminal_id);
-                tree
-            }
-            Self::CodeStudio => {
-                let editor_id = id_at(0);
-                let canvas_id = id_at(1);
-                let terminal_id = id_at(2);
-                let mut tree = PaneTree::new_with_editor(editor_id, EditorKind::CodeEditor);
-                let _ = tree.split_with_editor(
-                    editor_id,
-                    Axis::Horizontal,
-                    0.62,
-                    canvas_id,
-                    EditorKind::GraphCanvas(CanvasState {
-                        lens: crate::panes::CanvasLens::FunctionFlow,
-                        ..CanvasState::default()
-                    }),
-                );
-                let _ = tree.split_with_editor(
-                    canvas_id,
-                    Axis::Vertical,
-                    0.55,
-                    terminal_id,
-                    EditorKind::Terminal(terminal_id),
-                );
-                let _ = tree.set_focus(editor_id);
-                tree
-            }
-            Self::AgentFleet => {
-                let fleet_id = id_at(0);
-                let terminal_id = id_at(1);
-                let timeline_id = id_at(2);
-                let mut tree = PaneTree::new_with_editor(fleet_id, EditorKind::AgentFleet);
-                let _ = tree.split_with_editor(
-                    fleet_id,
-                    Axis::Horizontal,
-                    0.56,
-                    terminal_id,
-                    EditorKind::Terminal(terminal_id),
-                );
-                let _ = tree.split_with_editor(
-                    terminal_id,
-                    Axis::Vertical,
-                    0.62,
-                    timeline_id,
-                    EditorKind::Timeline(LogStreamState::default()),
-                );
-                let _ = tree.set_focus(terminal_id);
-                tree
-            }
-            Self::ConsoleMatrix => {
-                let a0 = id_at(0);
-                let a1 = id_at(1);
-                let a2 = id_at(2);
-                let a3 = id_at(3);
-                let mut tree = PaneTree::new_with_editor(a0, EditorKind::Terminal(a0));
-                let _ =
-                    tree.split_with_editor(a0, Axis::Horizontal, 0.5, a1, EditorKind::Terminal(a1));
-                let _ =
-                    tree.split_with_editor(a0, Axis::Vertical, 0.5, a2, EditorKind::Terminal(a2));
-                let _ =
-                    tree.split_with_editor(a1, Axis::Vertical, 0.5, a3, EditorKind::Terminal(a3));
-                let _ = tree.set_focus(a0);
-                tree
-            }
-            Self::StateDebug => {
-                let timeline_id = id_at(0);
-                let inspector_id = id_at(1);
-                let mut tree = PaneTree::new_with_editor(
-                    timeline_id,
-                    EditorKind::Timeline(LogStreamState::default()),
-                );
-                let _ = tree.split_with_editor(
-                    timeline_id,
-                    Axis::Horizontal,
-                    0.5,
-                    inspector_id,
-                    EditorKind::Inspector(InspectorState::default()),
-                );
-                let _ = tree.set_focus(timeline_id);
-                tree
-            }
-        }
+        Some(tree)
     }
 }
 
@@ -302,6 +223,9 @@ pub struct Layout {
     pub chrome: Option<SavedChrome>,
     /// Absent in layouts written before workbench environments were durable.
     pub workbench: Option<SavedWorkbench>,
+    /// Encoded session-free area layout per workspace id. Older builds skip
+    /// these lines.
+    pub areas: Vec<(String, String)>,
 }
 
 const HEADER: &str = "termforge-layout 1";
@@ -370,6 +294,9 @@ impl Layout {
                 u8::from(workbench.terminal_maximized),
                 workbench.sidebar_width,
             ));
+        }
+        for (workspace, tree) in &self.areas {
+            out.push_str(&format!("L\t{workspace}\t{tree}\n"));
         }
         for tab in &self.tabs {
             out.push_str(&format!(
@@ -473,6 +400,11 @@ impl Layout {
                         });
                     }
                 }
+                (Some("L"), Some(workspace)) => {
+                    if let Some(tree) = fields.next().filter(|tree| !tree.is_empty()) {
+                        layout.areas.push((workspace.to_owned(), tree.to_owned()));
+                    }
+                }
                 (Some("T"), Some(id)) => {
                     let pinned = fields.next() == Some("1");
                     let name = fields
@@ -555,6 +487,7 @@ mod tests {
                 terminal_maximized: false,
                 sidebar_width: 280,
             }),
+            areas: vec![("work".into(), "h0.680(1:k,2:i)".into())],
         };
         assert_eq!(Layout::decode(&layout.encode()), layout);
     }
@@ -626,20 +559,48 @@ mod tests {
     }
 
     #[test]
-    fn workspace_presets_construct_expected_polymorphic_trees() {
-        for preset in WorkspacePreset::ALL {
-            assert_eq!(WorkspacePreset::from_id(preset.id()), preset);
+    fn workspaces_have_session_free_default_layouts() {
+        let mut next = 10;
+        let mut ids = || {
+            next += 1;
+            next
+        };
+        for ws in Workspace::ALL {
+            assert_eq!(Workspace::from_id(ws.id()), Some(ws));
+            let tree = ws.default_layout(&mut ids);
+            assert_eq!(tree.is_some(), !ws.hosts_sessions(), "{ws:?}");
+            if let Some(tree) = tree {
+                assert!(
+                    tree.areas()
+                        .iter()
+                        .all(|a| !matches!(a.editor, EditorKind::Terminal(_))),
+                    "{ws:?} must not own sessions"
+                );
+            }
         }
-        let topology = WorkspacePreset::TopologyFlow.build_tree(&[10, 11, 12]);
-        assert_eq!(topology.encode(), "h0.700(10:c,v0.500(11:i,12))");
-        assert_eq!(topology.focused(), 12);
+    }
 
-        let console = WorkspacePreset::ConsoleMatrix.build_tree(&[1, 2, 3, 4]);
-        assert_eq!(console.encode(), "h0.500(v0.500(1,3),v0.500(2,4))");
-        assert_eq!(console.len(), 4);
+    #[test]
+    fn legacy_workspace_ids_still_load() {
+        assert_eq!(Workspace::from_id("tasks"), Some(Workspace::Work));
+        assert_eq!(Workspace::from_id("files"), Some(Workspace::Explore));
+        assert_eq!(Workspace::from_id("git"), Some(Workspace::Review));
+        assert_eq!(Workspace::from_id("terminal"), Some(Workspace::Build));
+        assert_eq!(Workspace::from_id("project"), Some(Workspace::Explore));
+        assert_eq!(Workspace::from_id("nonsense"), None);
+    }
 
-        let debug = WorkspacePreset::StateDebug.build_tree(&[20, 21]);
-        assert_eq!(debug.encode(), "h0.500(20:l,21:i)");
-        assert_eq!(debug.focused(), 20);
+    #[test]
+    fn area_layouts_round_trip_and_are_optional() {
+        let layout = Layout {
+            areas: vec![
+                ("work".into(), "h0.680(1:k,2:i)".into()),
+                ("review".into(), "3:g".into()),
+            ],
+            ..Layout::default()
+        };
+        let decoded = Layout::decode(&layout.encode());
+        assert_eq!(decoded.areas, layout.areas);
+        assert!(Layout::decode("termforge-layout 1\n").areas.is_empty());
     }
 }

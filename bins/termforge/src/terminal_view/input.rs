@@ -238,7 +238,7 @@ impl TerminalView {
     }
 
     fn editor_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<'_, Self>) -> bool {
-        if self.workspace_artifact != WorkspaceArtifact::Files || self.dock_focus {
+        if self.workspace != Workspace::Explore || self.dock_focus {
             return false;
         }
         let key = ev.keystroke.key.as_str();
@@ -437,7 +437,7 @@ impl TerminalView {
 
     pub(super) fn paste(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-            if self.workspace_artifact == WorkspaceArtifact::Files && !self.dock_focus {
+            if self.workspace == Workspace::Explore && !self.dock_focus {
                 if let Some(buffer) = self.editor_buffer.as_mut() {
                     buffer.replace_selection(&text);
                     self.editor_error = None;
@@ -474,7 +474,7 @@ impl TerminalView {
     }
 
     pub(super) fn copy_selection(&self, cx: &mut Context<'_, Self>) {
-        if self.workspace_artifact == WorkspaceArtifact::Files && !self.dock_focus {
+        if self.workspace == Workspace::Explore && !self.dock_focus {
             if let Some(buffer) = self.editor_buffer.as_ref() {
                 let selection = buffer.selection();
                 if !selection.is_empty() {

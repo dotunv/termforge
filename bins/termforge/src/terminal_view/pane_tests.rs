@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use super::*;
+use crate::workspace::Workspace;
 
 type View = Entity<TerminalView>;
 
@@ -52,7 +53,7 @@ fn wait_for(
     panic!("timed out waiting for {what}");
 }
 
-fn open(cx: &mut TestAppContext) -> (View, &mut VisualTestContext) {
+fn open_raw(cx: &mut TestAppContext) -> (View, &mut VisualTestContext) {
     isolate();
     let spawn = crate::spawn_options().expect("a shell is installed");
     let (view, cx) = cx.add_window_view(|window, cx| {
@@ -64,6 +65,14 @@ fn open(cx: &mut TestAppContext) -> (View, &mut VisualTestContext) {
             cx,
         )
     });
+    redraw(cx);
+    (view, cx)
+}
+
+/// A window showing Build, which hosts the terminal the session tests use.
+fn open(cx: &mut TestAppContext) -> (View, &mut VisualTestContext) {
+    let (view, cx) = open_raw(cx);
+    view.update(cx, |v, _| v.workspace = Workspace::Build);
     redraw(cx);
     (view, cx)
 }
@@ -80,13 +89,13 @@ fn open_file(view: &View, cx: &mut VisualTestContext, name: &str) {
 
 #[gpui::test]
 async fn workbench_starts_project_first_and_terminal_can_maximize(cx: &mut TestAppContext) {
-    let (view, cx) = open(cx);
+    let (view, cx) = open_raw(cx);
     view.read_with(cx, |view, _| {
         assert!(
             view.show_tab_strip,
             "terminal tabs remain visible in their own header strip"
         );
-        assert_eq!(view.workspace_artifact, WorkspaceArtifact::Overview);
+        assert_eq!(view.workspace, Workspace::Explore);
         assert_eq!(view.dock_tool, DockTool::Terminal);
         assert!(!view.dock_collapsed);
         assert!(!view.terminal_maximized, "project overview is visible");
@@ -500,7 +509,7 @@ async fn changes_dock_lists_files_and_opens_a_diff(cx: &mut TestAppContext) {
         })
     });
     view.read_with(cx, |v, _| {
-        assert_eq!(v.workspace_artifact, WorkspaceArtifact::Changes);
+        assert_eq!(v.workspace, Workspace::Review);
         assert_eq!(v.inspector, Inspector::Diff("a.txt".into()));
         assert!(
             v.diff_lines.iter().any(|l| l == "+hello"),
@@ -770,7 +779,7 @@ async fn files_search_navigates_buffer_matches(cx: &mut TestAppContext) {
 
     view.update(cx, |view, cx| {
         view.switch_project(root.clone(), cx);
-        view.workspace_artifact = WorkspaceArtifact::Files;
+        view.workspace = Workspace::Explore;
     });
     open_file(&view, cx, "notes.txt");
     view.update(cx, |view, _| {
@@ -806,7 +815,7 @@ async fn files_keyboard_navigates_selects_and_deletes(cx: &mut TestAppContext) {
     let project = dunce::canonicalize(root.path()).unwrap();
     view.update(cx, |view, cx| {
         view.switch_project(project, cx);
-        view.workspace_artifact = WorkspaceArtifact::Files;
+        view.workspace = Workspace::Explore;
     });
     open_file(&view, cx, "file.txt");
     redraw(cx);
@@ -833,7 +842,7 @@ async fn files_clipboard_shortcuts_edit_the_buffer(cx: &mut TestAppContext) {
     let project = dunce::canonicalize(root.path()).unwrap();
     view.update(cx, |view, cx| {
         view.switch_project(project, cx);
-        view.workspace_artifact = WorkspaceArtifact::Files;
+        view.workspace = Workspace::Explore;
     });
     open_file(&view, cx, "file.txt");
     redraw(cx);
@@ -967,7 +976,7 @@ async fn diagnostics_replace_per_file_and_open_unicode_position(cx: &mut TestApp
         })
     });
     view.read_with(cx, |view, _| {
-        assert_eq!(view.workspace_artifact, WorkspaceArtifact::Files);
+        assert_eq!(view.workspace, Workspace::Explore);
         assert_eq!(view.editor_buffer.as_ref().unwrap().selection(), 4..4);
         assert_eq!(view.lsp_diagnostics, vec![second.clone()]);
     });
@@ -992,7 +1001,7 @@ async fn diagnostic_and_search_reveal_offscreen_editor_lines(cx: &mut TestAppCon
     let project = dunce::canonicalize(root.path()).unwrap();
     view.update(cx, |view, cx| {
         view.switch_project(project.clone(), cx);
-        view.workspace_artifact = WorkspaceArtifact::Files;
+        view.workspace = Workspace::Explore;
     });
     open_file(&view, cx, "long.txt");
     redraw(cx);
@@ -1236,7 +1245,7 @@ async fn native_close_confirms_unsaved_buffers_in_other_files(cx: &mut TestAppCo
         "edited one"
     );
     view.update(cx, |view, cx| {
-        view.workspace_artifact = WorkspaceArtifact::Files;
+        view.workspace = Workspace::Explore;
         cx.notify();
     });
     redraw(cx);
@@ -1310,7 +1319,7 @@ async fn workbench_state_round_trips_and_rejects_unsafe_files(cx: &mut TestAppCo
 
     let saved = view.update(cx, |view, cx| {
         view.switch_project(root.clone(), cx);
-        view.workspace_artifact = WorkspaceArtifact::Tasks;
+        view.workspace = Workspace::Work;
         view.file_explorer_mode = FileExplorerMode::Smart;
         view.open_project_file(PathBuf::from("notes.txt"), cx);
         view.git_diff_view = GitDiffView::Split;
@@ -1324,7 +1333,7 @@ async fn workbench_state_round_trips_and_rejects_unsafe_files(cx: &mut TestAppCo
     });
 
     view.update(cx, |view, cx| {
-        view.workspace_artifact = WorkspaceArtifact::Overview;
+        view.workspace = Workspace::Explore;
         view.file_explorer_mode = FileExplorerMode::Tree;
         view.selected_project_file = None;
         view.editor_buffer = None;
@@ -1338,7 +1347,7 @@ async fn workbench_state_round_trips_and_rejects_unsafe_files(cx: &mut TestAppCo
         view.apply_saved_workbench(&saved, cx);
     });
     view.read_with(cx, |view, _| {
-        assert_eq!(view.workspace_artifact, WorkspaceArtifact::Tasks);
+        assert_eq!(view.workspace, Workspace::Work);
         assert_eq!(view.file_explorer_mode, FileExplorerMode::Smart);
         assert_eq!(
             view.selected_project_file.as_deref(),
@@ -1371,7 +1380,7 @@ async fn workbench_state_round_trips_and_rejects_unsafe_files(cx: &mut TestAppCo
         view.apply_saved_workbench(&unsafe_state, cx);
     });
     view.read_with(cx, |view, _| {
-        assert_eq!(view.workspace_artifact, WorkspaceArtifact::Overview);
+        assert_eq!(view.workspace, Workspace::Explore);
         assert_eq!(view.file_explorer_mode, FileExplorerMode::Tree);
         assert_eq!(view.git_diff_view, GitDiffView::Unified);
         assert_eq!(view.tasks.filter, tasks::TaskFilter::Open);
@@ -1385,205 +1394,30 @@ async fn workbench_state_round_trips_and_rejects_unsafe_files(cx: &mut TestAppCo
 }
 
 #[gpui::test]
-async fn area_editor_kind_swaps_in_place_without_killing_session(cx: &mut TestAppContext) {
+async fn session_trees_only_mount_terminals(cx: &mut TestAppContext) {
     let (view, cx) = open(cx);
     let (area_id, original_session) = view.read_with(cx, |v, _| {
-        let id = v.tabs[v.active_tab].layout.focused();
-        let session = v.session.clone().unwrap();
-        (id, session)
+        (
+            v.tabs[v.active_tab].layout.focused(),
+            v.session.clone().unwrap(),
+        )
     });
-
     for tag in [
         crate::panes::EditorKindTag::GraphCanvas,
         crate::panes::EditorKindTag::Inspector,
-        crate::panes::EditorKindTag::Outliner,
-        crate::panes::EditorKindTag::Timeline,
-        crate::panes::EditorKindTag::Terminal,
+        crate::panes::EditorKindTag::TaskBoard,
     ] {
         view.update(cx, |v, cx| v.set_area_editor(area_id, tag, cx));
         redraw(cx);
         view.read_with(cx, |v, _| {
             assert_eq!(
                 v.tabs[v.active_tab].layout.editor(area_id).unwrap().tag(),
-                tag,
-                "area editor kind must update in place"
+                crate::panes::EditorKindTag::Terminal,
+                "a session tree must keep its terminal areas"
             );
-            let current_session = v.session.as_ref().unwrap();
-            assert!(
-                Arc::ptr_eq(&original_session, current_session),
-                "swapping editor kind in place must never drop or replace the PTY session"
-            );
+            assert!(Arc::ptr_eq(&original_session, v.session.as_ref().unwrap()));
         });
     }
-}
-
-#[gpui::test]
-async fn workspace_switch_restores_the_previous_area_layout(cx: &mut TestAppContext) {
-    let (view, cx) = open(cx);
-    view.update(cx, |v, cx| {
-        v.apply_workspace_preset(crate::workspace::WorkspacePreset::TopologyFlow, cx);
-        let layout = &mut v.tabs[v.active_tab].layout;
-        assert!(layout.set_ratio(&[], 0.4));
-        let first = layout.ids()[0];
-        assert!(layout.set_editor_tag(first, crate::panes::EditorKindTag::Outliner));
-    });
-    let expected = view.read_with(cx, |v, _| v.tabs[v.active_tab].layout.encode());
-    view.update(cx, |v, cx| {
-        v.apply_workspace_preset(crate::workspace::WorkspacePreset::ConsoleMatrix, cx);
-        v.apply_workspace_preset(crate::workspace::WorkspacePreset::TopologyFlow, cx);
-    });
-    view.read_with(cx, |v, _| {
-        assert_eq!(v.tabs[v.active_tab].layout.encode(), expected);
-    });
-}
-
-#[gpui::test]
-async fn workspace_presets_swap_split_trees_and_preserve_live_sessions(cx: &mut TestAppContext) {
-    let (view, cx) = open(cx);
-    let initial_session = view.read_with(cx, |v, _| v.session.clone().unwrap());
-
-    view.update(cx, |v, cx| {
-        v.apply_workspace_preset(crate::workspace::WorkspacePreset::TopologyFlow, cx)
-    });
-    redraw(cx);
-    view.read_with(cx, |v, _| {
-        assert_eq!(
-            v.active_preset,
-            crate::workspace::WorkspacePreset::TopologyFlow
-        );
-        let tab = &v.tabs[v.active_tab];
-        let leaves = tab.layout.ids();
-        assert_eq!(leaves.len(), 3);
-        assert_eq!(
-            tab.layout.editor(leaves[0]).unwrap().tag(),
-            crate::panes::EditorKindTag::GraphCanvas
-        );
-        assert_eq!(
-            tab.layout.editor(leaves[1]).unwrap().tag(),
-            crate::panes::EditorKindTag::Inspector
-        );
-        assert_eq!(
-            tab.layout.editor(leaves[2]).unwrap().tag(),
-            crate::panes::EditorKindTag::Terminal
-        );
-    });
-
-    view.update(cx, |v, cx| {
-        v.apply_workspace_preset(crate::workspace::WorkspacePreset::ConsoleMatrix, cx)
-    });
-    redraw(cx);
-    let four_sessions: Vec<_> = view.read_with(cx, |v, _| {
-        let tab = &v.tabs[v.active_tab];
-        let leaves = tab.layout.ids();
-        assert_eq!(leaves.len(), 4);
-        for &id in &leaves {
-            assert_eq!(
-                tab.layout.editor(id).unwrap().tag(),
-                crate::panes::EditorKindTag::Terminal
-            );
-        }
-        let focused_id = tab.layout.focused();
-        leaves
-            .iter()
-            .map(|&id| {
-                if id == focused_id {
-                    v.session.clone().unwrap()
-                } else {
-                    tab.panes[&id].session.clone().unwrap()
-                }
-            })
-            .collect()
-    });
-    assert!(
-        four_sessions
-            .iter()
-            .any(|s| Arc::ptr_eq(s, &initial_session)),
-        "initial PTY session must remain alive across preset transitions"
-    );
-
-    // Switching to 2-area StateDebug must retain the extra 2 sessions without dropping them.
-    view.update(cx, |v, cx| {
-        v.apply_workspace_preset(crate::workspace::WorkspacePreset::StateDebug, cx)
-    });
-    redraw(cx);
-    view.read_with(cx, |v, _| {
-        let tab = &v.tabs[v.active_tab];
-        assert_eq!(tab.layout.ids().len(), 2);
-        assert_eq!(
-            tab.retained_panes.len(),
-            2,
-            "extra panes must be held in retained_panes rather than dropped"
-        );
-    });
-
-    // Switching back to ConsoleMatrix remounts the retained sessions without spawning new ones.
-    view.update(cx, |v, cx| {
-        v.apply_workspace_preset(crate::workspace::WorkspacePreset::ConsoleMatrix, cx)
-    });
-    redraw(cx);
-    view.read_with(cx, |v, _| {
-        let tab = &v.tabs[v.active_tab];
-        let focused_id = tab.layout.focused();
-        let remounted: Vec<_> = tab
-            .layout
-            .ids()
-            .iter()
-            .map(|&id| {
-                if id == focused_id {
-                    v.session.clone().unwrap()
-                } else {
-                    tab.panes[&id].session.clone().unwrap()
-                }
-            })
-            .collect();
-        for original in &four_sessions {
-            assert!(
-                remounted.iter().any(|s| Arc::ptr_eq(s, original)),
-                "every session from ConsoleMatrix must be preserved after round-trip through StateDebug"
-            );
-        }
-    });
-}
-
-#[gpui::test]
-async fn canvas_node_selection_routes_to_inspector_and_terminal_area(cx: &mut TestAppContext) {
-    let (view, cx) = open(cx);
-    view.update(cx, |v, cx| {
-        v.apply_workspace_preset(crate::workspace::WorkspacePreset::TopologyFlow, cx)
-    });
-    redraw(cx);
-
-    let (inspector_area, terminal_area, target_node_id) = view.read_with(cx, |v, _| {
-        let leaves = v.tabs[v.active_tab].layout.ids();
-        let inspector_area = leaves[1];
-        let terminal_area = leaves[2];
-        let node_id = format!("pty:{terminal_area}");
-        (inspector_area, terminal_area, node_id)
-    });
-
-    view.update(cx, |v, cx| {
-        v.select_canvas_node(target_node_id.clone(), cx);
-    });
-    redraw(cx);
-
-    view.read_with(cx, |v, _| {
-        let tab = &v.tabs[v.active_tab];
-        assert_eq!(
-            v.canvas_state.selected_node.as_deref(),
-            Some(target_node_id.as_str())
-        );
-        assert_eq!(
-            v.inspector_state.target.as_deref(),
-            Some(target_node_id.as_str())
-        );
-        assert_eq!(tab.layout.focused(), terminal_area);
-        match tab.layout.editor(inspector_area) {
-            Some(crate::panes::EditorKind::Inspector(state)) => {
-                assert_eq!(state.target.as_deref(), Some(target_node_id.as_str()));
-            }
-            other => panic!("expected Inspector editor in area 2, got {other:?}"),
-        }
-    });
 }
 
 #[gpui::test]
@@ -1603,5 +1437,117 @@ async fn prepare_workbench_keeps_the_existing_terminal_session(cx: &mut TestAppC
             .map(|a| a.editor.tag())
             .collect();
         assert_eq!(tags, vec![crate::panes::EditorKindTag::Terminal]);
+    });
+}
+
+#[gpui::test]
+async fn switching_workspaces_never_touches_sessions(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let original = view.read_with(cx, |v, _| v.session.clone().unwrap());
+    let tree_before = view.read_with(cx, |v, _| v.tabs[v.active_tab].layout.encode());
+    for workspace in crate::workspace::Workspace::ALL
+        .into_iter()
+        .cycle()
+        .take(12)
+    {
+        view.update(cx, |v, cx| v.switch_workspace(workspace, cx));
+        redraw(cx);
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.workspace, workspace);
+            assert!(Arc::ptr_eq(&original, v.session.as_ref().unwrap()));
+            assert_eq!(v.tabs[v.active_tab].layout.encode(), tree_before);
+        });
+    }
+    assert_eq!(count(&view, cx), 1, "no workspace may start a shell");
+}
+
+#[gpui::test]
+async fn session_free_areas_split_retype_and_close_without_sessions(cx: &mut TestAppContext) {
+    use crate::panes::{Axis, EditorKindTag};
+    use crate::workspace::Workspace;
+    let (view, cx) = open(cx);
+    let original = view.read_with(cx, |v, _| v.session.clone().unwrap());
+    view.update(cx, |v, cx| v.switch_workspace(Workspace::Work, cx));
+    let (first, len) = view.read_with(cx, |v, _| {
+        let tree = &v.workspace_layouts[&Workspace::Work];
+        (tree.ids()[0], tree.len())
+    });
+    assert_eq!(len, 2);
+
+    view.update(cx, |v, cx| v.split_area(first, Axis::Vertical, cx));
+    view.read_with(cx, |v, _| {
+        assert_eq!(v.workspace_layouts[&Workspace::Work].len(), 3);
+    });
+    view.update(cx, |v, cx| {
+        v.set_area_editor(first, EditorKindTag::Terminal, cx);
+        v.set_area_editor(first, EditorKindTag::Timeline, cx);
+    });
+    view.read_with(cx, |v, _| {
+        let tag = v.workspace_layouts[&Workspace::Work]
+            .editor(first)
+            .unwrap()
+            .tag();
+        assert_eq!(
+            tag,
+            EditorKindTag::Timeline,
+            "terminals are only mounted by Build"
+        );
+    });
+    view.update(cx, |v, cx| v.close_area(first, cx));
+    view.update(cx, |v, cx| {
+        let rest = v.workspace_layouts[&Workspace::Work].ids();
+        for id in rest.into_iter().skip(1) {
+            v.close_area(id, cx);
+        }
+    });
+    redraw(cx);
+    view.read_with(cx, |v, _| {
+        assert_eq!(
+            v.workspace_layouts[&Workspace::Work].len(),
+            1,
+            "the last area stays"
+        );
+        assert!(Arc::ptr_eq(&original, v.session.as_ref().unwrap()));
+    });
+    assert_eq!(count(&view, cx), 1);
+}
+
+#[gpui::test]
+async fn workspace_layouts_survive_a_round_trip_through_the_layout_file(cx: &mut TestAppContext) {
+    use crate::panes::Axis;
+    use crate::workspace::Workspace;
+    let (view, cx) = open(cx);
+    let first = view.read_with(cx, |v, _| v.workspace_layouts[&Workspace::Work].ids()[0]);
+    view.update(cx, |v, cx| {
+        v.switch_workspace(Workspace::Work, cx);
+        v.split_area(first, Axis::Horizontal, cx);
+    });
+    let saved = view.read_with(cx, |v, _| v.saved_areas());
+    let encoded = view.read_with(cx, |v, _| v.workspace_layouts[&Workspace::Work].encode());
+    assert!(saved
+        .iter()
+        .any(|(id, tree)| id == "work" && *tree == encoded));
+    assert!(saved.iter().all(|(id, _)| id != "build"));
+
+    view.update(cx, |v, _| {
+        v.workspace_layouts.clear();
+        v.apply_saved_areas(&saved);
+        v.apply_saved_areas(&[
+            ("work".into(), "garbage".into()),
+            ("review".into(), "1".into()),
+            ("explore".into(), "2:t".into()),
+        ]);
+        v.ensure_workspace_layouts();
+    });
+    view.read_with(cx, |v, _| {
+        let work = &v.workspace_layouts[&Workspace::Work];
+        assert_eq!(work.len(), 3, "restored layout is kept, garbage ignored");
+        assert_eq!(v.workspace_layouts.len(), 4, "defaults fill the gaps");
+        for tree in v.workspace_layouts.values() {
+            assert!(tree
+                .areas()
+                .iter()
+                .all(|a| !matches!(a.editor, crate::panes::EditorKind::Terminal(_))));
+        }
     });
 }

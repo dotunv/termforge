@@ -280,14 +280,15 @@ impl TerminalView {
                             .gap(px(2.0))
                             .children(
                                 [
-                                    WorkspaceArtifact::Tasks,
-                                    WorkspaceArtifact::Files,
-                                    WorkspaceArtifact::Sessions,
-                                    WorkspaceArtifact::Changes,
+                                    Workspace::Work,
+                                    Workspace::Explore,
+                                    Workspace::Build,
+                                    Workspace::Review,
+                                    Workspace::Operate,
                                 ]
                                 .into_iter()
                                 .map(|artifact| {
-                                    let active = self.workspace_artifact == artifact;
+                                    let active = self.workspace == artifact;
                                     div()
                                         .id(SharedString::from(format!(
                                             "header-workspace-{}",
@@ -315,19 +316,7 @@ impl TerminalView {
                                         })
                                         .cursor_pointer()
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            if this.workspace_artifact != artifact
-                                                || this.terminal_maximized
-                                            {
-                                                this.workspace_artifact = artifact;
-                                                this.terminal_maximized = false;
-                                                this.show_tab_strip =
-                                                    artifact == WorkspaceArtifact::Sessions;
-                                                if artifact == WorkspaceArtifact::Changes {
-                                                    this.refresh_changes(cx);
-                                                }
-                                                this.persist_layout();
-                                                cx.notify();
-                                            }
+                                            this.switch_workspace(artifact, cx);
                                         }))
                                         .child(artifact.label())
                                 }),
@@ -613,7 +602,7 @@ impl TerminalView {
             .map_or(1, |tab| tab.layout.len());
         let mut left = format!(
             "WORKSPACE · {} ({area_count} area{})  ·  {} cmd{}",
-            self.workspace_artifact.label(),
+            self.workspace.label(),
             if area_count == 1 { "" } else { "s" },
             self.commands,
             if self.commands == 1 { "" } else { "s" }
@@ -1129,7 +1118,7 @@ impl TerminalView {
                     Some(changes) => {
                         view.changes = Some(changes);
                         view.git_error = None;
-                        if view.workspace_artifact == WorkspaceArtifact::Changes
+                        if view.workspace == Workspace::Review
                             && !view.change_selection_is_current()
                         {
                             view.open_first_workbench_diff(cx);
@@ -1163,7 +1152,7 @@ impl TerminalView {
     }
 
     pub(super) fn open_diff(&mut self, change: &GitChange, cx: &mut Context<'_, Self>) {
-        self.workspace_artifact = WorkspaceArtifact::Changes;
+        self.show_workspace(Workspace::Review, cx);
         self.open_workbench_diff(change.clone(), surface::DiffScope::Unstaged, cx);
         self.persist_layout();
         cx.notify();

@@ -46,10 +46,11 @@ use crate::remote_session::{self, Attach, SessionHandle};
 use crate::surface::{self, DockTab, GitChange, Inspector};
 use crate::updates::UpdateNotice;
 use crate::workspace::{
-    self, Layout, SavedChrome, SavedPanes, SavedTab, SavedWorkbench, WorkspacePreset,
+    self, Layout, SavedChrome, SavedPanes, SavedTab, SavedWorkbench, Workspace,
 };
 
 mod accounts;
+mod areas;
 mod chrome;
 mod customize;
 mod ime;
@@ -350,12 +351,9 @@ struct WorkspaceTab {
     /// panes' state is parked in `panes` until focus moves to them.
     layout: PaneTree,
     panes: HashMap<PaneId, PaneSlot>,
-    /// Live pane sessions retained across workspace preset switches so
-    /// switching split trees never kills active PTY processes.
+    /// Live sessions that are not part of the current layout, kept so a
+    /// layout change never kills a running process.
     retained_panes: HashMap<PaneId, PaneSlot>,
-    /// Layouts visited in this tab, kept independently while the app runs.
-    #[allow(dead_code)] // Legacy layouts remain available to the migration tests.
-    preset_layouts: HashMap<WorkspacePreset, PaneTree>,
 }
 
 /// Everything about one pane that `TerminalView` swaps in when it takes
@@ -473,30 +471,6 @@ enum SidebarSection {
     Worktrees,
     Projects,
     Tasks,
-}
-
-/// Project artifacts shown in the central workspace. These are deliberately
-/// separate from terminal tabs: a shell session is a tool, not the workspace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum WorkspaceArtifact {
-    Overview,
-    #[default]
-    Files,
-    Changes,
-    Tasks,
-    Sessions,
-}
-
-impl WorkspaceArtifact {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Overview => "Project",
-            Self::Files => "Explore",
-            Self::Changes => "Review",
-            Self::Tasks => "Work",
-            Self::Sessions => "Terminal",
-        }
-    }
 }
 
 /// The file browser starts with an intent-oriented project map, but never
@@ -626,7 +600,7 @@ pub struct TerminalView {
     /// Hide dock content while leaving its tool strip available.
     dock_collapsed: bool,
     /// Artifact currently occupying the project workspace.
-    workspace_artifact: WorkspaceArtifact,
+    workspace: Workspace,
     /// Whether project files are organized by purpose or by their real paths.
     file_explorer_mode: FileExplorerMode,
     /// File currently open in the Files environment, relative to the project root.
@@ -718,7 +692,9 @@ pub struct TerminalView {
     context_id: Option<String>,
     identity_check: crate::contexts::IdentityCheck,
     /// Active Blender-style spatial workspace preset.
-    active_preset: WorkspacePreset,
+    /// Session-free area layout of every workspace except Build, whose
+    /// layout is the active tab's pane tree.
+    workspace_layouts: HashMap<Workspace, PaneTree>,
     /// Area whose top-left editor selector dropdown is currently open.
     open_area_selector: Option<AreaId>,
     /// Area maximized inside the split tree, if any.
@@ -855,7 +831,7 @@ impl TerminalView {
             show_status_bar: true,
             terminal_maximized: false,
             dock_collapsed: false,
-            workspace_artifact: WorkspaceArtifact::Overview,
+            workspace: Workspace::Explore,
             file_explorer_mode: FileExplorerMode::Smart,
             selected_project_file: None,
             editor_buffer: None,
@@ -923,7 +899,7 @@ impl TerminalView {
             update_notice: None,
             context_id,
             identity_check,
-            active_preset: WorkspacePreset::default(),
+            workspace_layouts: HashMap::new(),
             open_area_selector: None,
             maximized_area: None,
             canvas_state: CanvasState::default(),
@@ -942,6 +918,7 @@ impl TerminalView {
                 .unwrap_or(true)
         });
         view.restore_workspace(cx);
+        view.ensure_workspace_layouts();
         view.refresh_project_files(cx);
         view.tasks = tasks::TasksState::for_project(view.local_project_root.as_deref());
         view.refresh_tasks(cx);
@@ -983,7 +960,7 @@ impl TerminalView {
                 if view.poll_lsp() {
                     cx.notify();
                 }
-                if view.workspace_artifact == WorkspaceArtifact::Files
+                if view.workspace == Workspace::Explore
                     && !view.project_files_loading
                     && view.project_files_checked_at.is_none_or(|checked| {
                         checked.elapsed() >= std::time::Duration::from_secs(10)
@@ -1705,21 +1682,13 @@ impl Render for TerminalView {
                                     .flex()
                                     .flex_col()
                                     .when(
-                                        matches!(
-                                            self.workspace_artifact,
-                                            WorkspaceArtifact::Files
-                                                | WorkspaceArtifact::Changes
-                                                | WorkspaceArtifact::Tasks
-                                        ) && !self.terminal_maximized,
-                                        |d| d.child(self.workspace_artifact_content(cx)),
+                                        !self.workspace.hosts_sessions()
+                                            && !self.terminal_maximized,
+                                        |d| d.child(self.workspace_areas(cx)),
                                     )
                                     .when(
                                         self.terminal_maximized
-                                            || matches!(
-                                                self.workspace_artifact,
-                                                WorkspaceArtifact::Overview
-                                                    | WorkspaceArtifact::Sessions
-                                            ),
+                                            || self.workspace.hosts_sessions(),
                                         |d| {
                                             d.child(
                                                 div()

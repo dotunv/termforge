@@ -87,7 +87,6 @@ impl TerminalView {
             layout: PaneTree::new(pane),
             panes: HashMap::new(),
             retained_panes: HashMap::new(),
-            preset_layouts: HashMap::new(),
         }
     }
 
@@ -807,6 +806,7 @@ impl TerminalView {
             active,
             chrome: Some(self.saved_chrome()),
             workbench: Some(self.saved_workbench()),
+            areas: self.saved_areas(),
         }
         .encode();
         if encoded != self.saved_layout {
@@ -844,14 +844,7 @@ impl TerminalView {
 
     pub(super) fn saved_workbench(&self) -> SavedWorkbench {
         SavedWorkbench {
-            environment: match self.workspace_artifact {
-                WorkspaceArtifact::Overview => "project",
-                WorkspaceArtifact::Files => "files",
-                WorkspaceArtifact::Changes => "git",
-                WorkspaceArtifact::Tasks => "tasks",
-                WorkspaceArtifact::Sessions => "terminal",
-            }
-            .into(),
+            environment: self.workspace.id().into(),
             file_mode: match self.file_explorer_mode {
                 FileExplorerMode::Smart => "smart",
                 FileExplorerMode::Tree => "tree",
@@ -897,13 +890,7 @@ impl TerminalView {
         saved: &SavedWorkbench,
         cx: &mut Context<'_, Self>,
     ) {
-        self.workspace_artifact = match saved.environment.as_str() {
-            "files" => WorkspaceArtifact::Files,
-            "git" => WorkspaceArtifact::Changes,
-            "tasks" => WorkspaceArtifact::Tasks,
-            "terminal" => WorkspaceArtifact::Sessions,
-            _ => WorkspaceArtifact::Overview,
-        };
+        self.workspace = Workspace::from_id(&saved.environment).unwrap_or_default();
         self.file_explorer_mode = match saved.file_mode.as_str() {
             "smart" => FileExplorerMode::Smart,
             _ => FileExplorerMode::Tree,
@@ -1113,6 +1100,7 @@ impl TerminalView {
         if let Some(chrome) = &layout.chrome {
             self.apply_saved_chrome(chrome);
         }
+        self.apply_saved_areas(&layout.areas);
         if let Some(workbench) = &layout.workbench {
             self.apply_saved_workbench(workbench, cx);
         }

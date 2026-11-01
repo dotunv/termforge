@@ -62,7 +62,7 @@ impl EntityInputHandler for TerminalView {
     ) {
         self.ime_preedit.clear();
         if !text.is_empty() {
-            if self.workspace_artifact == WorkspaceArtifact::Files && !self.dock_focus {
+            if self.workspace == Workspace::Explore && !self.dock_focus {
                 if let Some(buffer) = self.editor_buffer.as_mut() {
                     buffer.replace_selection(text);
                     self.editor_error = None;
