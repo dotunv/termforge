@@ -700,6 +700,21 @@ pub struct TerminalView {
     ports: Option<crate::operate::PortProbe>,
     ports_at: Option<std::time::SystemTime>,
     ports_scanning: bool,
+    /// Containers known to the runtime, for the Services area.
+    containers: Option<crate::operate::ContainerProbe>,
+    containers_at: Option<std::time::SystemTime>,
+    containers_scanning: bool,
+    /// The container CLI found at startup.
+    container_runtime: Option<&'static str>,
+    /// Last container action's outcome, shown until the next one.
+    container_note: Option<String>,
+    /// Container id with an action in flight.
+    container_busy: Option<String>,
+    /// What happened, for the Timeline.
+    activity: crate::activity::ActivityLog,
+    activity_filter: crate::activity::Filter,
+    activity_filter_focus: bool,
+    activity_baseline: operate_view::ActivityBaseline,
     /// Area whose top-left editor selector dropdown is currently open.
     open_area_selector: Option<AreaId>,
     /// Area maximized inside the split tree, if any.
@@ -908,6 +923,16 @@ impl TerminalView {
             ports: None,
             ports_at: None,
             ports_scanning: false,
+            containers: None,
+            containers_at: None,
+            containers_scanning: false,
+            container_runtime: crate::operate::container_runtime(),
+            container_note: None,
+            container_busy: None,
+            activity: crate::activity::ActivityLog::default(),
+            activity_filter: crate::activity::Filter::default(),
+            activity_filter_focus: false,
+            activity_baseline: operate_view::ActivityBaseline::default(),
             open_area_selector: None,
             maximized_area: None,
             canvas_state: CanvasState::default(),
@@ -969,6 +994,8 @@ impl TerminalView {
                     cx.notify();
                 }
                 view.refresh_ports_if_stale(cx);
+                view.refresh_containers_if_stale(cx);
+                view.record_activity(cx);
                 if view.workspace == Workspace::Explore
                     && !view.project_files_loading
                     && view.project_files_checked_at.is_none_or(|checked| {

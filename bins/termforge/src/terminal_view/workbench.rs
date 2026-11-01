@@ -3591,9 +3591,7 @@ impl TerminalView {
             EditorKind::Outliner(state) => {
                 self.render_area_outliner(id, state, cx).into_any_element()
             }
-            EditorKind::Timeline(state) => {
-                self.render_area_timeline(id, state, cx).into_any_element()
-            }
+            EditorKind::Timeline(_) => self.render_area_timeline(id, cx).into_any_element(),
             EditorKind::CodeEditor => self.workbench_files(cx).into_any_element(),
             EditorKind::GitDiff => self.workbench_changes(cx).into_any_element(),
             EditorKind::TaskBoard => self.workbench_tasks(cx).into_any_element(),
@@ -3751,97 +3749,6 @@ impl TerminalView {
             .p(px(tokens::space::SM))
             .bg(hsla(t.bg_panel))
             .child(self.file_tree(entries, cx))
-    }
-
-    fn render_area_timeline(
-        &self,
-        id: AreaId,
-        _state: &LogStreamState,
-        cx: &mut Context<'_, Self>,
-    ) -> impl IntoElement {
-        let t = &self.theme;
-        let daemon_line = crate::remote_session::daemon_status()
-            .status_bar_label()
-            .unwrap_or_else(|| {
-                format!(
-                    "forged daemon connected · protocol v{}",
-                    tf_proto::PROTOCOL_VERSION
-                )
-            });
-        let mut events: Vec<(String, String, Rgb, Option<crate::lsp::Diagnostic>)> =
-            vec![("IPC".into(), daemon_line, t.accent, None)];
-        for (idx, tab) in self.tabs.iter().enumerate() {
-            let label = Self::tab_label(tab);
-            let detail = format!(
-                "{} command(s) · {} area(s) · last exit {:?}",
-                tab.commands,
-                tab.layout.len(),
-                tab.last_exit
-            );
-            events.push((
-                format!("TAB #{}", idx + 1),
-                format!("{label} — {detail}"),
-                t.success,
-                None,
-            ));
-        }
-        for diagnostic in self.lsp_diagnostics.iter().take(10) {
-            events.push((
-                "LSP".into(),
-                format!("{}: {}", diagnostic.path.display(), diagnostic.message),
-                t.warning,
-                Some(diagnostic.clone()),
-            ));
-        }
-        div()
-            .id(("area-timeline", id))
-            .size_full()
-            .overflow_y_scroll()
-            .p(px(tokens::space::SM))
-            .bg(hsla(t.bg_panel))
-            .flex()
-            .flex_col()
-            .gap(px(tokens::space::XS))
-            .children(events.into_iter().enumerate().map(
-                |(row_idx, (tag, message, color, diag))| {
-                    div()
-                        .id(("timeline-event", row_idx))
-                        .px(px(tokens::space::SM))
-                        .py(px(6.0))
-                        .rounded(px(tokens::radius::SM))
-                        .border_1()
-                        .border_color(hsla(t.border))
-                        .bg(hsla(t.bg_app))
-                        .flex()
-                        .items_center()
-                        .gap(px(tokens::space::SM))
-                        .text_size(px(tokens::text::XS))
-                        .when_some(diag, |d, diagnostic| {
-                            d.cursor_pointer()
-                                .hover(|style| style.bg(hsla(t.bg_hover)))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.open_diagnostic(&diagnostic, cx);
-                                }))
-                        })
-                        .child(
-                            div()
-                                .px(px(5.0))
-                                .py(px(1.0))
-                                .rounded(px(tokens::radius::SM))
-                                .bg(with_alpha(hsla(color), 0.14))
-                                .text_color(hsla(color))
-                                .child(SharedString::from(tag)),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_color(hsla(t.text_muted))
-                                .child(SharedString::from(message)),
-                        )
-                },
-            ))
     }
 
     pub(super) fn workbench_tasks(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {

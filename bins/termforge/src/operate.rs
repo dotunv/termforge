@@ -29,7 +29,7 @@ pub struct Capability {
 /// Remote sessions are terminals only for now: the explorer, Git, service
 /// launching and port discovery all read or act on this machine, and the UI
 /// says so rather than showing local data under a remote name.
-pub fn capabilities(remote_host: Option<&str>) -> Vec<Capability> {
+pub fn capabilities(remote_host: Option<&str>, container_runtime: Option<&str>) -> Vec<Capability> {
     let remote = remote_host.is_some();
     let local_only = |support: Support| {
         if remote {
@@ -61,6 +61,16 @@ pub fn capabilities(remote_host: Option<&str>) -> Vec<Capability> {
                 Support::Unavailable("services start on this machine, not the remote host")
             } else {
                 Support::Available
+            },
+        },
+        Capability {
+            name: "Containers",
+            support: if remote {
+                Support::Unavailable("containers are read from this machine, not the remote host")
+            } else if container_runtime.is_some() {
+                Support::Available
+            } else {
+                Support::Unavailable("no docker or podman on PATH")
             },
         },
         Capability {
@@ -274,6 +284,291 @@ pub fn scan_ports(_project_root: Option<&Path>) -> PortProbe {
     PortProbe::Unsupported("port discovery is implemented for Linux only".into())
 }
 
+// ---------------------------------------------------------------- containers
+
+/// Lifecycle state reported by the container runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContainerState {
+    Running,
+    Paused,
+    Restarting,
+    Created,
+    Exited,
+    Other(String),
+}
+
+impl ContainerState {
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "running" => Self::Running,
+            "paused" => Self::Paused,
+            "restarting" => Self::Restarting,
+            "created" | "configured" => Self::Created,
+            "exited" | "stopped" | "dead" => Self::Exited,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Restarting => "restarting",
+            Self::Created => "created",
+            Self::Exited => "exited",
+            Self::Other(other) => other,
+        }
+    }
+}
+
+/// A container as reported by `docker ps -a` or `podman ps -a`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Container {
+    pub id: String,
+    pub name: String,
+    pub image: String,
+    pub state: ContainerState,
+    /// The runtime's own status text, such as "Up 3 minutes".
+    pub status: String,
+    pub ports: String,
+    pub compose_project: Option<String>,
+    pub compose_service: Option<String>,
+    pub working_dir: Option<PathBuf>,
+    /// Compose started it from a directory inside the project. As with
+    /// ports, this is the only association made.
+    pub in_project: bool,
+}
+
+/// The result of asking the container runtime what exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContainerProbe {
+    /// Neither `docker` nor `podman` is on `PATH`.
+    NoRuntime,
+    /// A runtime exists but did not answer (daemon stopped, no permission,
+    /// or it took too long).
+    Unreachable {
+        runtime: &'static str,
+        message: String,
+    },
+    Listed {
+        runtime: &'static str,
+        containers: Vec<Container>,
+    },
+}
+
+/// Fields requested from the runtime, tab separated. Plain template fields
+/// work on both Docker and Podman, unlike their JSON output.
+const PS_FORMAT: &str =
+    "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Status}}\t{{.Ports}}\t{{.Labels}}";
+
+/// The container CLI to use, preferring Docker.
+pub fn container_runtime() -> Option<&'static str> {
+    ["docker", "podman"]
+        .into_iter()
+        .find(|name| crate::surface::on_path(name))
+}
+
+/// Value of `key` in a runtime label dump: Docker prints `k=v,k2=v2`,
+/// Podman prints `map[k:v k2:v2]`.
+pub fn label_value(labels: &str, key: &str) -> Option<String> {
+    let start = labels.find(key)? + key.len();
+    let rest = labels[start..].strip_prefix(['=', ':'])?;
+    let end = rest.find([',', ']', '}']).unwrap_or(rest.len());
+    let value = if labels.starts_with("map[") {
+        // Podman separates pairs with spaces.
+        rest[..end].split(' ').next().unwrap_or_default()
+    } else {
+        &rest[..end]
+    };
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+/// Parse the tab-separated output of `ps -a --format PS_FORMAT`. Rows that do
+/// not have all fields are skipped.
+pub fn parse_container_list(text: &str, project_root: Option<&Path>) -> Vec<Container> {
+    let mut containers: Vec<Container> = text
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split('\t').collect();
+            if fields.len() < 7 || fields[0].is_empty() {
+                return None;
+            }
+            let labels = fields[6];
+            let working_dir = label_value(labels, "com.docker.compose.project.working_dir")
+                .or_else(|| label_value(labels, "com.docker.compose.project.working_dir"))
+                .map(PathBuf::from);
+            let in_project = match (&working_dir, project_root) {
+                (Some(dir), Some(root)) => is_within(dir, root),
+                _ => false,
+            };
+            Some(Container {
+                id: fields[0].to_owned(),
+                name: fields[1].trim_start_matches('/').to_owned(),
+                image: fields[2].to_owned(),
+                state: ContainerState::parse(fields[3]),
+                status: fields[4].to_owned(),
+                ports: fields[5].to_owned(),
+                compose_project: label_value(labels, "com.docker.compose.project"),
+                compose_service: label_value(labels, "com.docker.compose.service"),
+                working_dir,
+                in_project,
+            })
+        })
+        .collect();
+    containers.sort_by_key(|c| (!c.in_project, c.name.clone()));
+    containers
+}
+
+/// Run `command`, giving up and killing it after `limit`. Output is drained
+/// on threads so a chatty child cannot block on a full pipe.
+pub fn run_with_timeout(
+    command: &mut std::process::Command,
+    limit: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let out = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let err = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let deadline = std::time::Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the runtime did not answer in time",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+    })
+}
+
+/// List all containers (running or not) known to the runtime.
+pub fn list_containers(project_root: Option<&Path>) -> ContainerProbe {
+    let Some(runtime) = container_runtime() else {
+        return ContainerProbe::NoRuntime;
+    };
+    let mut command = std::process::Command::new(runtime);
+    command.args(["ps", "-a", "--format", PS_FORMAT]);
+    match run_with_timeout(&mut command, std::time::Duration::from_secs(5)) {
+        Ok(out) if out.status.success() => ContainerProbe::Listed {
+            runtime,
+            containers: parse_container_list(&String::from_utf8_lossy(&out.stdout), project_root),
+        },
+        Ok(out) => ContainerProbe::Unreachable {
+            runtime,
+            message: first_line(&String::from_utf8_lossy(&out.stderr)),
+        },
+        Err(error) => ContainerProbe::Unreachable {
+            runtime,
+            message: error.to_string(),
+        },
+    }
+}
+
+fn first_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("no error message")
+        .to_owned()
+}
+
+/// A lifecycle change the user asked for on one container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl ContainerAction {
+    pub const fn progressive(self) -> &'static str {
+        match self {
+            Self::Start => "starting",
+            Self::Stop => "stopping",
+            Self::Restart => "restarting",
+        }
+    }
+
+    pub const fn verb(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Stop => "stop",
+            Self::Restart => "restart",
+        }
+    }
+}
+
+/// Whether `id` can be passed to a shell or CLI without quoting. Container
+/// ids are hexadecimal, so anything else is refused rather than escaped.
+pub fn is_safe_container_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// Run one lifecycle action. Returns the runtime's error text on failure.
+pub fn run_container_action(action: ContainerAction, id: &str) -> Result<(), String> {
+    if !is_safe_container_id(id) {
+        return Err("unexpected container id".into());
+    }
+    let runtime = container_runtime().ok_or("no docker or podman on PATH")?;
+    let mut command = std::process::Command::new(runtime);
+    command.args([action.verb(), id]);
+    match run_with_timeout(&mut command, std::time::Duration::from_secs(40)) {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => Err(first_line(&String::from_utf8_lossy(&out.stderr))),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Compose and container definition files found directly in `root`.
+pub fn container_files(root: &Path) -> Vec<&'static str> {
+    [
+        "compose.yaml",
+        "compose.yml",
+        "docker-compose.yaml",
+        "docker-compose.yml",
+        "Dockerfile",
+        "Containerfile",
+    ]
+    .into_iter()
+    .filter(|name| root.join(name).is_file())
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,8 +631,8 @@ mod tests {
 
     #[test]
     fn remote_environments_say_what_they_cannot_do() {
-        let local = capabilities(None);
-        let remote = capabilities(Some("build-box"));
+        let local = capabilities(None, Some("docker"));
+        let remote = capabilities(Some("build-box"), Some("docker"));
         assert_eq!(local.len(), remote.len());
         let find = |caps: &[Capability], name: &str| {
             caps.iter()
@@ -347,7 +642,13 @@ mod tests {
                 .clone()
         };
         assert_eq!(find(&local, "Files"), Support::Available);
-        for name in ["Files", "Git", "Start and stop services", "Listening ports"] {
+        for name in [
+            "Files",
+            "Git",
+            "Start and stop services",
+            "Containers",
+            "Listening ports",
+        ] {
             assert!(
                 matches!(find(&remote, name), Support::Unavailable(_)),
                 "{name} must be unavailable remotely"
@@ -369,5 +670,68 @@ mod tests {
         assert_eq!(ours.reach(), Reach::LocalOnly);
         assert_eq!(ours.pid, Some(std::process::id()));
         assert!(ours.in_project, "the test process runs inside its cwd");
+    }
+
+    #[test]
+    fn docker_container_rows_are_parsed_with_compose_association() {
+        let text = "abc123\tweb-1\tnginx:1\trunning\tUp 3 minutes\t0.0.0.0:8080->80/tcp\tcom.docker.compose.project=app,com.docker.compose.service=web,com.docker.compose.project.working_dir=/home/me/app\n\
+                    def456\t/db\tpostgres\texited\tExited (0) 2 hours ago\t\tmaintainer=x\n\
+                    broken\tonly-two\n";
+        let containers = parse_container_list(text, Some(Path::new("/home/me/app")));
+        assert_eq!(containers.len(), 2);
+        let web = &containers[0];
+        assert!(web.in_project, "project containers sort first");
+        assert_eq!(web.name, "web-1");
+        assert_eq!(web.state, ContainerState::Running);
+        assert_eq!(web.compose_project.as_deref(), Some("app"));
+        assert_eq!(web.compose_service.as_deref(), Some("web"));
+        let db = &containers[1];
+        assert!(!db.in_project);
+        assert_eq!(db.name, "db");
+        assert_eq!(db.state, ContainerState::Exited);
+        assert_eq!(db.compose_project, None);
+    }
+
+    #[test]
+    fn podman_label_maps_are_understood() {
+        let labels = "map[com.docker.compose.project:app com.docker.compose.project.working_dir:/srv/app io.x:y]";
+        assert_eq!(
+            label_value(labels, "com.docker.compose.project").as_deref(),
+            Some("app")
+        );
+        assert_eq!(
+            label_value(labels, "com.docker.compose.project.working_dir").as_deref(),
+            Some("/srv/app")
+        );
+        assert_eq!(label_value(labels, "missing"), None);
+    }
+
+    #[test]
+    fn container_ids_are_never_passed_through_unsafe() {
+        assert!(is_safe_container_id("0123abcDEF"));
+        assert!(!is_safe_container_id(""));
+        assert!(!is_safe_container_id("a; rm -rf ~"));
+        assert!(!is_safe_container_id("$(x)"));
+        assert!(run_container_action(ContainerAction::Stop, "a b").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_runtime_is_killed_at_the_deadline() {
+        let started = std::time::Instant::now();
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        let result = run_with_timeout(&mut command, std::time::Duration::from_millis(200));
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_chatty_child_does_not_deadlock_the_timeout_runner() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "head -c 300000 /dev/zero | tr '\\0' x"]);
+        let out = run_with_timeout(&mut command, std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!(out.stdout.len(), 300_000);
     }
 }

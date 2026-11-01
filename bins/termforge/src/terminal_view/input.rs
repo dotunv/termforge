@@ -105,6 +105,10 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
+        if self.activity_filter_focus && self.activity_filter_key(ev, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.search.is_some() && self.search_key(ev, cx) {
             cx.stop_propagation();
             return;

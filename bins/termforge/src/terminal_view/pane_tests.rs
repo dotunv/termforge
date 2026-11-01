@@ -1600,3 +1600,100 @@ async fn operate_lists_a_started_service_and_can_stop_it(cx: &mut TestAppContext
     });
     redraw(cx);
 }
+
+#[gpui::test]
+async fn activity_records_observed_changes_and_filters_them(cx: &mut TestAppContext) {
+    use crate::activity::{Level, Source};
+    let (view, cx) = open(cx);
+    view.update(cx, |v, cx| v.record_activity(cx));
+    let baseline = view.read_with(cx, |v, _| v.activity.len());
+
+    view.update(cx, |v, cx| {
+        v.start_managed("svc".into(), "sleep 30".into(), false, cx);
+        v.record_activity(cx);
+    });
+    view.read_with(cx, |v, _| {
+        let events = v.activity.visible(&v.activity_filter);
+        assert_eq!(v.activity.len(), baseline + 1);
+        let newest = events[0];
+        assert_eq!(newest.source, Source::Service);
+        assert_eq!(newest.level, Level::Info);
+        assert!(
+            newest.message.starts_with("svc: started"),
+            "{}",
+            newest.message
+        );
+        assert!(newest.link.is_some(), "a service event links to its tab");
+    });
+
+    view.update(cx, |v, _| {
+        v.activity_filter.text = "SVC".into();
+        assert_eq!(v.activity.visible(&v.activity_filter).len(), 1);
+        v.activity_filter.toggle(Source::Service);
+        assert!(v.activity.visible(&v.activity_filter).is_empty());
+        v.activity_filter.clear();
+    });
+}
+
+#[gpui::test]
+async fn container_changes_become_events_after_the_first_observation(cx: &mut TestAppContext) {
+    use crate::activity::Source;
+    use crate::operate::{Container, ContainerProbe, ContainerState};
+    let (view, cx) = open(cx);
+    let probe = |state: ContainerState| ContainerProbe::Listed {
+        runtime: "docker",
+        containers: vec![Container {
+            id: "abc123".into(),
+            name: "web".into(),
+            image: "nginx".into(),
+            state,
+            status: "Up".into(),
+            ports: String::new(),
+            compose_project: Some("app".into()),
+            compose_service: Some("web".into()),
+            working_dir: None,
+            in_project: true,
+        }],
+    };
+    view.update(cx, |v, _| {
+        v.note_containers(&probe(ContainerState::Running));
+        assert!(
+            v.activity.visible(&v.activity_filter).is_empty(),
+            "the first observation is a baseline, not an event"
+        );
+        v.note_containers(&probe(ContainerState::Exited));
+        let events = v.activity.visible(&v.activity_filter);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].source, Source::Container);
+        assert_eq!(events[0].message, "web: running → exited");
+        // Unchanged state adds nothing.
+        v.note_containers(&probe(ContainerState::Exited));
+        assert_eq!(v.activity.len(), 1);
+    });
+    view.update(cx, |v, cx| {
+        v.containers = Some(probe(ContainerState::Exited));
+        v.switch_workspace(Workspace::Operate, cx);
+    });
+    redraw(cx);
+    view.read_with(cx, |v, _| assert_eq!(v.workspace, Workspace::Operate));
+}
+
+#[gpui::test]
+async fn typing_goes_to_the_activity_filter_while_it_has_focus(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    view.update(cx, |v, cx| {
+        v.switch_workspace(Workspace::Operate, cx);
+        v.activity_filter_focus = true;
+    });
+    redraw(cx);
+    cx.simulate_keystrokes("c a r g o");
+    view.read_with(cx, |v, _| {
+        assert_eq!(v.activity_filter.text, "cargo");
+        assert!(v.activity_filter_focus);
+    });
+    cx.simulate_keystrokes("backspace");
+    view.read_with(cx, |v, _| assert_eq!(v.activity_filter.text, "carg"));
+    cx.simulate_keystrokes("escape");
+    view.read_with(cx, |v, _| assert!(!v.activity_filter_focus));
+    assert_eq!(count(&view, cx), 1);
+}

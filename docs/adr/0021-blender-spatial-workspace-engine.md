@@ -56,11 +56,28 @@ know:
   only when its owner's working directory is inside the project; processes owned
   by other users stay "owner unknown". Other platforms report that port
   discovery is not implemented instead of showing an empty list.
-- **Timeline**: the existing activity log.
+- **Containers**: read from `docker` (or `podman`) with a 5-second limit, so a
+  hung daemon cannot freeze anything. Rows show state, image, status and
+  published ports. A container belongs to the project only when Compose started
+  it from a directory inside it (the `working_dir` label); the project's compose
+  and Dockerfile files are listed. Actions are the user's explicit choice:
+  start, stop and restart run the runtime CLI off the UI thread, and logs and
+  shell open a managed session (`logs -f`, `exec -it`) so output, state and
+  stop work like any other service. Ids are only ever passed to the CLI or a
+  shell when they are alphanumeric. Absent runtime, unreachable daemon and
+  remote sessions each say so.
+- **Timeline**: an activity log of observed changes only: service state
+  changes, project ports opening or closing, container state changes, daemon
+  connection changes and new language-server diagnostics. The first observation
+  of anything is a baseline, not an event. It can be filtered by text, by
+  source and by level, and events that point at something (a service's tab, a
+  diagnostic's file) open it. The log keeps the latest 500 events in memory and
+  is not saved across launches.
 
-Not built: containers and compose services, log filtering and search, tunnels
-and port forwarding, remote file/Git/process access, cloud providers, and
-stopping a process the user did not start from TermForge.
+Not built: tunnels and port forwarding, compose-level actions (up, down),
+persisted or searchable log history, search inside a container's own log
+stream beyond the terminal's search, remote file/Git/process access, cloud
+providers, and stopping a process the user did not start from TermForge.
 
 ### Areas never own processes unless they are terminals
 
