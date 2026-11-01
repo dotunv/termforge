@@ -838,15 +838,23 @@ impl TerminalView {
                     self.tasks.items.len()
                 )))
                 .into_any_element(),
-            EditorKindTag::AgentFleet => div()
+            EditorKindTag::Environment => div()
+                .text_color(hsla(t.text_faint))
+                .child(if self.spawn.ssh_host.is_some() {
+                    "remote"
+                } else {
+                    "local"
+                })
+                .into_any_element(),
+            EditorKindTag::Services => div()
                 .flex()
                 .items_center()
                 .gap(px(tokens::space::XS))
                 .text_color(hsla(t.text_faint))
                 .child(SharedString::from(format!(
-                    "{} sessions · {} SSH",
+                    "{} session{}",
                     self.tabs.len(),
-                    self.ssh_hosts.len()
+                    if self.tabs.len() == 1 { "" } else { "s" }
                 )))
                 .into_any_element(),
         }

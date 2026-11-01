@@ -596,10 +596,15 @@ impl TerminalView {
 
     pub(super) fn status_bar(&self, grid: Option<GridSize>) -> impl IntoElement {
         let t = &self.theme;
-        let area_count = self
-            .tabs
-            .get(self.active_tab)
-            .map_or(1, |tab| tab.layout.len());
+        let area_count = if self.workspace.hosts_sessions() {
+            self.tabs
+                .get(self.active_tab)
+                .map_or(1, |tab| tab.layout.len())
+        } else {
+            self.workspace_layouts
+                .get(&self.workspace)
+                .map_or(1, |tree| tree.len())
+        };
         let mut left = format!(
             "WORKSPACE · {} ({area_count} area{})  ·  {} cmd{}",
             self.workspace.label(),

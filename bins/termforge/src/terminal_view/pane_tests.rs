@@ -1551,3 +1551,52 @@ async fn workspace_layouts_survive_a_round_trip_through_the_layout_file(cx: &mut
         }
     });
 }
+
+#[gpui::test]
+async fn operate_scans_ports_only_while_services_are_visible(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    redraw(cx);
+    view.read_with(cx, |v, _| {
+        assert!(
+            v.ports.is_none(),
+            "Build shows no services, so nothing scans"
+        );
+        assert!(!v.shows_services());
+    });
+
+    view.update(cx, |v, cx| v.switch_workspace(Workspace::Operate, cx));
+    view.read_with(cx, |v, _| assert!(v.shows_services()));
+    wait_for(cx, "port scan", |cx| {
+        view.read_with(cx, |v, _| v.ports.is_some() && !v.ports_scanning)
+    });
+    redraw(cx);
+    view.read_with(cx, |v, _| match v.ports.as_ref().unwrap() {
+        crate::operate::PortProbe::Scanned(_) => {}
+        crate::operate::PortProbe::Unsupported(reason) => {
+            assert!(!reason.is_empty(), "an unsupported probe must say why");
+        }
+    });
+    assert_eq!(count(&view, cx), 1, "observing ports starts no shell");
+}
+
+#[gpui::test]
+async fn operate_lists_a_started_service_and_can_stop_it(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    view.update(cx, |v, cx| {
+        v.start_managed("sleeper".into(), "sleep 30".into(), false, cx);
+        v.switch_workspace(Workspace::Operate, cx);
+    });
+    redraw(cx);
+    view.read_with(cx, |v, _| {
+        let managed = v.tabs.iter().filter(|t| t.managed.is_some()).count();
+        assert_eq!(managed, 1, "the service is tracked as managed");
+        assert_eq!(v.workspace, Workspace::Operate);
+    });
+    assert_eq!(count(&view, cx), 1);
+    view.update(cx, |v, cx| {
+        let index = v.tabs.iter().position(|t| t.managed.is_some()).unwrap();
+        v.stop_managed(index);
+        cx.notify();
+    });
+    redraw(cx);
+}

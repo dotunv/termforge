@@ -101,6 +101,7 @@ impl TerminalView {
         self.maximized_area = None;
         self.open_area_selector = None;
         self.show_tab_strip = workspace.hosts_sessions();
+        self.refresh_ports_if_stale(cx);
         self.persist_layout();
         cx.notify();
     }

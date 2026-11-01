@@ -55,6 +55,7 @@ mod chrome;
 mod customize;
 mod ime;
 mod input;
+mod operate_view;
 mod palette;
 #[cfg(test)]
 mod pane_tests;
@@ -695,6 +696,10 @@ pub struct TerminalView {
     /// Session-free area layout of every workspace except Build, whose
     /// layout is the active tab's pane tree.
     workspace_layouts: HashMap<Workspace, PaneTree>,
+    /// Latest listening-port scan for the Services area.
+    ports: Option<crate::operate::PortProbe>,
+    ports_at: Option<std::time::SystemTime>,
+    ports_scanning: bool,
     /// Area whose top-left editor selector dropdown is currently open.
     open_area_selector: Option<AreaId>,
     /// Area maximized inside the split tree, if any.
@@ -900,6 +905,9 @@ impl TerminalView {
             context_id,
             identity_check,
             workspace_layouts: HashMap::new(),
+            ports: None,
+            ports_at: None,
+            ports_scanning: false,
             open_area_selector: None,
             maximized_area: None,
             canvas_state: CanvasState::default(),
@@ -960,6 +968,7 @@ impl TerminalView {
                 if view.poll_lsp() {
                     cx.notify();
                 }
+                view.refresh_ports_if_stale(cx);
                 if view.workspace == Workspace::Explore
                     && !view.project_files_loading
                     && view.project_files_checked_at.is_none_or(|checked| {
@@ -976,7 +985,8 @@ impl TerminalView {
         view.refresh_worktrees();
         view.refresh_projects();
         // Debug builds only: open chrome states for screenshot checks, e.g.
-        // TERMFORGE_DEBUG_UI=dock:changes,diff or dock:processes,panel.
+        // TERMFORGE_DEBUG_UI=dock:changes,diff or dock:processes,panel or
+        // workspace:operate.
         #[cfg(debug_assertions)]
         if let Ok(spec) = std::env::var("TERMFORGE_DEBUG_UI") {
             view.debug_open(&spec, cx);
@@ -1004,6 +1014,11 @@ impl TerminalView {
                 "dock:sessions" => self.set_dock_tab(DockTab::Sessions, cx),
                 "dock:changes" => self.set_dock_tab(DockTab::Changes, cx),
                 "dock:processes" => self.set_dock_tab(DockTab::Processes, cx),
+                other if other.starts_with("workspace:") => {
+                    if let Some(workspace) = Workspace::from_id(&other["workspace:".len()..]) {
+                        self.switch_workspace(workspace, cx);
+                    }
+                }
                 "diff" => {
                     if let Some(change) = self.changes.as_ref().and_then(|c| c.first().cloned()) {
                         self.open_diff(&change, cx);

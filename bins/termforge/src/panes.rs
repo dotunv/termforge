@@ -147,15 +147,17 @@ pub enum EditorKindTag {
     CodeEditor,
     GitDiff,
     TaskBoard,
-    AgentFleet,
+    Services,
+    Environment,
 }
 
 impl EditorKindTag {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Terminal,
         Self::GraphCanvas,
         Self::CodeEditor,
-        Self::AgentFleet,
+        Self::Services,
+        Self::Environment,
         Self::GitDiff,
         Self::Inspector,
         Self::Outliner,
@@ -173,7 +175,8 @@ impl EditorKindTag {
             Self::CodeEditor => "Code Editor",
             Self::GitDiff => "Git Diff",
             Self::TaskBoard => "Task Board",
-            Self::AgentFleet => "Agent Fleet",
+            Self::Services => "Services",
+            Self::Environment => "Environment",
         }
     }
 
@@ -187,7 +190,8 @@ impl EditorKindTag {
             Self::CodeEditor => "✎",
             Self::GitDiff => "±",
             Self::TaskBoard => "☑",
-            Self::AgentFleet => "✦",
+            Self::Services => "▶",
+            Self::Environment => "◎",
         }
     }
 
@@ -201,7 +205,8 @@ impl EditorKindTag {
             Self::CodeEditor => "CODE",
             Self::GitDiff => "DIFF",
             Self::TaskBoard => "TASK",
-            Self::AgentFleet => "CMUX",
+            Self::Services => "RUN",
+            Self::Environment => "ENV",
         }
     }
 
@@ -215,7 +220,8 @@ impl EditorKindTag {
             Self::CodeEditor => "Syntax buffer & source file editor",
             Self::GitDiff => "Working tree & staged changes",
             Self::TaskBoard => "Project task board & workflow",
-            Self::AgentFleet => "AI agents, cloud SSH & cmux sessions",
+            Self::Services => "Processes, agents and listening ports",
+            Self::Environment => "Where this work runs and what it can do",
         }
     }
 
@@ -229,7 +235,8 @@ impl EditorKindTag {
             Self::CodeEditor => 'e',
             Self::GitDiff => 'g',
             Self::TaskBoard => 'k',
-            Self::AgentFleet => 'a',
+            Self::Services => 's',
+            Self::Environment => 'n',
         }
     }
 
@@ -243,7 +250,8 @@ impl EditorKindTag {
             'e' => Some(Self::CodeEditor),
             'g' => Some(Self::GitDiff),
             'k' => Some(Self::TaskBoard),
-            'a' => Some(Self::AgentFleet),
+            's' => Some(Self::Services),
+            'n' => Some(Self::Environment),
             _ => None,
         }
     }
@@ -260,7 +268,8 @@ pub enum EditorKind {
     CodeEditor,
     GitDiff,
     TaskBoard,
-    AgentFleet,
+    Services,
+    Environment,
 }
 
 impl EditorKind {
@@ -274,7 +283,8 @@ impl EditorKind {
             Self::CodeEditor => EditorKindTag::CodeEditor,
             Self::GitDiff => EditorKindTag::GitDiff,
             Self::TaskBoard => EditorKindTag::TaskBoard,
-            Self::AgentFleet => EditorKindTag::AgentFleet,
+            Self::Services => EditorKindTag::Services,
+            Self::Environment => EditorKindTag::Environment,
         }
     }
 
@@ -288,7 +298,8 @@ impl EditorKind {
             EditorKindTag::CodeEditor => Self::CodeEditor,
             EditorKindTag::GitDiff => Self::GitDiff,
             EditorKindTag::TaskBoard => Self::TaskBoard,
-            EditorKindTag::AgentFleet => Self::AgentFleet,
+            EditorKindTag::Services => Self::Services,
+            EditorKindTag::Environment => Self::Environment,
         }
     }
 }

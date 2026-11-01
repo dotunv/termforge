@@ -96,17 +96,25 @@ impl Workspace {
             Self::Explore => PaneTree::new_with_editor(next_id(), EditorKind::CodeEditor),
             Self::Review => PaneTree::new_with_editor(next_id(), EditorKind::GitDiff),
             Self::Operate => {
-                let fleet = next_id();
+                let environment = next_id();
+                let services = next_id();
                 let timeline = next_id();
-                let mut tree = PaneTree::new_with_editor(fleet, EditorKind::AgentFleet);
+                let mut tree = PaneTree::new_with_editor(environment, EditorKind::Environment);
                 let _ = tree.split_with_editor(
-                    fleet,
+                    environment,
                     Axis::Horizontal,
-                    0.6,
+                    0.34,
+                    services,
+                    EditorKind::Services,
+                );
+                let _ = tree.split_with_editor(
+                    services,
+                    Axis::Vertical,
+                    0.66,
                     timeline,
                     EditorKind::Timeline(LogStreamState::default()),
                 );
-                let _ = tree.set_focus(fleet);
+                let _ = tree.set_focus(services);
                 tree
             }
         };
@@ -602,5 +610,27 @@ mod tests {
         let decoded = Layout::decode(&layout.encode());
         assert_eq!(decoded.areas, layout.areas);
         assert!(Layout::decode("termforge-layout 1\n").areas.is_empty());
+    }
+
+    #[test]
+    fn operate_defaults_to_environment_services_and_activity() {
+        let mut next = 0;
+        let tree = Workspace::Operate
+            .default_layout(|| {
+                next += 1;
+                next
+            })
+            .unwrap();
+        let mut tags: Vec<_> = tree
+            .areas()
+            .iter()
+            .map(|a| a.editor.tag().label())
+            .collect();
+        tags.sort_unstable();
+        assert_eq!(tags, ["Environment", "Services", "Timeline"]);
+        assert_eq!(
+            tree.editor(tree.focused()).unwrap().tag().label(),
+            "Services"
+        );
     }
 }

@@ -30,10 +30,37 @@ not a page. The same project, sessions and selected work travel between them.
 | Explore | Code Editor | project files and source |
 | Build | the active tab's terminal tree | terminal sessions |
 | Review | Git Diff | working-tree changes |
-| Operate | Agent Fleet \| Timeline | daemon, agents and live activity |
+| Operate | Environment \| (Services over Timeline) | where work runs, what is running and listening |
 
-Operate currently shows only what exists today (daemon status, sessions,
-agents, activity). Services, ports and remote environments are not built yet.
+### Operate
+
+Operate is built only from what can be observed, and says so where it cannot
+know:
+
+- **Environment**: a clear identity (local, or SSH host), project path, branch,
+  context, daemon connection state with its change history, sessions per
+  environment, and a capability list (`operate::capabilities`). Remote sessions
+  are terminals only today, so Files, Git, service launching and port discovery
+  are listed as unavailable with the reason rather than showing local data
+  under a remote name.
+- **Services**: every session with its observed state, and for processes
+  TermForge started (`Managed`) the actions it can really perform: open shell,
+  follow output, stop (Ctrl-C into that shell) and restart. State comes from
+  the shell's command marks; processes TermForge did not start are not tracked,
+  and the area says so. Launchers are the project's tasks with commands and
+  agent CLIs found on `PATH`.
+- **Listening ports** (TCP): read from `/proc/net/tcp*` on Linux off the UI
+  thread every few seconds while a Services area is visible. Each port shows its
+  owning process when readable, how widely it is reachable (this machine only,
+  all interfaces), and a copy-URL action. A port is associated with the project
+  only when its owner's working directory is inside the project; processes owned
+  by other users stay "owner unknown". Other platforms report that port
+  discovery is not implemented instead of showing an empty list.
+- **Timeline**: the existing activity log.
+
+Not built: containers and compose services, log filtering and search, tunnels
+and port forwarding, remote file/Git/process access, cloud providers, and
+stopping a process the user did not start from TermForge.
 
 ### Areas never own processes unless they are terminals
 

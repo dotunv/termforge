@@ -37,6 +37,12 @@ pub enum DaemonStatus {
 }
 
 impl DaemonStatus {
+    /// One-line description for the connection history.
+    pub fn describe(&self) -> String {
+        self.status_bar_label()
+            .unwrap_or_else(|| "forged connected".into())
+    }
+
     /// Non-blocking status bar indicator text when `forged` is offline or mismatched.
     pub fn status_bar_label(&self) -> Option<String> {
         match self {
@@ -64,7 +70,27 @@ pub fn daemon_status() -> DaemonStatus {
 
 /// Update the daemon connection status surfaced in the status bar.
 pub fn set_daemon_status(status: DaemonStatus) {
+    let line = status.describe();
     *lock(daemon_status_cell()) = status;
+    let mut history = lock(daemon_history_cell());
+    if history.last().map(|(_, last)| last) != Some(&line) {
+        history.push((std::time::SystemTime::now(), line));
+        let excess = history.len().saturating_sub(DAEMON_HISTORY_LIMIT);
+        history.drain(..excess);
+    }
+}
+
+const DAEMON_HISTORY_LIMIT: usize = 20;
+
+fn daemon_history_cell() -> &'static Mutex<Vec<(std::time::SystemTime, String)>> {
+    static HISTORY: OnceLock<Mutex<Vec<(std::time::SystemTime, String)>>> = OnceLock::new();
+    HISTORY.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Daemon status changes since launch, oldest first. Empty means the status
+/// has not changed from the initial assumption, not that it was verified.
+pub fn daemon_history() -> Vec<(std::time::SystemTime, String)> {
+    lock(daemon_history_cell()).clone()
 }
 
 /// Classify a daemon connection error and update [`daemon_status`].

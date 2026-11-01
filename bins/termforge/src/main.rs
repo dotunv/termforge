@@ -11,6 +11,7 @@ mod contexts;
 mod diagnostics;
 mod fonts;
 mod lsp;
+mod operate;
 mod paint;
 mod panes;
 mod perf;
