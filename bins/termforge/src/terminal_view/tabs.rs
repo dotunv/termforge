@@ -807,6 +807,7 @@ impl TerminalView {
             chrome: Some(self.saved_chrome()),
             workbench: Some(self.saved_workbench()),
             areas: self.saved_areas(),
+            canvas: Some(self.saved_canvas()),
         }
         .encode();
         if encoded != self.saved_layout {
@@ -1101,6 +1102,9 @@ impl TerminalView {
             self.apply_saved_chrome(chrome);
         }
         self.apply_saved_areas(&layout.areas);
+        if let Some(canvas) = &layout.canvas {
+            self.apply_saved_canvas(canvas);
+        }
         if let Some(workbench) = &layout.workbench {
             self.apply_saved_workbench(workbench, cx);
         }

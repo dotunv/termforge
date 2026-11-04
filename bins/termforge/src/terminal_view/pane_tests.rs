@@ -1697,3 +1697,94 @@ async fn typing_goes_to_the_activity_filter_while_it_has_focus(cx: &mut TestAppC
     view.read_with(cx, |v, _| assert!(!v.activity_filter_focus));
     assert_eq!(count(&view, cx), 1);
 }
+
+#[gpui::test]
+async fn reset_restores_a_session_free_layout_to_its_default(cx: &mut TestAppContext) {
+    use crate::panes::Axis;
+    let (view, cx) = open(cx);
+    let original = view.read_with(cx, |v, _| v.session.clone().unwrap());
+    view.update(cx, |v, cx| v.switch_workspace(Workspace::Work, cx));
+    let default = view.read_with(cx, |v, _| v.workspace_layouts[&Workspace::Work].encode());
+    let first = view.read_with(cx, |v, _| v.workspace_layouts[&Workspace::Work].ids()[0]);
+    view.update(cx, |v, cx| v.split_area(first, Axis::Vertical, cx));
+    view.read_with(cx, |v, _| {
+        assert_ne!(v.workspace_layouts[&Workspace::Work].encode(), default);
+    });
+
+    view.update(cx, |v, cx| v.reset_workspace_layout(cx));
+    redraw(cx);
+    view.read_with(cx, |v, _| {
+        let tree = &v.workspace_layouts[&Workspace::Work];
+        assert_eq!(tree.len(), 2);
+        assert_eq!(
+            tree.areas()
+                .iter()
+                .map(|a| a.editor.tag())
+                .collect::<Vec<_>>(),
+            vec![
+                crate::panes::EditorKindTag::TaskBoard,
+                crate::panes::EditorKindTag::Inspector
+            ]
+        );
+        assert!(Arc::ptr_eq(&original, v.session.as_ref().unwrap()));
+    });
+    assert_eq!(count(&view, cx), 1);
+}
+
+#[gpui::test]
+async fn reset_in_build_evens_splits_without_closing_sessions(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    cx.simulate_keystrokes("ctrl-shift-d");
+    assert_eq!(count(&view, cx), 2);
+    view.update(cx, |v, cx| {
+        let tab = &mut v.tabs[v.active_tab];
+        assert!(tab.layout.set_ratio(&[], 0.2));
+        v.reset_workspace_layout(cx);
+    });
+    redraw(cx);
+    assert_eq!(count(&view, cx), 2, "both sessions survive a reset");
+    view.read_with(cx, |v, _| {
+        assert!(v.tabs[v.active_tab].layout.encode().contains("0.500"));
+    });
+}
+
+#[gpui::test]
+async fn canvas_view_round_trips_and_is_clamped(cx: &mut TestAppContext) {
+    use crate::panes::CanvasLens;
+    let (view, cx) = open(cx);
+    view.update(cx, |v, _| {
+        v.canvas_state.lens = CanvasLens::FunctionFlow;
+        v.canvas_state.zoom = 1.75;
+        v.canvas_state.pan_x = -120.0;
+        v.canvas_state.pan_y = 64.0;
+    });
+    let saved = view.read_with(cx, |v, _| v.saved_canvas());
+    view.update(cx, |v, _| {
+        v.canvas_state.reset_view();
+        v.canvas_state.lens = CanvasLens::Architecture;
+        v.apply_saved_canvas(&saved);
+    });
+    view.read_with(cx, |v, _| {
+        assert_eq!(v.canvas_state.lens, CanvasLens::FunctionFlow);
+        assert!((v.canvas_state.zoom - 1.75).abs() < 0.001);
+        assert_eq!((v.canvas_state.pan_x, v.canvas_state.pan_y), (-120.0, 64.0));
+    });
+    view.update(cx, |v, _| {
+        v.apply_saved_canvas(&crate::workspace::SavedCanvas {
+            lens: "unknown".into(),
+            zoom_milli: 99_000,
+            pan_x: i32::MAX,
+            pan_y: i32::MIN,
+        });
+    });
+    view.read_with(cx, |v, _| {
+        assert_eq!(
+            v.canvas_state.lens,
+            CanvasLens::FunctionFlow,
+            "unknown lens ignored"
+        );
+        assert_eq!(v.canvas_state.zoom, 2.5);
+        assert_eq!(v.canvas_state.pan_x, 20_000.0);
+        assert_eq!(v.canvas_state.pan_y, -20_000.0);
+    });
+}

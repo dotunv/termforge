@@ -222,6 +222,17 @@ pub struct SavedWorkbench {
     pub sidebar_width: u32,
 }
 
+/// Pan, zoom and lens of the graph canvas, in whole units so the layout stays
+/// comparable (`Eq`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedCanvas {
+    pub lens: String,
+    /// Zoom times one thousand.
+    pub zoom_milli: u32,
+    pub pan_x: i32,
+    pub pan_y: i32,
+}
+
 /// Order, names and pins of the workspaces in a window.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Layout {
@@ -234,6 +245,8 @@ pub struct Layout {
     /// Encoded session-free area layout per workspace id. Older builds skip
     /// these lines.
     pub areas: Vec<(String, String)>,
+    /// Absent in layouts written before the canvas state was saved.
+    pub canvas: Option<SavedCanvas>,
 }
 
 const HEADER: &str = "termforge-layout 1";
@@ -301,6 +314,12 @@ impl Layout {
                 u8::from(workbench.dock_collapsed),
                 u8::from(workbench.terminal_maximized),
                 workbench.sidebar_width,
+            ));
+        }
+        if let Some(c) = &self.canvas {
+            out.push_str(&format!(
+                "V\t{}\t{}\t{}\t{}\n",
+                c.lens, c.zoom_milli, c.pan_x, c.pan_y
             ));
         }
         for (workspace, tree) in &self.areas {
@@ -408,6 +427,20 @@ impl Layout {
                         });
                     }
                 }
+                (Some("V"), Some(lens)) => {
+                    let zoom_milli = fields.next().and_then(|v| v.parse().ok());
+                    let pan_x = fields.next().and_then(|v| v.parse().ok());
+                    let pan_y = fields.next().and_then(|v| v.parse().ok());
+                    if let (Some(zoom_milli), Some(pan_x), Some(pan_y)) = (zoom_milli, pan_x, pan_y)
+                    {
+                        layout.canvas = Some(SavedCanvas {
+                            lens: lens.to_owned(),
+                            zoom_milli,
+                            pan_x,
+                            pan_y,
+                        });
+                    }
+                }
                 (Some("L"), Some(workspace)) => {
                     if let Some(tree) = fields.next().filter(|tree| !tree.is_empty()) {
                         layout.areas.push((workspace.to_owned(), tree.to_owned()));
@@ -496,6 +529,12 @@ mod tests {
                 sidebar_width: 280,
             }),
             areas: vec![("work".into(), "h0.680(1:k,2:i)".into())],
+            canvas: Some(SavedCanvas {
+                lens: "flow".into(),
+                zoom_milli: 1250,
+                pan_x: -40,
+                pan_y: 12,
+            }),
         };
         assert_eq!(Layout::decode(&layout.encode()), layout);
     }
@@ -632,5 +671,19 @@ mod tests {
             tree.editor(tree.focused()).unwrap().tag().label(),
             "Services"
         );
+    }
+
+    #[test]
+    fn canvas_line_is_optional_and_validated() {
+        let header = "termforge-layout 1\n";
+        assert!(Layout::decode(header).canvas.is_none());
+        assert!(Layout::decode(&format!("{header}V\tflow\t1000\n"))
+            .canvas
+            .is_none());
+        assert!(Layout::decode(&format!("{header}V\tflow\tx\t0\t0\n"))
+            .canvas
+            .is_none());
+        let ok = Layout::decode(&format!("{header}V\tflow\t1500\t-3\t9\n"));
+        assert_eq!(ok.canvas.unwrap().pan_x, -3);
     }
 }

@@ -48,6 +48,10 @@ impl CanvasLens {
         }
     }
 
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|lens| lens.id() == id)
+    }
+
     pub const fn icon(self) -> &'static str {
         match self {
             Self::Architecture => "◈",
@@ -819,6 +823,18 @@ impl PaneTree {
         }
     }
 
+    /// Give every split an even ratio, keeping all areas and their editors.
+    pub fn equalize(&mut self) {
+        fn go(node: &mut Node) {
+            if let Node::Split { ratio, a, b, .. } = node {
+                *ratio = 0.5;
+                go(a);
+                go(b);
+            }
+        }
+        go(&mut self.root);
+    }
+
     /// Compact text form for the layout file: `1`, `h0.500(1,2)`, `v0.300(1:c,h0.500(2:i,3))`.
     pub fn encode(&self) -> String {
         fn go(n: &Node, out: &mut String) {
@@ -948,6 +964,16 @@ mod tests {
         assert_eq!(rects[0].1, Rect::new(0.0, 0.0, 500.0, 600.0));
         assert_eq!(rects[1].1, Rect::new(500.0, 0.0, 500.0, 300.0));
         assert_eq!(rects[2].1, Rect::new(500.0, 300.0, 500.0, 300.0));
+    }
+
+    #[test]
+    fn equalize_evens_every_split_and_keeps_areas() {
+        let mut t = sample();
+        assert!(t.set_ratio(&[], 0.2));
+        assert!(t.set_ratio(&[true], 0.8));
+        t.equalize();
+        assert_eq!(t.encode(), "h0.500(1,v0.500(2,3))");
+        assert_eq!(t.ids(), vec![1, 2, 3]);
     }
 
     #[test]

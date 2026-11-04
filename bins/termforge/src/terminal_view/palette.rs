@@ -267,6 +267,7 @@ impl TerminalView {
             PaletteAction::SetDefaultShell(index) => self.set_default_shell(index, cx),
             PaletteAction::ToggleSidebar => self.toggle_sidebar(cx),
             PaletteAction::ToggleUtilityDock => self.toggle_utility_dock(cx),
+            PaletteAction::ResetWorkspaceLayout => self.reset_workspace_layout(cx),
             PaletteAction::OpenSettings => self.open_settings(cx),
             PaletteAction::NewTask => self.open_task_form("", "", cx),
             PaletteAction::ListTasks => {

@@ -103,7 +103,15 @@ providers, and stopping a process the user did not start from TermForge.
   lines. Malformed trees, and trees that would mount a terminal, are ignored in
   favour of the default; saved ids are renumbered so they cannot collide with
   pane ids in this window.
-- Editor state (canvas pan and zoom, scroll positions) is not saved yet.
+- Build's layout is the tab's pane tree and is saved with the tab (`S` lines),
+  as before.
+- The graph canvas view (lens, zoom, pan) is saved in a `V` line, clamped on
+  load; unknown lenses are ignored. Scroll positions and the selected node are
+  not saved.
+- **View: reset workspace layout** (command palette) returns a session-free
+  workspace to its default layout. In Build it only evens out the splits: every
+  pane and session is kept, because resetting a layout must never close a
+  process.
 
 ### Protocol handshake
 
@@ -125,6 +133,5 @@ providers, and stopping a process the user did not start from TermForge.
 - The graph canvas, inspector, outliner and timeline remain available as area
   types in session-free layouts but are no longer part of any default layout
   except the inspector in Work and the timeline in Operate.
-- Not yet built: work items, environment identity beyond the project name,
-  per-workspace saved layouts for Build, and a user-facing way to reset a
-  workspace to its default layout.
+- Not yet built: work items, and environment identity beyond what Operate
+  shows.

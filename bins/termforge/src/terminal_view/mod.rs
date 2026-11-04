@@ -55,7 +55,7 @@ mod chrome;
 mod customize;
 mod ime;
 mod input;
-mod operate_view;
+mod operate_ui;
 mod palette;
 #[cfg(test)]
 mod pane_tests;
@@ -163,6 +163,7 @@ enum PaletteAction {
     CopyDiagnostics,
     ToggleSidebar,
     ToggleUtilityDock,
+    ResetWorkspaceLayout,
     OpenSettings,
     NewShell(usize),
     SetDefaultShell(usize),
@@ -275,6 +276,11 @@ const PALETTE_COMMANDS: &[(PaletteAction, &str, &str)] = &[
         PaletteAction::ToggleUtilityDock,
         "View: toggle utility dock",
         "Ctrl Shift J",
+    ),
+    (
+        PaletteAction::ResetWorkspaceLayout,
+        "View: reset workspace layout",
+        "",
     ),
     (PaletteAction::OpenSettings, "Settings: open", "Ctrl ,"),
     (PaletteAction::PickTheme, "Appearance: choose theme…", ""),
@@ -714,7 +720,7 @@ pub struct TerminalView {
     activity: crate::activity::ActivityLog,
     activity_filter: crate::activity::Filter,
     activity_filter_focus: bool,
-    activity_baseline: operate_view::ActivityBaseline,
+    activity_baseline: operate_ui::ActivityBaseline,
     /// Area whose top-left editor selector dropdown is currently open.
     open_area_selector: Option<AreaId>,
     /// Area maximized inside the split tree, if any.
@@ -932,7 +938,7 @@ impl TerminalView {
             activity: crate::activity::ActivityLog::default(),
             activity_filter: crate::activity::Filter::default(),
             activity_filter_focus: false,
-            activity_baseline: operate_view::ActivityBaseline::default(),
+            activity_baseline: operate_ui::ActivityBaseline::default(),
             open_area_selector: None,
             maximized_area: None,
             canvas_state: CanvasState::default(),

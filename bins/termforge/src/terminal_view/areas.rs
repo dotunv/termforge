@@ -69,6 +69,46 @@ impl TerminalView {
             .collect()
     }
 
+    pub(super) fn saved_canvas(&self) -> workspace::SavedCanvas {
+        let c = &self.canvas_state;
+        workspace::SavedCanvas {
+            lens: c.lens.id().to_owned(),
+            zoom_milli: (c.zoom * 1000.0).round() as u32,
+            pan_x: c.pan_x.round() as i32,
+            pan_y: c.pan_y.round() as i32,
+        }
+    }
+
+    /// Adopt a saved canvas view, clamped to what the canvas allows.
+    pub(super) fn apply_saved_canvas(&mut self, saved: &workspace::SavedCanvas) {
+        const PAN_LIMIT: f32 = 20_000.0;
+        let c = &mut self.canvas_state;
+        if let Some(lens) = crate::panes::CanvasLens::from_id(&saved.lens) {
+            c.lens = lens;
+        }
+        c.zoom = (saved.zoom_milli as f32 / 1000.0).clamp(0.4, 2.5);
+        c.pan_x = (saved.pan_x as f32).clamp(-PAN_LIMIT, PAN_LIMIT);
+        c.pan_y = (saved.pan_y as f32).clamp(-PAN_LIMIT, PAN_LIMIT);
+    }
+
+    /// Return the visible workspace to its default layout. Build keeps every
+    /// pane and session and only evens out the splits; closing sessions is
+    /// never a side effect of resetting a layout.
+    pub(super) fn reset_workspace_layout(&mut self, cx: &mut Context<'_, Self>) {
+        if self.workspace.hosts_sessions() {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.layout.equalize();
+            }
+        } else {
+            self.workspace_layouts.remove(&self.workspace);
+            self.ensure_workspace_layouts();
+        }
+        self.maximized_area = None;
+        self.open_area_selector = None;
+        self.persist_layout();
+        cx.notify();
+    }
+
     /// The pane tree of the visible workspace.
     pub(super) fn current_tree_mut(&mut self) -> Option<&mut PaneTree> {
         if self.workspace.hosts_sessions() {
