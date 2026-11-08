@@ -295,7 +295,8 @@ impl TerminalView {
             .bg(hsla(t.bg_panel))
             .flex()
             .flex_col()
-            .gap(px(tokens::space::XS))
+            .gap(px(tokens::space::SM))
+            .child(self.editor_intro("Activity", "Observed changes to services, connections and diagnostics. Select a linked event to open its source."))
             .child(
                 div()
                     .flex_none()
@@ -372,7 +373,7 @@ impl TerminalView {
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
-                    .when(visible.is_empty(), |d| d.child(self.muted_line(empty)))
+                    .when(visible.is_empty(), |d| d.child(div().p(px(tokens::space::LG)).rounded(px(tokens::radius::MD)).bg(hsla(t.bg_app)).child(self.editor_intro("Nothing to show yet", empty))))
                     .children(visible.into_iter().enumerate().map(|(row, event)| {
                         let color = match event.level {
                             Level::Info => t.accent,
@@ -386,7 +387,7 @@ impl TerminalView {
                             .py(px(4.0))
                             .rounded(px(tokens::radius::SM))
                             .flex()
-                            .items_center()
+                            .items_start()
                             .gap(px(tokens::space::SM))
                             .text_size(px(tokens::text::XS))
                             .when_some(link, |d, link| {
@@ -410,14 +411,12 @@ impl TerminalView {
                                     .rounded(px(tokens::radius::SM))
                                     .bg(with_alpha(hsla(color), 0.14))
                                     .text_color(hsla(color))
-                                    .child(event.source.label()),
+                                    .child(SharedString::from(format!("{} · {}", event.source.label(), match event.level { Level::Info => "Info", Level::Warn => "Warning", Level::Error => "Error" }))),
                             )
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w(px(0.0))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
                                     .text_color(hsla(t.text_muted))
                                     .child(SharedString::from(event.message.clone())),
                             )

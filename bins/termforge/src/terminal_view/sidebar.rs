@@ -22,14 +22,14 @@ impl TerminalView {
             .flex()
             .items_center()
             .gap(px(5.0))
-            .rounded_full()
+            .rounded(px(tokens::radius::SM))
             .cursor_pointer()
-            .bg(with_alpha(hsla(color), 0.16))
+            .bg(hsla(t.bg_toolbar))
             .border_1()
-            .border_color(hsla(if warning { t.warning } else { color }))
+            .border_color(hsla(if warning { t.warning } else { t.border }))
             .text_size(px(tokens::text::XS))
             .text_color(hsla(if warning { t.warning } else { t.text }))
-            .hover(|style| style.bg(with_alpha(hsla(color), 0.26)))
+            .hover(|style| style.bg(hsla(t.bg_hover)))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.open_picker(PickerMode::Contexts, cx);
             }))
@@ -47,7 +47,7 @@ impl TerminalView {
         let t = &self.theme;
         div()
             .id(id)
-            .size(px(24.0))
+            .size(px(28.0))
             .flex()
             .items_center()
             .justify_center()
@@ -55,7 +55,7 @@ impl TerminalView {
             .text_color(hsla(t.text_faint))
             .hover(|style| style.bg(hsla(t.bg_hover)).text_color(hsla(t.text)))
             .on_click(on_click)
-            .child(glyph)
+            .child(crate::icons::icon(glyph, hsla(t.text_muted)))
     }
 
     /// A full-width clickable sidebar row.
@@ -69,7 +69,7 @@ impl TerminalView {
         let t = &self.theme;
         div()
             .id(id)
-            .h(px(29.0))
+            .h(px(30.0))
             .px(px(tokens::space::SM))
             .flex()
             .items_center()
@@ -84,6 +84,15 @@ impl TerminalView {
                     .text_color(hsla(t.text))
             })
             .on_click(on_click)
+            .when(
+                id == "sidebar-new-session" || id == "sidebar-palette",
+                |d| {
+                    d.child(crate::icons::icon(
+                        if id == "sidebar-palette" { "⌕" } else { "+" },
+                        hsla(t.text_muted),
+                    ))
+                },
+            )
             .child(
                 div()
                     .flex_1()
@@ -448,9 +457,11 @@ impl TerminalView {
             .flex()
             .flex_col()
             .bg(hsla(t.bg_sidebar))
+            .border_r_1()
+            .border_color(hsla(t.border))
             .child(
                 div()
-                    .h(px(56.0))
+                    .h(px(62.0))
                     .pt(px(tokens::space::XS))
                     .px(px(tokens::space::SM))
                     .flex()
@@ -465,6 +476,7 @@ impl TerminalView {
                                 div()
                                     .overflow_hidden()
                                     .whitespace_nowrap()
+                                    .text_size(px(tokens::text::LG))
                                     .text_color(hsla(t.text))
                                     .child(SharedString::from(project)),
                             )
@@ -509,8 +521,12 @@ impl TerminalView {
                             .items_center()
                             .child(div().flex_1().child(self.sidebar_row(
                                 "sidebar-new-session",
-                                "+  New terminal",
-                                "Ctrl Shift T",
+                                "New terminal",
+                                if cfg!(target_os = "macos") {
+                                    "⌃⇧T"
+                                } else {
+                                    "Ctrl Shift T"
+                                },
                                 cx.listener(|this, _, _, cx| this.new_local_tab(cx)),
                             )))
                             .child(self.icon_button(
@@ -524,8 +540,12 @@ impl TerminalView {
                     )
                     .child(self.sidebar_row(
                         "sidebar-palette",
-                        "⌘  Search",
-                        "Ctrl Shift P",
+                        "Search",
+                        if cfg!(target_os = "macos") {
+                            "⌃⇧P"
+                        } else {
+                            "Ctrl Shift P"
+                        },
                         cx.listener(|this, _, _, cx| this.open_palette(cx)),
                     )),
             )

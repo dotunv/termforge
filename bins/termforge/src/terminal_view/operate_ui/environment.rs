@@ -9,7 +9,7 @@ impl TerminalView {
     pub(in crate::terminal_view) fn render_area_environment(
         &self,
         id: AreaId,
-        _cx: &mut Context<'_, Self>,
+        cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let t = &self.theme;
         let remote = self.spawn.ssh_host.clone();
@@ -42,6 +42,10 @@ impl TerminalView {
             .unwrap_or_else(|| "unknown".into());
         let capabilities = operate::capabilities(remote.as_deref(), self.container_runtime);
         let history = remote_session::daemon_history();
+        let unavailable = capabilities
+            .iter()
+            .filter(|c| matches!(c.support, Support::Unavailable(_)))
+            .count();
 
         let mut hosts: Vec<(String, usize)> = Vec::new();
         for tab in &self.tabs {
@@ -59,12 +63,21 @@ impl TerminalView {
         div()
             .id(("area-environment", id))
             .size_full()
+            .max_w(px(720.0))
             .overflow_y_scroll()
             .p(px(tokens::space::MD))
             .bg(hsla(t.bg_panel))
             .flex()
             .flex_col()
-            .gap(px(2.0))
+            .gap(px(tokens::space::SM))
+            .child(self.editor_intro(
+                "Environment",
+                if remote.is_some() {
+                    "Remote shell access. Project files and Git remain local."
+                } else {
+                    "Project identity, session host and available capabilities."
+                },
+            ))
             .child(
                 div()
                     .px(px(tokens::space::SM))
@@ -76,12 +89,12 @@ impl TerminalView {
                     .text_color(hsla(kind_color))
                     .child(SharedString::from(kind)),
             )
-            .child(self.operate_section("IDENTITY"))
+            .child(self.operate_section("Project identity"))
             .child(self.operate_row("Project", self.project_name()))
             .child(self.operate_row("Path", project))
             .child(self.operate_row("Branch", branch))
             .child(self.operate_row("Context", context))
-            .child(self.operate_section("CONNECTION"))
+            .child(self.operate_section("Session host"))
             .child(
                 div()
                     .text_size(px(tokens::text::SM))
@@ -99,7 +112,7 @@ impl TerminalView {
                         ),
                 )
             })
-            .child(self.operate_section("SESSIONS BY ENVIRONMENT"))
+            .child(self.operate_section("Sessions"))
             .children(hosts.into_iter().map(|(host, count)| {
                 self.operate_row(
                     "",
@@ -109,25 +122,58 @@ impl TerminalView {
                     ),
                 )
             }))
-            .child(self.operate_section("CAPABILITIES"))
-            .children(capabilities.into_iter().map(|capability| {
-                let (mark, color, note) = match capability.support {
-                    Support::Available => ("✓", t.success, String::new()),
-                    Support::Unavailable(reason) => ("✕", t.text_faint, format!(" — {reason}")),
-                };
-                div()
-                    .flex()
-                    .gap(px(tokens::space::SM))
-                    .text_size(px(tokens::text::SM))
-                    .child(div().w(px(12.0)).text_color(hsla(color)).child(mark))
-                    .child(
+            .child(self.operate_section("Capabilities"))
+            .child(self.inspector_action(
+                "environment-capabilities-toggle",
+                if self.environment_show_unavailable {
+                    "Hide unavailable capabilities"
+                } else {
+                    "Show unavailable capabilities"
+                },
+                cx.listener(|this, _, _, cx| {
+                    this.environment_show_unavailable = !this.environment_show_unavailable;
+                    cx.notify();
+                }),
+            ))
+            .child(self.muted_line(&format!(
+                "{unavailable} capabilities unavailable in this environment"
+            )))
+            .children(
+                capabilities
+                    .into_iter()
+                    .filter(|capability| {
+                        self.environment_show_unavailable
+                            || matches!(capability.support, Support::Available)
+                    })
+                    .map(|capability| {
+                        let (mark, color, note) = match capability.support {
+                            Support::Available => ("✓", t.success, String::new()),
+                            Support::Unavailable(reason) => {
+                                ("✕", t.text_faint, format!(" — {reason}"))
+                            }
+                        };
                         div()
-                            .flex_1()
-                            .text_color(hsla(if mark == "✓" { t.text } else { t.text_muted }))
-                            .child(SharedString::from(format!("{}{note}", capability.name))),
-                    )
-            }))
-            .child(self.operate_section("CONNECTION HISTORY"))
+                            .flex()
+                            .gap(px(tokens::space::SM))
+                            .text_size(px(tokens::text::SM))
+                            .child(div().w(px(12.0)).text_color(hsla(color)).child(mark))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .text_color(hsla(if mark == "✓" {
+                                        t.text
+                                    } else {
+                                        t.text_muted
+                                    }))
+                                    .child(SharedString::from(format!(
+                                        "{}{note}",
+                                        capability.name
+                                    ))),
+                            )
+                    }),
+            )
+            .child(self.operate_section("Connection history"))
             .children(if history.is_empty() {
                 vec![div()
                     .text_size(px(tokens::text::XS))

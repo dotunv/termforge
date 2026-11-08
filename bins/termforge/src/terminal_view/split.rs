@@ -308,6 +308,8 @@ impl TerminalView {
             self.open_area_selector = None;
         } else {
             self.open_area_selector = Some(id);
+            self.area_selector_query.clear();
+            self.area_selector_index = 0;
         }
         cx.notify();
     }
@@ -325,13 +327,27 @@ impl TerminalView {
         if (tag == EditorKindTag::Terminal) != self.workspace.hosts_sessions() {
             return;
         }
+        let canvas = self.canvas_state.clone();
         let Some(tree) = self.current_tree_mut() else {
             return;
         };
         if tree.set_editor_tag(id, tag) {
+            if tag == EditorKindTag::GraphCanvas {
+                tree.set_editor(id, EditorKind::GraphCanvas(canvas));
+            }
+            match tag {
+                EditorKindTag::Services => self.refresh_ports_if_stale(cx),
+                EditorKindTag::GitDiff => self.refresh_changes(cx),
+                EditorKindTag::CodeEditor | EditorKindTag::Outliner
+                    if self.project_file_entries.is_empty() =>
+                {
+                    self.refresh_project_files(cx)
+                }
+                _ => {}
+            }
             self.persist_layout();
-            cx.notify();
         }
+        cx.notify();
     }
 
     /// Split a specific area `id` along `axis`.
@@ -397,7 +413,7 @@ impl TerminalView {
         let maximized = self.maximized_area == Some(id);
         div()
             .id(("area-header", id))
-            .h(px(34.0))
+            .h(px(30.0))
             .px(px(tokens::space::SM))
             .flex_none()
             .flex()
@@ -405,7 +421,7 @@ impl TerminalView {
             .gap(px(tokens::space::SM))
             .border_b_1()
             .border_color(hsla(t.border))
-            .bg(hsla(if focused { t.bg_elevated } else { t.bg_toolbar }))
+            .bg(hsla(t.bg_toolbar))
             .text_size(px(tokens::text::XS))
             .when(editor_tag != EditorKindTag::Terminal, |d| {
                 d.child(
@@ -418,32 +434,19 @@ impl TerminalView {
                         .items_center()
                         .gap(px(5.0))
                         .rounded(px(tokens::radius::SM))
-                        .border_1()
-                        .border_color(hsla(if selector_open || focused {
-                            t.accent
-                        } else {
-                            t.border_strong
-                        }))
-                        .bg(hsla(if selector_open {
-                            t.bg_selected
-                        } else {
-                            t.bg_app
-                        }))
+                        .when(selector_open, |d| d.bg(hsla(t.bg_selected)))
                         .text_color(hsla(t.text))
                         .cursor_pointer()
                         .hover(|style| style.bg(hsla(t.bg_hover)).border_color(hsla(t.accent)))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
+                            this.focus_area(id, cx);
                             this.toggle_area_selector(id, cx);
                         }))
-                        .child(
-                            div()
-                                .px(px(4.0))
-                                .py(px(1.0))
-                                .rounded(px(3.0))
-                                .bg(with_alpha(hsla(t.accent), 0.16))
-                                .text_color(hsla(t.accent))
-                                .child(editor_tag.icon()),
-                        )
+                        .child(crate::icons::icon(
+                            editor_tag.icon(),
+                            hsla(if focused { t.accent } else { t.text_muted }),
+                        ))
                         .child(editor_tag.label())
                         .child(
                             div()
@@ -452,8 +455,13 @@ impl TerminalView {
                         ),
                 )
             })
-            .child(self.area_context_actions(id, editor_tag, cx))
-            .child(div().flex_1())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .child(self.area_context_actions(id, editor_tag, cx)),
+            )
             .child(
                 div()
                     .flex()
@@ -473,7 +481,7 @@ impl TerminalView {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.split_area(id, Axis::Horizontal, cx);
                             }))
-                            .child("◫"),
+                            .child(crate::icons::icon("◫", hsla(t.text_muted))),
                     )
                     .child(
                         div()
@@ -489,7 +497,7 @@ impl TerminalView {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.split_area(id, Axis::Vertical, cx);
                             }))
-                            .child("⊟"),
+                            .child(crate::icons::icon("⊟", hsla(t.text_muted))),
                     )
                     .child(
                         div()
@@ -505,7 +513,10 @@ impl TerminalView {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.toggle_area_maximized(id, cx);
                             }))
-                            .child(if maximized { "↙" } else { "↗" }),
+                            .child(crate::icons::icon(
+                                if maximized { "↙" } else { "↗" },
+                                hsla(t.text_muted),
+                            )),
                     )
                     .child(
                         div()
@@ -521,13 +532,12 @@ impl TerminalView {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.close_area(id, cx);
                             }))
-                            .child("×"),
+                            .child(crate::icons::icon("×", hsla(t.text_muted))),
                     ),
             )
     }
 
-    /// Floating Blender-style Editor Type popover menu rendered over the area
-    /// when its top-left selector pill is open.
+    /// Searchable editor chooser. Only mountable views are offered.
     pub(super) fn render_area_selector_popover(
         &self,
         id: AreaId,
@@ -535,113 +545,198 @@ impl TerminalView {
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let t = &self.theme;
-        div()
-            .id(("area-selector-popover", id))
-            .absolute()
-            .top(px(30.0))
-            .left(px(8.0))
-            .w(px(264.0))
-            .p(px(tokens::space::XS))
-            .rounded(px(tokens::radius::MD))
-            .border_1()
-            .border_color(hsla(t.border_strong))
-            .bg(hsla(t.bg_elevated))
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .px(px(tokens::space::SM))
-                    .py(px(4.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(hsla(t.border))
-                    .text_size(px(10.0))
-                    .text_color(hsla(t.text_faint))
-                    .child("EDITOR TYPE")
-                    .child(SharedString::from(format!("AREA #{id}"))),
-            )
-            .children(EditorKindTag::ALL.into_iter().map(|candidate| {
-                let active = candidate == editor_tag;
+        let choices =
+            EditorKindTag::choices(self.workspace.hosts_sessions(), &self.area_selector_query);
+        let query = if self.area_selector_query.is_empty() {
+            "Search views…".to_owned()
+        } else {
+            format!("{}▏", self.area_selector_query)
+        };
+        let mut previous_group = "";
+        let mut rows = Vec::new();
+        for (index, candidate) in choices.iter().copied().enumerate() {
+            if previous_group != candidate.category() {
+                previous_group = candidate.category();
+                rows.push(
+                    div()
+                        .px(px(tokens::space::SM))
+                        .pt(px(tokens::space::MD))
+                        .pb(px(tokens::space::XS))
+                        .text_size(px(tokens::text::XS))
+                        .text_color(hsla(t.text_faint))
+                        .child(previous_group)
+                        .into_any_element(),
+                );
+            }
+            let active = candidate == editor_tag;
+            let highlighted = index == self.area_selector_index;
+            rows.push(
                 div()
                     .id(SharedString::from(format!(
                         "area-kind-{}-{id}",
                         candidate.code()
                     )))
                     .px(px(tokens::space::SM))
-                    .py(px(5.0))
+                    .py(px(tokens::space::SM))
+                    .flex_none()
                     .flex()
-                    .items_center()
-                    .gap(px(tokens::space::SM))
+                    .items_start()
+                    .gap(px(tokens::space::MD))
                     .rounded(px(tokens::radius::SM))
-                    .bg(hsla(if active { t.bg_selected } else { t.bg_elevated }))
+                    .when(highlighted, |d| d.bg(hsla(t.bg_selected)))
                     .cursor_pointer()
                     .hover(|style| style.bg(hsla(t.bg_hover)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_area_editor(id, candidate, cx);
-                    }))
-                    .child(
-                        div()
-                            .size(px(22.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(tokens::radius::SM))
-                            .bg(with_alpha(
-                                hsla(if active { t.accent } else { t.border_strong }),
-                                0.18,
-                            ))
-                            .text_size(px(tokens::text::XS))
-                            .text_color(hsla(if active { t.accent } else { t.text_muted }))
-                            .child(candidate.icon()),
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.set_area_editor(id, candidate, cx)),
                     )
+                    .child(div().pt(px(2.0)).child(crate::icons::icon(
+                        candidate.icon(),
+                        hsla(if active { t.accent } else { t.text_muted }),
+                    )))
                     .child(
                         div()
                             .flex_1()
                             .min_w(px(0.0))
                             .flex()
                             .flex_col()
+                            .gap(px(2.0))
                             .child(
                                 div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(
-                                        div()
-                                            .text_size(px(tokens::text::XS))
-                                            .text_color(hsla(if active {
-                                                t.text
-                                            } else {
-                                                t.text_muted
-                                            }))
-                                            .child(candidate.label()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(9.0))
-                                            .text_color(hsla(if active {
-                                                t.accent
-                                            } else {
-                                                t.text_faint
-                                            }))
-                                            .child(candidate.category()),
-                                    ),
+                                    .text_size(px(tokens::text::SM))
+                                    .text_color(hsla(t.text))
+                                    .child(candidate.label()),
                             )
                             .child(
                                 div()
-                                    .text_size(px(10.0))
-                                    .text_color(hsla(t.text_faint))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
+                                    .text_size(px(tokens::text::XS))
+                                    .text_color(hsla(t.text_muted))
                                     .child(candidate.description()),
                             ),
                     )
-            }))
+                    .child(
+                        div()
+                            .text_size(px(tokens::text::XS))
+                            .text_color(hsla(t.accent))
+                            .child(if active { "Current" } else { "" }),
+                    )
+                    .into_any_element(),
+            );
+        }
+        div()
+            .id(("area-selector-popover", id))
+            .absolute()
+            .top(px(34.0))
+            .left(px(8.0))
+            .right(px(8.0))
+            .max_w(px(360.0))
+            .max_h(relative(0.85))
+            .overflow_y_scroll()
+            .track_scroll(&self.area_selector_scroll)
+            .p(px(tokens::space::SM))
+            .rounded(px(tokens::radius::LG))
+            .border_1()
+            .border_color(hsla(t.border_strong))
+            .bg(hsla(t.bg_elevated))
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .px(px(tokens::space::SM))
+                    .py(px(tokens::space::SM))
+                    .text_size(px(tokens::text::LG))
+                    .text_color(hsla(t.text))
+                    .child("Switch view"),
+            )
+            .child(
+                div()
+                    .px(px(tokens::space::SM))
+                    .py(px(tokens::space::SM))
+                    .rounded(px(tokens::radius::SM))
+                    .border_1()
+                    .border_color(hsla(t.accent))
+                    .bg(hsla(t.bg_app))
+                    .text_size(px(tokens::text::SM))
+                    .text_color(hsla(if self.area_selector_query.is_empty() {
+                        t.text_faint
+                    } else {
+                        t.text
+                    }))
+                    .child(SharedString::from(query)),
+            )
+            .when(choices.is_empty(), |d| {
+                d.child(
+                    div()
+                        .p(px(tokens::space::MD))
+                        .text_size(px(tokens::text::SM))
+                        .text_color(hsla(t.text_muted))
+                        .child("No views match your search."),
+                )
+            })
+            .children(rows)
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(tokens::space::SM))
+                    .pt(px(tokens::space::MD))
+                    .text_size(px(tokens::text::XS))
+                    .text_color(hsla(t.text_faint))
+                    .child("↑ ↓ select · Enter switch · Esc cancel"),
+            )
+    }
+
+    pub(super) fn area_selector_key(
+        &mut self,
+        ev: &KeyDownEvent,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let Some(id) = self.open_area_selector else {
+            return false;
+        };
+        let ks = &ev.keystroke;
+        let choices =
+            EditorKindTag::choices(self.workspace.hosts_sessions(), &self.area_selector_query);
+        match ks.key.as_str() {
+            "escape" => self.open_area_selector = None,
+            "up" => self.area_selector_index = self.area_selector_index.saturating_sub(1),
+            "down" => {
+                self.area_selector_index =
+                    (self.area_selector_index + 1).min(choices.len().saturating_sub(1))
+            }
+            "enter" => {
+                if let Some(tag) = choices.get(self.area_selector_index) {
+                    self.set_area_editor(id, *tag, cx);
+                }
+            }
+            "backspace" => {
+                self.area_selector_query.pop();
+                self.area_selector_index = 0;
+            }
+            _ if !ks.modifiers.control && !ks.modifiers.alt && !ks.modifiers.platform => {
+                if let Some(text) = &ks.key_char {
+                    if !text.chars().any(char::is_control) && self.area_selector_query.len() < 128 {
+                        self.area_selector_query.push_str(text);
+                        self.area_selector_index = 0;
+                    }
+                }
+            }
+            _ => {}
+        }
+        let choices =
+            EditorKindTag::choices(self.workspace.hosts_sessions(), &self.area_selector_query);
+        let mut groups = 0;
+        let mut previous = "";
+        for tag in choices.iter().take(self.area_selector_index + 1) {
+            if tag.category() != previous {
+                groups += 1;
+                previous = tag.category();
+            }
+        }
+        self.area_selector_scroll
+            .scroll_to_item(2 + self.area_selector_index + groups);
+        cx.notify();
+        true
     }
 
     fn area_context_actions(
@@ -677,16 +772,23 @@ impl TerminalView {
                     .filter(|part| !part.is_empty())
                     .unwrap_or(&cwd)
                     .to_owned();
+                let split = self
+                    .tabs
+                    .get(self.active_tab)
+                    .is_some_and(|tab| tab.layout.len() > 1);
+                let exit = parked.map_or(self.last_exit, |pane| pane.last_exit);
                 div()
                     .flex()
                     .items_center()
                     .gap(px(6.0))
                     .text_color(hsla(t.text_faint))
-                    .child(
-                        div()
-                            .text_color(hsla(t.text_muted))
-                            .child(SharedString::from(shell)),
-                    )
+                    .when(split, |d| {
+                        d.child(
+                            div()
+                                .text_color(hsla(t.text_muted))
+                                .child(SharedString::from(shell)),
+                        )
+                    })
                     .child(
                         div()
                             .max_w(px(180.0))
@@ -694,6 +796,13 @@ impl TerminalView {
                             .whitespace_nowrap()
                             .child(SharedString::from(short_cwd)),
                     )
+                    .when_some(exit, |d, code| {
+                        d.child(
+                            div()
+                                .text_color(hsla(if code == 0 { t.text_muted } else { t.danger }))
+                                .child(SharedString::from(format!("Exited · {code}"))),
+                        )
+                    })
                     .into_any_element()
             }
             EditorKindTag::GraphCanvas => div()
@@ -707,7 +816,7 @@ impl TerminalView {
                         .rounded(px(3.0))
                         .bg(hsla(t.bg_app))
                         .text_color(hsla(t.text_muted))
-                        .child("2D Scene"),
+                        .child("Zoom"),
                 )
                 .child(
                     div()
@@ -785,26 +894,11 @@ impl TerminalView {
                 )))
                 .into_any_element(),
             EditorKindTag::Timeline => div()
-                .id(("area-timeline-follow", id))
-                .px(px(6.0))
-                .py(px(1.0))
-                .rounded(px(tokens::radius::SM))
-                .bg(hsla(t.bg_app))
-                .text_color(hsla(if self.timeline_state.follow {
-                    t.success
-                } else {
-                    t.text_faint
-                }))
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.timeline_state.follow = !this.timeline_state.follow;
-                    cx.notify();
-                }))
-                .child(if self.timeline_state.follow {
-                    "● Live Stream"
-                } else {
-                    "○ Paused"
-                })
+                .text_color(hsla(t.text_faint))
+                .child(SharedString::from(format!(
+                    "{} events",
+                    self.activity.len()
+                )))
                 .into_any_element(),
             EditorKindTag::CodeEditor => div()
                 .flex()
@@ -823,10 +917,13 @@ impl TerminalView {
                 .items_center()
                 .gap(px(tokens::space::XS))
                 .text_color(hsla(t.text_faint))
-                .child(SharedString::from(format!(
-                    "{} changed",
-                    self.changes.as_ref().map_or(0, Vec::len)
-                )))
+                .child(SharedString::from(if self.git_loading {
+                    "Reading repository…".to_owned()
+                } else if self.git_error.is_some() {
+                    "Git unavailable".to_owned()
+                } else {
+                    format!("{} changed", self.changes.as_ref().map_or(0, Vec::len))
+                }))
                 .into_any_element(),
             EditorKindTag::TaskBoard => div()
                 .flex()

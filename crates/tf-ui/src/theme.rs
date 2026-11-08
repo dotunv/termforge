@@ -15,10 +15,10 @@ pub struct ThemeInput {
 }
 
 impl ThemeInput {
-    /// The default dark theme.
+    /// Neutral graphite surfaces with a restrained blue accent.
     pub const DARK: Self = Self {
-        base: Rgb::new(0x1c, 0x1e, 0x27),
-        accent: Rgb::new(0x8b, 0xa9, 0xcc),
+        base: Rgb::new(0x1e, 0x1f, 0x22),
+        accent: Rgb::new(0x7b, 0x9e, 0xd1),
         contrast: 30,
     };
     /// The default light theme.
@@ -54,6 +54,12 @@ pub struct Theme {
     pub success: Rgb,
     pub warning: Rgb,
     pub danger: Rgb,
+    /// File icon foregrounds; distinct from status/error semantics.
+    pub file_code: Rgb,
+    pub file_script: Rgb,
+    pub file_markup: Rgb,
+    pub file_data: Rgb,
+    pub file_document: Rgb,
     /// Terminal background (matches the panel so the terminal feels native).
     pub term_bg: Rgb,
     pub term_fg: Rgb,
@@ -91,6 +97,15 @@ impl Theme {
         check("text_muted".into(), self.text_muted, self.bg_app, 4.5);
         check("text_faint".into(), self.text_faint, self.bg_app, 3.0);
         check("accent_text".into(), self.accent_text, self.accent, 3.0);
+        for (name, color) in [
+            ("file_code", self.file_code),
+            ("file_script", self.file_script),
+            ("file_markup", self.file_markup),
+            ("file_data", self.file_data),
+            ("file_document", self.file_document),
+        ] {
+            check(name.into(), color, self.bg_panel, 4.5);
+        }
         for (name, c) in [
             ("success", self.success),
             ("warning", self.warning),
@@ -120,8 +135,8 @@ impl Theme {
         let bg_app = surface(0.0).to_rgb();
         let bg_panel = surface(0.012).to_rgb();
         let bg_toolbar = surface(0.02).to_rgb();
-        let bg_sidebar =
-            Oklch::new(base.l + dir * 0.07 * (1.0 + k), 0.014, accent.h + 35.0).to_rgb();
+        // Navigation recedes from the canvas; the accent belongs to actions.
+        let bg_sidebar = surface(-0.025).to_rgb();
         let bg_elevated = surface(0.03).to_rgb();
         let bg_hover = surface(0.045).to_rgb();
         let bg_selected = surface(0.07).to_rgb();
@@ -170,6 +185,14 @@ impl Theme {
             )
         };
 
+        let file_color = |h| {
+            ensure_contrast(
+                Oklch::new(if is_dark { 0.78 } else { 0.45 }, 0.12, h),
+                bg_panel,
+                4.5,
+                is_dark,
+            )
+        };
         let ansi = ansi_palette(is_dark, bg_panel);
 
         Self {
@@ -192,6 +215,11 @@ impl Theme {
             success: status(150.0),
             warning: status(80.0),
             danger: status(25.0),
+            file_code: ensure_contrast(accent, bg_panel, 4.5, is_dark),
+            file_script: file_color(80.0),
+            file_markup: file_color(35.0),
+            file_data: file_color(160.0),
+            file_document: ensure_contrast(Oklch::from_rgb(text_muted), bg_panel, 4.5, is_dark),
             term_bg: bg_panel,
             term_fg: text,
             term_cursor: accent.with_l(if is_dark { 0.8 } else { 0.5 }).to_rgb(),

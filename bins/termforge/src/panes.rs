@@ -157,16 +157,16 @@ pub enum EditorKindTag {
 
 impl EditorKindTag {
     pub const ALL: [Self; 10] = [
-        Self::Terminal,
-        Self::GraphCanvas,
         Self::CodeEditor,
+        Self::GitDiff,
+        Self::TaskBoard,
+        Self::Terminal,
+        Self::Outliner,
+        Self::GraphCanvas,
+        Self::Inspector,
         Self::Services,
         Self::Environment,
-        Self::GitDiff,
-        Self::Inspector,
-        Self::Outliner,
         Self::Timeline,
-        Self::TaskBoard,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -201,32 +201,38 @@ impl EditorKindTag {
 
     pub const fn category(self) -> &'static str {
         match self {
-            Self::Terminal => "EXEC",
-            Self::GraphCanvas => "VIEW",
-            Self::Inspector => "DATA",
-            Self::Outliner => "TREE",
-            Self::Timeline => "LOGS",
-            Self::CodeEditor => "CODE",
-            Self::GitDiff => "DIFF",
-            Self::TaskBoard => "TASK",
-            Self::Services => "RUN",
-            Self::Environment => "ENV",
+            Self::Terminal | Self::CodeEditor | Self::GitDiff | Self::TaskBoard => "Develop",
+            Self::GraphCanvas | Self::Inspector | Self::Outliner => "Explore",
+            Self::Services | Self::Environment | Self::Timeline => "Operate",
         }
     }
 
     pub const fn description(self) -> &'static str {
         match self {
-            Self::Terminal => "Interactive PTY shell session",
-            Self::GraphCanvas => "Architecture, function flow & runtime",
-            Self::Inspector => "Selected node & project properties",
-            Self::Outliner => "Workspace file & directory tree",
-            Self::Timeline => "Live IPC, session & LSP waterfall",
-            Self::CodeEditor => "Syntax buffer & source file editor",
-            Self::GitDiff => "Working tree & staged changes",
-            Self::TaskBoard => "Project task board & workflow",
-            Self::Services => "Processes, agents and listening ports",
-            Self::Environment => "Where this work runs and what it can do",
+            Self::Terminal => "Run commands in an interactive shell",
+            Self::GraphCanvas => "Explore project structure and runtime connections",
+            Self::Inspector => "Details for the selected file, task or graph node",
+            Self::Outliner => "Browse folders and open source files",
+            Self::Timeline => "Follow service, connection and diagnostic changes",
+            Self::CodeEditor => "Read, edit and save project files",
+            Self::GitDiff => "Review and stage working-tree changes",
+            Self::TaskBoard => "Plan work and run project commands",
+            Self::Services => "Manage sessions, services and containers",
+            Self::Environment => "Check project identity, connections and capabilities",
         }
+    }
+
+    pub fn choices(hosts_sessions: bool, query: &str) -> Vec<Self> {
+        let query = query.trim().to_lowercase();
+        Self::ALL
+            .into_iter()
+            .filter(|tag| (*tag == Self::Terminal) == hosts_sessions)
+            .filter(|tag| {
+                format!("{} {} {}", tag.label(), tag.description(), tag.category())
+                    .to_lowercase()
+                    .contains(&query)
+            })
+            .collect()
     }
 
     pub const fn code(self) -> char {
@@ -939,6 +945,26 @@ impl PaneTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_choices_are_mountable_and_searchable() {
+        assert_eq!(
+            EditorKindTag::choices(true, ""),
+            vec![EditorKindTag::Terminal]
+        );
+        let views = EditorKindTag::choices(false, "");
+        assert_eq!(views.len(), 9);
+        assert!(!views.contains(&EditorKindTag::Terminal));
+        assert_eq!(
+            EditorKindTag::choices(false, "stage"),
+            vec![EditorKindTag::GitDiff]
+        );
+        assert_eq!(
+            EditorKindTag::choices(false, "DIAGNOSTIC"),
+            vec![EditorKindTag::Timeline]
+        );
+        assert!(EditorKindTag::choices(false, "no such view").is_empty());
+    }
 
     const AREA: Rect = Rect::new(0.0, 0.0, 1000.0, 600.0);
 

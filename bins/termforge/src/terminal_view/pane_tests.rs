@@ -77,6 +77,42 @@ fn open(cx: &mut TestAppContext) -> (View, &mut VisualTestContext) {
     (view, cx)
 }
 
+/// These tests assert OSC 133 command marks, so they need a shell for which
+/// TermForge automatically loads its integration, independent of the user's
+/// default shell and rc files.
+fn open_integrated(cx: &mut TestAppContext) -> Option<(View, &mut VisualTestContext)> {
+    isolate();
+    let mut spawn = crate::spawn_options().ok()?;
+    spawn.profile = tf_pty::discover_shells()
+        .into_iter()
+        .find(|profile| {
+            if !profile.supports_integration() {
+                return false;
+            }
+            if matches!(profile.kind, tf_pty::ShellKind::Bash | tf_pty::ShellKind::GitBash) {
+                // PS0, used by the integration to mark command output, was
+                // introduced in bash 4.4. macOS still ships bash 3.2.
+                return std::process::Command::new(&profile.program)
+                    .args(["-c", "(( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) ))"])
+                    .status()
+                    .is_ok_and(|status| status.success());
+            }
+            true
+        })?;
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        TerminalView::new(
+            spawn,
+            None,
+            crate::appearance::Appearance::builtin(),
+            window,
+            cx,
+        )
+    });
+    view.update(cx, |view, _| view.workspace = Workspace::Build);
+    redraw(cx);
+    Some((view, cx))
+}
+
 fn open_file(view: &View, cx: &mut VisualTestContext, name: &str) {
     let path = PathBuf::from(name);
     view.update(cx, |view, cx| view.open_project_file(path.clone(), cx));
@@ -650,7 +686,9 @@ async fn dock_state_round_trips_and_is_clamped(cx: &mut TestAppContext) {
 
 #[gpui::test]
 async fn managed_process_state_is_observed_from_the_shell(cx: &mut TestAppContext) {
-    let (view, cx) = open(cx);
+    let Some((view, cx)) = open_integrated(cx) else {
+        return;
+    };
     view.update(cx, |v, cx| {
         v.start_managed("echoer".into(), "echo tf-managed".into(), false, cx)
     });
@@ -674,7 +712,9 @@ async fn managed_process_state_is_observed_from_the_shell(cx: &mut TestAppContex
 
 #[gpui::test]
 async fn docked_session_takes_input_and_moves_back(cx: &mut TestAppContext) {
-    let (view, cx) = open(cx);
+    let Some((view, cx)) = open_integrated(cx) else {
+        return;
+    };
     view.update(cx, |v, cx| v.new_local_tab(cx));
     let (docked_id, docked_index) = view.read_with(cx, |v, _| (v.tabs[1].id, 1));
     // Dock the workspace on the canvas: another one must take its place.
@@ -1472,11 +1512,11 @@ async fn session_free_areas_split_retype_and_close_without_sessions(cx: &mut Tes
         let tree = &v.workspace_layouts[&Workspace::Work];
         (tree.ids()[0], tree.len())
     });
-    assert_eq!(len, 2);
+    assert_eq!(len, 1);
 
     view.update(cx, |v, cx| v.split_area(first, Axis::Vertical, cx));
     view.read_with(cx, |v, _| {
-        assert_eq!(v.workspace_layouts[&Workspace::Work].len(), 3);
+        assert_eq!(v.workspace_layouts[&Workspace::Work].len(), 2);
     });
     view.update(cx, |v, cx| {
         v.set_area_editor(first, EditorKindTag::Terminal, cx);
@@ -1541,7 +1581,7 @@ async fn workspace_layouts_survive_a_round_trip_through_the_layout_file(cx: &mut
     });
     view.read_with(cx, |v, _| {
         let work = &v.workspace_layouts[&Workspace::Work];
-        assert_eq!(work.len(), 3, "restored layout is kept, garbage ignored");
+        assert_eq!(work.len(), 2, "restored layout is kept, garbage ignored");
         assert_eq!(v.workspace_layouts.len(), 4, "defaults fill the gaps");
         for tree in v.workspace_layouts.values() {
             assert!(tree
@@ -1549,6 +1589,48 @@ async fn workspace_layouts_survive_a_round_trip_through_the_layout_file(cx: &mut
                 .iter()
                 .all(|a| !matches!(a.editor, crate::panes::EditorKind::Terminal(_))));
         }
+    });
+}
+
+#[gpui::test]
+async fn work_area_shrinks_when_project_navigation_opens(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    view.update(cx, |v, cx| {
+        v.show_sidebar = false;
+        v.switch_workspace(Workspace::Work, cx);
+    });
+    redraw(cx);
+    let (before, sidebar) = view.read_with(cx, |v, _| {
+        (f32::from(v.pane_area.size.width), v.sidebar_width)
+    });
+    view.update(cx, |v, cx| v.toggle_sidebar(cx));
+    redraw(cx);
+    view.read_with(cx, |v, _| {
+        let after = f32::from(v.pane_area.size.width);
+        assert!(
+            (before - sidebar - after).abs() < 1.0,
+            "project rail must leave room for the work area: {before} - {sidebar} != {after}"
+        );
+    });
+}
+
+#[gpui::test]
+async fn work_refreshes_stock_layout_but_keeps_custom_splits(cx: &mut TestAppContext) {
+    use crate::workspace::Workspace;
+    let (view, cx) = open(cx);
+    view.update(cx, |v, _| {
+        v.workspace_layouts.clear();
+        v.apply_saved_areas(&[("work".into(), "h0.680(41:k,42:i)".into())]);
+        v.ensure_workspace_layouts();
+        let tree = &v.workspace_layouts[&Workspace::Work];
+        assert_eq!(tree.len(), 1);
+        assert_eq!(
+            tree.editor(tree.focused()).unwrap().tag(),
+            crate::panes::EditorKindTag::TaskBoard
+        );
+
+        v.apply_saved_areas(&[("work".into(), "h0.550(41:k,42:i)".into())]);
+        assert_eq!(v.workspace_layouts[&Workspace::Work].len(), 2);
     });
 }
 
@@ -1715,16 +1797,13 @@ async fn reset_restores_a_session_free_layout_to_its_default(cx: &mut TestAppCon
     redraw(cx);
     view.read_with(cx, |v, _| {
         let tree = &v.workspace_layouts[&Workspace::Work];
-        assert_eq!(tree.len(), 2);
+        assert_eq!(tree.len(), 1);
         assert_eq!(
             tree.areas()
                 .iter()
                 .map(|a| a.editor.tag())
                 .collect::<Vec<_>>(),
-            vec![
-                crate::panes::EditorKindTag::TaskBoard,
-                crate::panes::EditorKindTag::Inspector
-            ]
+            vec![crate::panes::EditorKindTag::TaskBoard]
         );
         assert!(Arc::ptr_eq(&original, v.session.as_ref().unwrap()));
     });
@@ -1787,4 +1866,172 @@ async fn canvas_view_round_trips_and_is_clamped(cx: &mut TestAppContext) {
         assert_eq!(v.canvas_state.pan_x, 20_000.0);
         assert_eq!(v.canvas_state.pan_y, -20_000.0);
     });
+}
+
+#[gpui::test]
+async fn editor_chooser_filters_with_keyboard_and_preserves_sessions(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    let original = view.read_with(cx, |v, _| v.session.clone().unwrap());
+    view.update(cx, |v, cx| v.switch_workspace(Workspace::Work, cx));
+    let id = view.read_with(cx, |v, _| v.workspace_layouts[&Workspace::Work].focused());
+    view.update(cx, |v, cx| v.toggle_area_selector(id, cx));
+    cx.simulate_keystrokes("t i m e l i n e enter");
+    view.read_with(cx, |v, _| {
+        assert!(v.open_area_selector.is_none());
+        assert_eq!(
+            v.workspace_layouts[&Workspace::Work]
+                .editor(id)
+                .unwrap()
+                .tag(),
+            EditorKindTag::Timeline
+        );
+    });
+    for tag in EditorKindTag::choices(false, "") {
+        view.update(cx, |v, cx| v.set_area_editor(id, tag, cx));
+        redraw(cx);
+        view.read_with(cx, |v, _| {
+            assert_eq!(
+                v.workspace_layouts[&Workspace::Work]
+                    .editor(id)
+                    .unwrap()
+                    .tag(),
+                tag
+            );
+            assert!(Arc::ptr_eq(&original, v.session.as_ref().unwrap()));
+        });
+    }
+    view.update(cx, |v, cx| v.toggle_area_selector(id, cx));
+    cx.simulate_keystrokes("z z z enter escape");
+    view.read_with(cx, |v, _| assert!(v.open_area_selector.is_none()));
+    assert_eq!(count(&view, cx), 1);
+}
+
+#[gpui::test]
+async fn graph_controls_update_the_visible_session_free_area(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    view.update(cx, |v, cx| v.switch_workspace(Workspace::Work, cx));
+    let id = view.read_with(cx, |v, _| v.workspace_layouts[&Workspace::Work].focused());
+    let build = view.read_with(cx, |v, _| v.tabs[v.active_tab].layout.encode());
+    view.update(cx, |v, cx| {
+        v.set_area_editor(id, EditorKindTag::GraphCanvas, cx);
+        v.pan_canvas(Some(id), 45.0, 30.0, cx);
+        v.zoom_canvas(Some(id), 0.2, cx);
+        let EditorKind::GraphCanvas(state) =
+            v.workspace_layouts[&Workspace::Work].editor(id).unwrap()
+        else {
+            panic!("graph expected")
+        };
+        assert_eq!((state.pan_x, state.pan_y), (45.0, 30.0));
+        assert!((state.zoom - 1.2).abs() < 0.001);
+        v.set_canvas_lens(Some(id), crate::panes::CanvasLens::FunctionFlow, cx);
+        let EditorKind::GraphCanvas(state) =
+            v.workspace_layouts[&Workspace::Work].editor(id).unwrap()
+        else {
+            panic!("graph expected")
+        };
+        assert_eq!(state.lens, crate::panes::CanvasLens::FunctionFlow);
+        v.pan_canvas(Some(id), 10.0, 20.0, cx);
+        v.reset_canvas_view(Some(id), cx);
+        let EditorKind::GraphCanvas(state) =
+            v.workspace_layouts[&Workspace::Work].editor(id).unwrap()
+        else {
+            panic!("graph expected")
+        };
+        assert_eq!((state.pan_x, state.pan_y, state.zoom), (0.0, 0.0, 1.0));
+        assert_eq!(v.tabs[v.active_tab].layout.encode(), build);
+    });
+    redraw(cx);
+}
+
+#[gpui::test]
+async fn opening_code_preserves_the_explorer_area_and_reuses_its_editor(cx: &mut TestAppContext) {
+    let (view, cx) = open(cx);
+    view.update(cx, |v, cx| {
+        v.switch_workspace(Workspace::Explore, cx);
+        let id = v.workspace_layouts[&Workspace::Explore].focused();
+        v.set_area_editor(id, EditorKindTag::Outliner, cx);
+        v.reveal_code_editor(cx);
+        let tree = &v.workspace_layouts[&Workspace::Explore];
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree.editor(id).unwrap().tag(), EditorKindTag::Outliner);
+        assert_eq!(
+            tree.editor(tree.focused()).unwrap().tag(),
+            EditorKindTag::CodeEditor
+        );
+        v.reveal_code_editor(cx);
+        assert_eq!(v.workspace_layouts[&Workspace::Explore].len(), 2);
+    });
+    redraw(cx);
+    assert_eq!(count(&view, cx), 1);
+}
+
+#[gpui::test]
+async fn file_search_navigation_reveal_and_refresh_keep_the_tree_usable(cx: &mut TestAppContext) {
+    use super::file_browser::BrowserFocus;
+    let (view, cx) = open(cx);
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(directory.path().join("src")).unwrap();
+    std::fs::create_dir_all(directory.path().join("docs")).unwrap();
+    std::fs::write(directory.path().join("src/lib.rs"), "pub fn hello() {}\n").unwrap();
+    std::fs::write(directory.path().join("docs/guide.md"), "guide\n").unwrap();
+    let root = dunce::canonicalize(directory.path()).unwrap();
+    view.update(cx, |v, cx| {
+        v.switch_project(root, cx);
+        v.switch_workspace(Workspace::Explore, cx);
+    });
+    wait_for(cx, "explorer snapshot", |cx| {
+        view.read_with(cx, |v, _| {
+            v.file_browser.initialized && !v.project_files_loading
+        })
+    });
+    view.read_with(cx, |v, _| {
+        assert!(v.collapsed_file_paths.contains(Path::new("src")))
+    });
+    view.update(cx, |v, _| {
+        v.file_browser.selected = Some("src".into());
+        v.file_browser.focus = Some(BrowserFocus::Tree);
+    });
+    cx.simulate_keystrokes("right");
+    view.read_with(cx, |v, _| {
+        assert!(!v.collapsed_file_paths.contains(Path::new("src")))
+    });
+    cx.simulate_keystrokes("left");
+    view.read_with(cx, |v, _| {
+        assert!(v.collapsed_file_paths.contains(Path::new("src")))
+    });
+    cx.simulate_keystrokes("ctrl-p l i b . r s down enter");
+    wait_for(cx, "search result opened in editor", |cx| {
+        view.read_with(cx, |v, _| {
+            v.selected_project_file.as_deref() == Some(Path::new("src/lib.rs"))
+                && v.editor_buffer.is_some()
+        })
+    });
+    view.update(cx, |v, cx| {
+        v.collapsed_file_paths.insert("src".into());
+        v.refresh_project_files(cx);
+    });
+    wait_for(cx, "explorer refresh", |cx| {
+        view.read_with(cx, |v, _| !v.project_files_loading)
+    });
+    view.read_with(cx, |v, _| {
+        assert!(
+            v.collapsed_file_paths.contains(Path::new("src")),
+            "refresh preserves collapsed folders"
+        )
+    });
+    view.update(cx, |v, cx| {
+        v.file_browser.query = "other".into();
+        v.reveal_active_file(cx);
+    });
+    view.read_with(cx, |v, _| {
+        assert!(v.file_browser.query.is_empty());
+        assert!(!v.collapsed_file_paths.contains(Path::new("src")));
+        assert_eq!(
+            v.file_browser.selected.as_deref(),
+            Some(Path::new("src/lib.rs"))
+        );
+        assert!(v.file_browser.focus.is_none());
+    });
+    redraw(cx);
+    assert_eq!(count(&view, cx), 1);
 }

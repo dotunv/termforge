@@ -113,6 +113,7 @@ fn fallback_families(available: &[String], primary: &str) -> Vec<String> {
 /// keeps its monospace font; labels, hints and settings read better in a
 /// proportional face and do not run together at small sizes.
 const PREFERRED_UI: &[&str] = &[
+    ".SystemUIFont",
     "Inter",
     "Segoe UI Variable",
     "Segoe UI",
@@ -126,7 +127,7 @@ const PREFERRED_UI: &[&str] = &[
 ];
 
 /// The family used for interface text: `preferred` when installed, else the
-/// best proportional face, else the terminal font.
+/// native system face, then a proportional fallback. Explicit choices win.
 pub fn ui_family(cx: &App, preferred: &str, fallback: &SharedString) -> SharedString {
     let available = cx.text_system().all_font_names();
     let installed = |want: &str| {

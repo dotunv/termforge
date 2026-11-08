@@ -2,7 +2,8 @@
 
 use super::*;
 
-const MAX_PROJECT_DEPTH: usize = 5;
+const MAX_PROJECT_DEPTH: usize = 16;
+const MAX_PROJECT_ENTRIES: usize = 20_000;
 
 /// Generated and dependency directories never make a useful default project
 /// view. Users can still inspect them in their filesystem, without allowing
@@ -47,8 +48,8 @@ const VISIBLE_DOT_DIRECTORIES: &[&str] = &[
 #[derive(Debug, Clone)]
 pub(super) struct ProjectFileEntry {
     pub(super) path: PathBuf,
-    depth: usize,
-    is_dir: bool,
+    pub(super) depth: usize,
+    pub(super) is_dir: bool,
 }
 
 type EditorLine = Vec<(String, Option<tf_editor::HighlightKind>, bool)>;
@@ -339,6 +340,8 @@ impl TerminalView {
         }
         self.project_files_generation = self.project_files_generation.wrapping_add(1);
         self.project_file_entries.clear();
+        self.collapsed_file_paths.clear();
+        self.file_browser = file_browser::FileBrowserState::default();
         self.project_files_loading = false;
         self.project_files_error = None;
         self.project_files_checked_at = None;
@@ -379,7 +382,23 @@ impl TerminalView {
                 view.project_files_checked_at = Some(std::time::Instant::now());
                 match result {
                     Ok(entries) => {
+                        let initial = !view.file_browser.initialized;
+                        if initial {
+                            view.collapsed_file_paths.extend(
+                                entries
+                                    .iter()
+                                    .filter(|entry| entry.is_dir)
+                                    .map(|entry| entry.path.clone()),
+                            );
+                            view.file_browser.initialized = true;
+                        }
                         view.project_file_entries = entries;
+                        if initial {
+                            if let Some(path) = view.selected_project_file.clone() {
+                                view.reveal_file_path(&path);
+                            }
+                        }
+                        view.scroll_file_browser();
                         view.project_files_error = None;
                     }
                     Err(error) => view.project_files_error = Some(error),
@@ -392,6 +411,7 @@ impl TerminalView {
     }
 
     pub(super) fn open_project_file(&mut self, relative: PathBuf, cx: &mut Context<'_, Self>) {
+        self.reveal_file_path(&relative);
         if self.selected_project_file.as_ref() == Some(&relative)
             && (self.editor_buffer.is_some() || self.editor_loading)
         {
@@ -679,6 +699,7 @@ impl TerminalView {
         let relative = relative.to_path_buf();
         let path = diagnostic.path.clone();
         self.show_workspace(Workspace::Explore, cx);
+        self.reveal_code_editor(cx);
         self.open_project_file(relative, cx);
         self.editor_pending_position = Some((path, diagnostic.start));
         self.apply_pending_editor_position();
@@ -716,7 +737,43 @@ impl TerminalView {
         self.editor_scroll.scroll_to_item(line);
     }
 
-    fn select_project_file(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
+    /// Reveal an editor without replacing the explorer/graph that opened it.
+    pub(super) fn reveal_code_editor(&mut self, cx: &mut Context<'_, Self>) {
+        if self.workspace.hosts_sessions() {
+            self.show_workspace(Workspace::Explore, cx);
+        }
+        self.ensure_workspace_layouts();
+        self.maximized_area = None;
+        let Some(tree) = self.workspace_layouts.get_mut(&self.workspace) else {
+            return;
+        };
+        let existing = tree
+            .areas()
+            .iter()
+            .find(|area| area.editor.tag() == EditorKindTag::CodeEditor)
+            .map(|area| area.id);
+        if let Some(id) = existing {
+            tree.set_focus(id);
+        } else if tree.len() < super::split::MAX_PANES {
+            let next = self.next_pane_id;
+            if tree.split_with_editor(
+                tree.focused(),
+                Axis::Horizontal,
+                0.36,
+                next,
+                EditorKind::CodeEditor,
+            ) {
+                self.next_pane_id += 1;
+            }
+        } else {
+            tree.set_editor_tag(tree.focused(), EditorKindTag::CodeEditor);
+        }
+        self.persist_layout();
+        cx.notify();
+    }
+
+    pub(super) fn select_project_file(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
+        self.reveal_code_editor(cx);
         self.open_project_file(path, cx);
         self.persist_layout();
         cx.notify();
@@ -1017,7 +1074,7 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn toggle_file_path(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
+    pub(super) fn toggle_file_path(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
         if !self.collapsed_file_paths.insert(path.clone()) {
             self.collapsed_file_paths.remove(&path);
         }
@@ -1087,14 +1144,15 @@ impl TerminalView {
 
         div()
             .id("workbench-changes")
+            .min_w(px(0.0))
             .flex_1()
             .min_h(px(0.0))
             .flex()
             .bg(hsla(t.bg_app))
             .child(
                 div()
-                    .w(px(292.0))
-                    .min_w(px(240.0))
+                    .w(px(236.0))
+                    .min_w(px(180.0))
                     .h_full()
                     .flex_none()
                     .flex()
@@ -1104,9 +1162,11 @@ impl TerminalView {
                     .bg(hsla(t.bg_panel))
                     .child(
                         div()
-                            .h(px(42.0))
+                            .min_h(px(42.0))
                             .px(px(tokens::space::MD))
+                            .py(px(tokens::space::SM))
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .justify_between()
                             .border_b_1()
@@ -1131,16 +1191,18 @@ impl TerminalView {
                                         .child("Commit"),
                                 )
                             })
-                            .child(
-                                div()
-                                    .px(px(tokens::space::SM))
-                                    .py(px(2.0))
-                                    .rounded_full()
-                                    .bg(with_alpha(hsla(t.text), 0.06))
-                                    .text_size(px(tokens::text::XS))
-                                    .text_color(hsla(t.text_faint))
-                                    .child(SharedString::from(changes.len().to_string())),
-                            ),
+                            .when(self.git_error.is_none() && !self.git_loading, |d| {
+                                d.child(
+                                    div()
+                                        .px(px(tokens::space::SM))
+                                        .py(px(2.0))
+                                        .rounded_full()
+                                        .bg(with_alpha(hsla(t.text), 0.06))
+                                        .text_size(px(tokens::text::XS))
+                                        .text_color(hsla(t.text_faint))
+                                        .child(SharedString::from(changes.len().to_string())),
+                                )
+                            }),
                     )
                     .child(
                         div()
@@ -1179,7 +1241,32 @@ impl TerminalView {
                                         .bg(with_alpha(hsla(t.danger), 0.08))
                                         .text_size(px(tokens::text::XS))
                                         .text_color(hsla(t.danger))
-                                        .child(SharedString::from(error.clone())),
+                                        .child(SharedString::from(error.clone()))
+                                        .child(
+                                            div()
+                                                .mt(px(tokens::space::SM))
+                                                .flex()
+                                                .gap(px(tokens::space::SM))
+                                                .text_color(hsla(t.text))
+                                                .child(
+                                                    div()
+                                                        .id("git-retry")
+                                                        .cursor_pointer()
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.refresh_changes(cx)
+                                                        }))
+                                                        .child("Retry"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("git-open-project")
+                                                        .cursor_pointer()
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.open_project_dialog(cx)
+                                                        }))
+                                                        .child("Open project"),
+                                                ),
+                                        ),
                                 )
                             })
                             .children(grouped_changes.into_iter().map(|(change, scope)| {
@@ -1213,9 +1300,11 @@ impl TerminalView {
                                     .map(|parent| parent.to_string_lossy().into_owned());
                                 div()
                                     .id(SharedString::from(format!("workbench-change-{path}")))
-                                    .h(px(32.0))
+                                    .min_h(px(44.0))
+                                    .py(px(tokens::space::SM))
                                     .px(px(tokens::space::SM))
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap(px(tokens::space::SM))
                                     .rounded(px(tokens::radius::MD))
@@ -1235,6 +1324,7 @@ impl TerminalView {
                                             .text_color(hsla(t.warning))
                                             .child(change.kind.letter()),
                                     )
+                                    .child(crate::file_icons::file_icon(Path::new(&path), t))
                                     .when(row_reviewed, |d| {
                                         d.child(
                                             div()
@@ -1248,8 +1338,8 @@ impl TerminalView {
                                             .min_w(px(0.0))
                                             .flex_1()
                                             .flex()
-                                            .items_baseline()
-                                            .gap(px(tokens::space::SM))
+                                            .flex_col()
+                                            .gap(px(2.0))
                                             .overflow_hidden()
                                             .whitespace_nowrap()
                                             .text_size(px(tokens::text::SM))
@@ -1271,70 +1361,95 @@ impl TerminalView {
                                                     .child(SharedString::from(parent))
                                             })),
                                     )
-                                    .when(scope == surface::DiffScope::Unstaged, |d| {
+                                    .when(active, |d| {
                                         d.child(
                                             div()
-                                                .id(SharedString::from(format!("discard-{path}")))
-                                                .px(px(tokens::space::XS))
-                                                .rounded(px(tokens::radius::SM))
-                                                .text_size(px(tokens::text::XS))
-                                                .text_color(hsla(t.danger))
-                                                .hover(|style| {
-                                                    style.bg(with_alpha(hsla(t.danger), 0.10))
+                                                .w_full()
+                                                .flex()
+                                                .items_center()
+                                                .justify_end()
+                                                .gap(px(tokens::space::SM))
+                                                .when(scope == surface::DiffScope::Unstaged, |d| {
+                                                    d.child(
+                                                        div()
+                                                            .id(SharedString::from(format!(
+                                                                "discard-{path}"
+                                                            )))
+                                                            .px(px(tokens::space::XS))
+                                                            .rounded(px(tokens::radius::SM))
+                                                            .text_size(px(tokens::text::XS))
+                                                            .text_color(hsla(t.danger))
+                                                            .hover(|style| {
+                                                                style.bg(with_alpha(
+                                                                    hsla(t.danger),
+                                                                    0.10,
+                                                                ))
+                                                            })
+                                                            .on_click(cx.listener(
+                                                                move |this, _, _, cx| {
+                                                                    this.begin_git_discard(
+                                                                        discard_change.clone(),
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            ))
+                                                            .child("Discard"),
+                                                    )
                                                 })
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.begin_git_discard(
-                                                        discard_change.clone(),
-                                                        cx,
-                                                    );
-                                                }))
-                                                .child("Discard"),
-                                        )
-                                    })
-                                    .when(scope == surface::DiffScope::Unstaged, |d| {
-                                        d.child(
-                                            div()
-                                                .id(SharedString::from(format!("stage-{path}")))
-                                                .px(px(tokens::space::XS))
-                                                .rounded(px(tokens::radius::SM))
-                                                .text_size(px(tokens::text::XS))
-                                                .text_color(hsla(t.text_faint))
-                                                .hover(|style| {
-                                                    style
-                                                        .bg(hsla(t.bg_hover))
-                                                        .text_color(hsla(t.text))
+                                                .when(scope == surface::DiffScope::Unstaged, |d| {
+                                                    d.child(
+                                                        div()
+                                                            .id(SharedString::from(format!(
+                                                                "stage-{path}"
+                                                            )))
+                                                            .px(px(tokens::space::XS))
+                                                            .rounded(px(tokens::radius::SM))
+                                                            .text_size(px(tokens::text::XS))
+                                                            .text_color(hsla(t.text_faint))
+                                                            .hover(|style| {
+                                                                style
+                                                                    .bg(hsla(t.bg_hover))
+                                                                    .text_color(hsla(t.text))
+                                                            })
+                                                            .on_click(cx.listener(
+                                                                move |this, _, _, cx| {
+                                                                    this.mutate_workbench_change(
+                                                                        stage_change.clone(),
+                                                                        true,
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            ))
+                                                            .child("Stage"),
+                                                    )
                                                 })
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.mutate_workbench_change(
-                                                        stage_change.clone(),
-                                                        true,
-                                                        cx,
-                                                    );
-                                                }))
-                                                .child("Stage"),
-                                        )
-                                    })
-                                    .when(scope == surface::DiffScope::Staged, |d| {
-                                        d.child(
-                                            div()
-                                                .id(SharedString::from(format!("unstage-{path}")))
-                                                .px(px(tokens::space::XS))
-                                                .rounded(px(tokens::radius::SM))
-                                                .text_size(px(tokens::text::XS))
-                                                .text_color(hsla(t.text_faint))
-                                                .hover(|style| {
-                                                    style
-                                                        .bg(hsla(t.bg_hover))
-                                                        .text_color(hsla(t.text))
-                                                })
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.mutate_workbench_change(
-                                                        unstage_change.clone(),
-                                                        false,
-                                                        cx,
-                                                    );
-                                                }))
-                                                .child("Unstage"),
+                                                .when(scope == surface::DiffScope::Staged, |d| {
+                                                    d.child(
+                                                        div()
+                                                            .id(SharedString::from(format!(
+                                                                "unstage-{path}"
+                                                            )))
+                                                            .px(px(tokens::space::XS))
+                                                            .rounded(px(tokens::radius::SM))
+                                                            .text_size(px(tokens::text::XS))
+                                                            .text_color(hsla(t.text_faint))
+                                                            .hover(|style| {
+                                                                style
+                                                                    .bg(hsla(t.bg_hover))
+                                                                    .text_color(hsla(t.text))
+                                                            })
+                                                            .on_click(cx.listener(
+                                                                move |this, _, _, cx| {
+                                                                    this.mutate_workbench_change(
+                                                                        unstage_change.clone(),
+                                                                        false,
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            ))
+                                                            .child("Unstage"),
+                                                    )
+                                                }),
                                         )
                                     })
                                     .into_any_element()
@@ -1499,7 +1614,15 @@ impl TerminalView {
                     .justify_center()
                     .text_size(px(tokens::text::SM))
                     .text_color(hsla(t.text_faint))
-                    .child("Choose a file to inspect its changes")
+                    .child(if self.git_error.is_some() {
+                        "Open a Git project or retry to see changes"
+                    } else if self.git_loading {
+                        "Reading repository…"
+                    } else if self.changes.as_ref().is_some_and(Vec::is_empty) {
+                        "No changes to review"
+                    } else {
+                        "Choose a file to inspect its changes"
+                    })
             })
             .when(has_selection && self.git_diff_loading, |d| {
                 d.flex()
@@ -1647,6 +1770,14 @@ impl TerminalView {
 
     pub(super) fn workbench_files(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let t = &self.theme;
+        let separate_explorer = self
+            .workspace_layouts
+            .get(&self.workspace)
+            .is_some_and(|tree| {
+                tree.areas()
+                    .iter()
+                    .any(|area| area.editor.tag() == EditorKindTag::Outliner)
+            });
         let Some(root) = self.local_project_root.as_deref() else {
             return div()
                 .id("workbench-files")
@@ -1668,6 +1799,7 @@ impl TerminalView {
         };
         div()
             .id("workbench-files")
+            .min_w(px(0.0))
             .flex_1()
             .min_h(px(0.0))
             .flex()
@@ -1675,25 +1807,30 @@ impl TerminalView {
             .bg(hsla(t.bg_app))
             .child(
                 div()
-                    .px(px(tokens::space::LG))
-                    .py(px(tokens::space::MD))
+                    .px(px(tokens::space::MD))
+                    .py(px(tokens::space::SM))
                     .flex()
-                    .items_start()
+                    .items_center()
                     .justify_between()
                     .border_b_1()
                     .border_color(hsla(t.border))
                     .bg(hsla(t.bg_panel))
                     .child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap(px(tokens::space::MD))
+                            .min_w(px(0.0))
+                            .flex_1()
                             .child(
                                 div()
-                                    .text_size(px(tokens::text::XL))
+                                    .text_size(px(tokens::text::SM))
                                     .text_color(hsla(t.text))
-                                    .child("Project files"),
+                                    .child("Files"),
                             )
                             .child(
                                 div()
-                                    .mt(px(2.0))
+                                    .min_w(px(0.0))
                                     .max_w(px(460.0))
                                     .overflow_hidden()
                                     .whitespace_nowrap()
@@ -1723,7 +1860,7 @@ impl TerminalView {
                                         "Refresh"
                                     }),
                             )
-                            .child(self.file_mode_switch(cx)),
+                            .when(!separate_explorer, |d| d.child(self.file_mode_switch(cx))),
                     ),
             )
             .child(
@@ -1731,38 +1868,40 @@ impl TerminalView {
                     .flex_1()
                     .min_h(px(0.0))
                     .flex()
-                    .child(
-                        div()
-                            .id("project-file-explorer")
-                            .w(px(310.0))
-                            .min_w(px(260.0))
-                            .h_full()
-                            .flex_none()
-                            .overflow_y_scroll()
-                            .p(px(tokens::space::SM))
-                            .border_r_1()
-                            .border_color(hsla(t.border))
-                            .bg(hsla(t.bg_panel))
-                            .when(self.project_files_loading && entries.is_empty(), |d| {
-                                d.child(
-                                    div()
-                                        .p(px(tokens::space::SM))
-                                        .text_color(hsla(t.text_faint))
-                                        .child("Loading project files…"),
-                                )
-                            })
-                            .when_some(self.project_files_error.clone(), |d, error| {
-                                d.child(
-                                    div()
-                                        .p(px(tokens::space::SM))
-                                        .text_color(hsla(t.danger))
-                                        .child(SharedString::from(format!(
-                                            "Could not read project files: {error}"
-                                        ))),
-                                )
-                            })
-                            .child(content),
-                    )
+                    .when(!separate_explorer, |d| {
+                        d.child(
+                            div()
+                                .id("project-file-explorer")
+                                .w(px(260.0))
+                                .min_w(px(180.0))
+                                .h_full()
+                                .flex_none()
+                                .overflow_y_scroll()
+                                .p(px(tokens::space::SM))
+                                .border_r_1()
+                                .border_color(hsla(t.border))
+                                .bg(hsla(t.bg_panel))
+                                .when(self.project_files_loading && entries.is_empty(), |d| {
+                                    d.child(
+                                        div()
+                                            .p(px(tokens::space::SM))
+                                            .text_color(hsla(t.text_faint))
+                                            .child("Loading project files…"),
+                                    )
+                                })
+                                .when_some(self.project_files_error.clone(), |d, error| {
+                                    d.child(
+                                        div()
+                                            .p(px(tokens::space::SM))
+                                            .text_color(hsla(t.danger))
+                                            .child(SharedString::from(format!(
+                                                "Could not read project files: {error}"
+                                            ))),
+                                    )
+                                })
+                                .child(content),
+                        )
+                    })
                     .child(self.project_file_editor(cx)),
             )
     }
@@ -1848,6 +1987,10 @@ impl TerminalView {
                     .bg(hsla(t.bg_panel))
                     .text_size(px(tokens::text::SM))
                     .text_color(hsla(t.text_muted))
+                    .gap(px(tokens::space::SM))
+                    .when_some(self.selected_project_file.as_deref(), |d, path| {
+                        d.child(crate::file_icons::file_icon(path, t))
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -2226,7 +2369,7 @@ impl TerminalView {
                                         .items_center()
                                         .gap(px(tokens::space::SM))
                                         .child(if collapsed { "▸" } else { "▾" })
-                                        .child(group.icon())
+                                        .child(crate::icons::icon(group.icon(), hsla(t.text_muted)))
                                         .child(label),
                                 )
                                 .child(SharedString::from(entries.len().to_string())),
@@ -2243,7 +2386,7 @@ impl TerminalView {
                                             })
                                             .count()
                                             .saturating_sub(1);
-                                        self.smart_file_row(entry, group.icon(), descendants)
+                                        self.smart_file_row(entry, group.icon(), descendants, cx)
                                             .into_any_element()
                                     })),
                             )
@@ -2268,65 +2411,241 @@ impl TerminalView {
             && folders
                 .iter()
                 .all(|path| self.collapsed_file_paths.contains(path));
-        let visible: Vec<_> = entries
-            .iter()
-            .filter(|entry| !self.file_entry_hidden(entry))
-            .collect();
-        let folder_action = folders.clone();
+        let visible = file_browser::visible_indices(
+            entries,
+            &self.collapsed_file_paths,
+            &self.file_browser.query,
+        );
+        let searching = !self.file_browser.query.trim().is_empty();
+        let files = entries.iter().filter(|entry| !entry.is_dir).count();
+        let query = if self.file_browser.query.is_empty() {
+            if cfg!(target_os = "macos") {
+                "Find a file…  ⌘P".to_owned()
+            } else {
+                "Find a file…  Ctrl P".to_owned()
+            }
+        } else {
+            self.file_browser.query.clone()
+        };
+        let copy_path = self
+            .file_browser
+            .selected
+            .clone()
+            .or_else(|| self.selected_project_file.clone());
         div()
-            .rounded(px(tokens::radius::LG))
-            .border_1()
-            .border_color(hsla(t.border))
+            .id("file-browser")
+            .size_full()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .flex()
+            .flex_col()
             .bg(hsla(t.bg_panel))
-            .overflow_hidden()
             .child(
                 div()
                     .h(px(34.0))
-                    .px(px(tokens::space::MD))
+                    .flex_none()
+                    .px(px(tokens::space::SM))
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(hsla(t.border))
-                    .text_size(px(tokens::text::XS))
-                    .text_color(hsla(t.text_faint))
-                    .child("FOLDERS & FILES")
+                    .gap(px(tokens::space::SM))
                     .child(
                         div()
-                            .id("file-tree-collapse-all")
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_size(px(tokens::text::SM))
+                            .text_color(hsla(t.text))
+                            .child(SharedString::from(self.project_name())),
+                    )
+                    .child(
+                        div()
+                            .id("file-browser-refresh")
                             .px(px(tokens::space::XS))
-                            .py(px(2.0))
-                            .rounded(px(tokens::radius::SM))
-                            .hover(|style| style.bg(hsla(t.bg_hover)).text_color(hsla(t.text)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.set_file_tree_collapsed(
-                                    folder_action.clone(),
-                                    !all_collapsed,
-                                    cx,
-                                );
-                            }))
-                            .child(if all_collapsed {
-                                "Expand all"
+                            .text_size(px(tokens::text::XS))
+                            .text_color(hsla(t.text_muted))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_project_files(cx)))
+                            .child(if self.project_files_loading {
+                                "Scanning…"
                             } else {
-                                "Collapse all"
+                                "Refresh"
                             }),
                     ),
             )
             .child(
-                div().p(px(tokens::space::XS)).children(
-                    visible
-                        .into_iter()
-                        .map(|entry| self.file_tree_row(entry, cx)),
-                ),
+                div()
+                    .id("file-browser-search")
+                    .h(px(30.0))
+                    .flex_none()
+                    .mx(px(tokens::space::XS))
+                    .px(px(tokens::space::SM))
+                    .flex()
+                    .items_center()
+                    .gap(px(tokens::space::SM))
+                    .rounded(px(tokens::radius::SM))
+                    .border_1()
+                    .border_color(hsla(
+                        if self.file_browser.focus == Some(file_browser::BrowserFocus::Search) {
+                            t.accent
+                        } else {
+                            t.border
+                        },
+                    ))
+                    .bg(hsla(t.bg_app))
+                    .cursor_text()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.file_browser.focus = Some(file_browser::BrowserFocus::Search);
+                        cx.notify();
+                    }))
+                    .child(crate::icons::icon("⌕", hsla(t.text_faint)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_size(px(tokens::text::XS))
+                            .text_color(hsla(if searching { t.text } else { t.text_faint }))
+                            .child(SharedString::from(format!(
+                                "{query}{}",
+                                if self.file_browser.focus
+                                    == Some(file_browser::BrowserFocus::Search)
+                                {
+                                    "▏"
+                                } else {
+                                    ""
+                                }
+                            ))),
+                    )
+                    .when(searching, |d| {
+                        d.child(
+                            div()
+                                .id("file-browser-clear")
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.file_browser.query.clear();
+                                    this.file_browser.focus =
+                                        Some(file_browser::BrowserFocus::Search);
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }))
+                                .child(crate::icons::icon("×", hsla(t.text_muted))),
+                        )
+                    }),
             )
-    }
-
-    fn file_entry_hidden(&self, entry: &ProjectFileEntry) -> bool {
-        entry
-            .path
-            .ancestors()
-            .skip(1)
-            .any(|parent| self.collapsed_file_paths.contains(parent))
+            .child(
+                div()
+                    .h(px(30.0))
+                    .flex_none()
+                    .px(px(tokens::space::SM))
+                    .flex()
+                    .items_center()
+                    .gap(px(tokens::space::SM))
+                    .text_size(px(tokens::text::XS))
+                    .text_color(hsla(t.text_faint))
+                    .child(div().flex_1().child(SharedString::from(if searching {
+                        format!("{} matches", visible.len())
+                    } else {
+                        format!("{files} files")
+                    })))
+                    .when(self.selected_project_file.is_some(), |d| {
+                        d.child(
+                            div()
+                                .id("file-browser-reveal")
+                                .text_color(hsla(t.text_muted))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| this.reveal_active_file(cx)))
+                                .child("Reveal"),
+                        )
+                    })
+                    .when(!searching, |d| {
+                        d.child(
+                            div()
+                                .id("file-tree-collapse-all")
+                                .text_color(hsla(t.text_muted))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_file_tree_collapsed(
+                                        folders.clone(),
+                                        !all_collapsed,
+                                        cx,
+                                    )
+                                }))
+                                .child(if all_collapsed {
+                                    "Expand all"
+                                } else {
+                                    "Collapse all"
+                                }),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .id("file-browser-rows")
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.file_browser.scroll)
+                    .when(visible.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .p(px(tokens::space::MD))
+                                .text_size(px(tokens::text::SM))
+                                .text_color(hsla(t.text_muted))
+                                .child(if self.project_files_loading {
+                                    "Scanning project files…"
+                                } else if searching {
+                                    "No matching files. Try a name or part of its path."
+                                } else {
+                                    "No project files to show."
+                                }),
+                        )
+                    })
+                    .children(
+                        visible
+                            .into_iter()
+                            .map(|index| self.file_tree_row(&entries[index], cx)),
+                    ),
+            )
+            .child(
+                div()
+                    .min_h(px(24.0))
+                    .flex_none()
+                    .px(px(tokens::space::SM))
+                    .py(px(4.0))
+                    .border_t_1()
+                    .border_color(hsla(t.border))
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(tokens::space::SM))
+                    .text_size(px(tokens::text::XS))
+                    .text_color(hsla(t.text_faint))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(if entries.len() >= MAX_PROJECT_ENTRIES {
+                                "Index limit reached"
+                            } else {
+                                "↑↓ navigate · Enter open"
+                            }),
+                    )
+                    .when_some(copy_path, |d, path| {
+                        d.child(
+                            div()
+                                .id("file-browser-copy-path")
+                                .cursor_pointer()
+                                .text_color(hsla(t.text_muted))
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        path.display().to_string(),
+                                    ))
+                                })
+                                .child("Copy path"),
+                        )
+                    }),
+            )
     }
 
     fn file_tree_row(
@@ -2336,6 +2655,9 @@ impl TerminalView {
     ) -> impl IntoElement {
         let t = &self.theme;
         let collapsed = self.collapsed_file_paths.contains(&entry.path);
+        let searching = !self.file_browser.query.trim().is_empty();
+        let keyboard_selected = self.file_browser.selected.as_ref() == Some(&entry.path)
+            && self.file_browser.focus.is_some();
         let path = entry.path.clone();
         let folder_path = path.clone();
         let file_path = path.clone();
@@ -2360,28 +2682,36 @@ impl TerminalView {
                 "file-tree-{}",
                 entry.path.display()
             )))
-            .h(px(26.0))
-            .pl(px(tokens::space::SM + entry.depth as f32 * 14.0))
+            .h(px(if searching { 44.0 } else { 28.0 }))
+            .pl(px(tokens::space::SM
+                + if searching {
+                    0.0
+                } else {
+                    entry.depth as f32 * 14.0
+                }))
             .pr(px(tokens::space::SM))
             .flex()
             .items_center()
             .gap(px(tokens::space::SM))
             .rounded(px(tokens::radius::SM))
             .text_size(px(tokens::text::SM))
-            .text_color(hsla(if entry.is_dir {
-                t.text_muted
-            } else {
-                t.text_faint
-            }))
+            .text_color(hsla(t.text_muted))
+            .when(
+                self.selected_project_file.as_ref() == Some(&entry.path) || keyboard_selected,
+                |d| d.bg(hsla(t.bg_selected)).text_color(hsla(t.text)),
+            )
             .when(entry.is_dir, |d| {
                 d.cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.file_browser.focus = Some(file_browser::BrowserFocus::Tree);
+                        this.file_browser.selected = Some(folder_path.clone());
                         this.toggle_file_path(folder_path.clone(), cx);
                     }))
             })
             .when(!entry.is_dir, |d| {
                 d.cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.file_browser.focus = Some(file_browser::BrowserFocus::Tree);
                         this.select_project_file(file_path.clone(), cx);
                     }))
             })
@@ -2390,26 +2720,48 @@ impl TerminalView {
                     .bg(with_alpha(hsla(t.text), 0.05))
                     .text_color(hsla(t.text))
             })
-            .child(
-                div()
-                    .w(px(12.0))
-                    .text_color(hsla(t.text_faint))
-                    .child(if entry.is_dir {
-                        if collapsed {
-                            "▸"
-                        } else {
-                            "▾"
-                        }
-                    } else {
-                        "·"
-                    }),
-            )
+            .child(div().w(px(10.0)).flex_none().when(entry.is_dir, |d| {
+                d.child(crate::icons::icon(
+                    if collapsed { "▸" } else { "▾" },
+                    hsla(t.text_faint),
+                ))
+            }))
+            .child(if entry.is_dir {
+                crate::icons::icon("folder", hsla(t.accent))
+            } else {
+                crate::file_icons::file_icon(&entry.path, t)
+            })
             .child(
                 div()
                     .flex_1()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(SharedString::from(label)),
+                    .min_w(px(0.0))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(SharedString::from(label)),
+                    )
+                    .when(searching, |d| {
+                        d.child(
+                            div()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(px(tokens::text::XS))
+                                .text_color(hsla(t.text_faint))
+                                .child(SharedString::from(
+                                    entry
+                                        .path
+                                        .parent()
+                                        .filter(|p| !p.as_os_str().is_empty())
+                                        .map_or_else(
+                                            || "Project root".into(),
+                                            |p| p.display().to_string(),
+                                        ),
+                                )),
+                        )
+                    }),
             )
             .when(dirty, |d| {
                 d.child(div().text_color(hsla(t.accent)).child("●"))
@@ -2421,11 +2773,28 @@ impl TerminalView {
         entry: &ProjectFileEntry,
         icon: &'static str,
         descendants: usize,
+        cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let t = &self.theme;
         let label = entry.path.to_string_lossy().into_owned();
+        let path = entry.path.clone();
+        let is_dir = entry.is_dir;
         div()
-            .h(px(26.0))
+            .id(SharedString::from(format!(
+                "smart-file-{}",
+                entry.path.display()
+            )))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if is_dir {
+                    this.file_explorer_mode = FileExplorerMode::Tree;
+                    this.collapsed_file_paths.remove(&path);
+                    cx.notify();
+                } else {
+                    this.select_project_file(path.clone(), cx);
+                }
+            }))
+            .h(px(28.0))
             .pl(px(tokens::space::SM))
             .pr(px(tokens::space::SM))
             .flex()
@@ -2433,19 +2802,21 @@ impl TerminalView {
             .gap(px(tokens::space::SM))
             .rounded(px(tokens::radius::SM))
             .text_size(px(tokens::text::SM))
-            .text_color(hsla(if entry.is_dir {
-                t.text_muted
-            } else {
-                t.text_faint
-            }))
+            .text_color(hsla(t.text_muted))
             .hover(|style| {
                 style
                     .bg(with_alpha(hsla(t.text), 0.05))
                     .text_color(hsla(t.text))
             })
-            .child(div().w(px(12.0)).text_color(hsla(t.text_faint)).child(icon))
+            .child(if entry.is_dir {
+                crate::icons::icon(icon, hsla(t.text_muted))
+            } else {
+                crate::file_icons::file_icon(&entry.path, t)
+            })
             .child(
                 div()
+                    .flex_1()
+                    .min_w(px(0.0))
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .child(SharedString::from(label)),
@@ -2470,7 +2841,10 @@ impl TerminalView {
             cancel: &std::sync::atomic::AtomicBool,
             output: &mut Vec<ProjectFileEntry>,
         ) {
-            if depth > MAX_PROJECT_DEPTH || cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            if depth > MAX_PROJECT_DEPTH
+                || output.len() >= MAX_PROJECT_ENTRIES
+                || cancel.load(std::sync::atomic::Ordering::Relaxed)
+            {
                 return;
             }
             let Ok(read_dir) = std::fs::read_dir(dir) else {
@@ -2479,10 +2853,12 @@ impl TerminalView {
             let mut entries: Vec<_> = read_dir.flatten().collect();
             entries.sort_by_key(|entry| {
                 let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
-                (!is_dir, entry.file_name())
+                (!is_dir, entry.file_name().to_string_lossy().to_lowercase())
             });
             for entry in entries {
-                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                if output.len() >= MAX_PROJECT_ENTRIES
+                    || cancel.load(std::sync::atomic::Ordering::Relaxed)
+                {
                     return;
                 }
                 let path = entry.path();
@@ -2916,24 +3292,41 @@ impl TerminalView {
         }
     }
 
+    fn update_canvas_area(&mut self, area_id: Option<AreaId>, edit: impl FnOnce(&mut CanvasState)) {
+        let mut next = area_id
+            .and_then(|id| {
+                self.workspace_layouts
+                    .values()
+                    .find_map(|tree| match tree.editor(id) {
+                        Some(EditorKind::GraphCanvas(state)) => Some(state.clone()),
+                        _ => None,
+                    })
+            })
+            .unwrap_or_else(|| self.canvas_state.clone());
+        edit(&mut next);
+        self.canvas_state = next.clone();
+        for tree in self.workspace_layouts.values_mut() {
+            for area in tree.areas_mut() {
+                if area_id.is_none() || area_id == Some(area.id) {
+                    if let EditorKind::GraphCanvas(state) = &mut area.editor {
+                        *state = next.clone();
+                    }
+                }
+            }
+        }
+        self.persist_layout();
+    }
+
     pub(super) fn set_canvas_lens(
         &mut self,
         area_id: Option<AreaId>,
         lens: crate::panes::CanvasLens,
         cx: &mut Context<'_, Self>,
     ) {
-        self.canvas_state.lens = lens;
-        self.canvas_state.reset_view();
-        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            for area in tab.layout.areas_mut() {
-                if area_id.is_none() || area_id == Some(area.id) {
-                    if let EditorKind::GraphCanvas(state) = &mut area.editor {
-                        state.lens = lens;
-                        state.reset_view();
-                    }
-                }
-            }
-        }
+        self.update_canvas_area(area_id, |state| {
+            state.lens = lens;
+            state.reset_view();
+        });
         cx.notify();
     }
 
@@ -2958,8 +3351,8 @@ impl TerminalView {
             .map(|n| n.kind.badge().to_owned())
             .unwrap_or_else(|| "NODE".into());
 
-        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            for area in tab.layout.areas_mut() {
+        for tree in self.workspace_layouts.values_mut() {
+            for area in tree.areas_mut() {
                 match &mut area.editor {
                     EditorKind::GraphCanvas(state) => {
                         state.selected_node = Some(node_id.clone());
@@ -2974,6 +3367,7 @@ impl TerminalView {
         }
 
         if let Some((rel_path, line)) = matched.as_ref().and_then(|n| n.file_target.clone()) {
+            self.reveal_code_editor(cx);
             self.open_project_file(rel_path.clone(), cx);
             if let Some(line_no) = line {
                 if let Some(root) = self
@@ -3018,17 +3412,7 @@ impl TerminalView {
         delta: f32,
         cx: &mut Context<'_, Self>,
     ) {
-        self.canvas_state.zoom_by(delta);
-        let next = self.canvas_state.clone();
-        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            for area in tab.layout.areas_mut() {
-                if area_id.is_none() || area_id == Some(area.id) {
-                    if let EditorKind::GraphCanvas(state) = &mut area.editor {
-                        *state = next.clone();
-                    }
-                }
-            }
-        }
+        self.update_canvas_area(area_id, |state| state.zoom_by(delta));
         cx.notify();
     }
 
@@ -3039,17 +3423,7 @@ impl TerminalView {
         dy: f32,
         cx: &mut Context<'_, Self>,
     ) {
-        self.canvas_state.pan_by(dx, dy);
-        let next = self.canvas_state.clone();
-        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            for area in tab.layout.areas_mut() {
-                if area_id.is_none() || area_id == Some(area.id) {
-                    if let EditorKind::GraphCanvas(state) = &mut area.editor {
-                        *state = next.clone();
-                    }
-                }
-            }
-        }
+        self.update_canvas_area(area_id, |state| state.pan_by(dx, dy));
         cx.notify();
     }
 
@@ -3058,17 +3432,7 @@ impl TerminalView {
         area_id: Option<AreaId>,
         cx: &mut Context<'_, Self>,
     ) {
-        self.canvas_state.reset_view();
-        let next = self.canvas_state.clone();
-        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            for area in tab.layout.areas_mut() {
-                if area_id.is_none() || area_id == Some(area.id) {
-                    if let EditorKind::GraphCanvas(state) = &mut area.editor {
-                        *state = next.clone();
-                    }
-                }
-            }
-        }
+        self.update_canvas_area(area_id, CanvasState::reset_view);
         cx.notify();
     }
 
@@ -3091,11 +3455,15 @@ impl TerminalView {
         let zoom_pct = (state.zoom * 100.0).round() as i32;
         let card_w = (224.0 * state.zoom).clamp(164.0, 320.0);
         let port_y_offset = 42.0 * state.zoom;
+        let to_screen = |x, y| {
+            let (x, y) = state.world_to_screen(x, y);
+            (x, y + 44.0)
+        };
         let node_positions: HashMap<String, (f32, f32)> = nodes
             .iter()
-            .map(|n| (n.id.clone(), state.world_to_screen(n.world_x, n.world_y)))
+            .map(|n| (n.id.clone(), to_screen(n.world_x, n.world_y)))
             .collect();
-        let (origin_x, origin_y) = state.world_to_screen(0.0, 0.0);
+        let (origin_x, origin_y) = to_screen(0.0, 0.0);
 
         div()
             .id(SharedString::from(match area_id {
@@ -3147,7 +3515,7 @@ impl TerminalView {
                         (0..16).map(move |col| {
                             let wx = (col as f32) * 96.0 + 16.0;
                             let wy = (row as f32) * 72.0 + 16.0;
-                            let (sx, sy) = state.world_to_screen(wx, wy);
+                            let (sx, sy) = to_screen(wx, wy);
                             let major = row % 3 == 0 && col % 3 == 0;
                             div()
                                 .absolute()
@@ -3212,7 +3580,7 @@ impl TerminalView {
                 )
             }))
             .children(nodes.into_iter().map(|node| {
-                let (sx, sy) = state.world_to_screen(node.world_x, node.world_y);
+                let (sx, sy) = to_screen(node.world_x, node.world_y);
                 let is_selected = selected_id == Some(node.id.as_str());
                 let badge_color = match node.kind {
                     surface::CanvasNodeKind::Daemon | surface::CanvasNodeKind::Agent => {
@@ -3237,13 +3605,13 @@ impl TerminalView {
                     }
                 };
                 let status_pill = if is_selected {
-                    "SELECTED"
+                    "Selected"
                 } else if node.file_target.is_some() {
-                    "OPEN CODE"
+                    "Open file"
                 } else if node.healthy {
-                    "READY"
+                    "Ready"
                 } else {
-                    "ATTENTION"
+                    "Attention"
                 };
                 let node_id = node.id.clone();
                 div()
@@ -3295,44 +3663,51 @@ impl TerminalView {
                             .bg(hsla(badge_color)),
                     )
                     // Node header bar
-                    .child(
-                        div()
-                            .h(px(24.0))
-                            .px(px(tokens::space::SM))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .border_b_1()
-                            .border_color(hsla(t.border))
-                            .bg(with_alpha(hsla(badge_color), 0.12))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(5.0))
-                                    .child(div().size(px(6.0)).rounded_full().bg(hsla(badge_color)))
-                                    .child(
-                                        div()
-                                            .text_size(px(10.0))
-                                            .text_color(hsla(badge_color))
-                                            .child(node.kind.badge()),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .px(px(4.0))
-                                    .py(px(1.0))
-                                    .rounded(px(3.0))
-                                    .bg(hsla(t.bg_app))
-                                    .text_size(px(9.0))
-                                    .text_color(hsla(if is_selected {
-                                        t.accent
-                                    } else {
-                                        t.text_faint
-                                    }))
-                                    .child(status_pill),
-                            ),
-                    )
+                    .when(state.zoom >= 1.0, |d| {
+                        d.child(
+                            div()
+                                .h(px(24.0))
+                                .px(px(tokens::space::SM))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .border_b_1()
+                                .border_color(hsla(t.border))
+                                .bg(with_alpha(hsla(badge_color), 0.12))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.0))
+                                        .child(
+                                            div()
+                                                .size(px(6.0))
+                                                .rounded_full()
+                                                .bg(hsla(badge_color)),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(tokens::text::XS))
+                                                .text_color(hsla(badge_color))
+                                                .child(node.kind.badge()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .px(px(4.0))
+                                        .py(px(1.0))
+                                        .rounded(px(3.0))
+                                        .bg(hsla(t.bg_app))
+                                        .text_size(px(tokens::text::XS))
+                                        .text_color(hsla(if is_selected {
+                                            t.accent
+                                        } else {
+                                            t.text_faint
+                                        }))
+                                        .child(status_pill),
+                                ),
+                        )
+                    })
                     // Node body & telemetry footer
                     .child(
                         div()
@@ -3348,29 +3723,26 @@ impl TerminalView {
                                     .text_color(hsla(t.text))
                                     .child(SharedString::from(node.title)),
                             )
-                            .child(
-                                div()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_size(px(tokens::text::XS))
-                                    .text_color(hsla(t.text_muted))
-                                    .child(SharedString::from(node.subtitle)),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(3.0))
-                                    .px(px(6.0))
-                                    .py(px(3.0))
-                                    .rounded(px(tokens::radius::SM))
-                                    .bg(hsla(t.bg_app))
-                                    .border_1()
-                                    .border_color(hsla(t.border))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_size(px(10.0))
-                                    .text_color(hsla(t.text_faint))
-                                    .child(SharedString::from(node.detail)),
-                            ),
+                            .when(state.zoom >= 0.65, |d| {
+                                d.child(
+                                    div()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_size(px(tokens::text::XS))
+                                        .text_color(hsla(t.text_muted))
+                                        .child(SharedString::from(node.subtitle)),
+                                )
+                            })
+                            .when(state.zoom >= 1.0, |d| {
+                                d.child(
+                                    div()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_size(px(tokens::text::XS))
+                                        .text_color(hsla(t.text_faint))
+                                        .child(SharedString::from(node.detail)),
+                                )
+                            }),
                     )
             }))
             .child(
@@ -3379,9 +3751,13 @@ impl TerminalView {
                     .absolute()
                     .top(px(tokens::space::SM))
                     .left(px(tokens::space::SM))
+                    .right(px(tokens::space::SM))
+                    .max_w(px(520.0))
                     .px(px(4.0))
-                    .h(px(28.0))
+                    .min_h(px(28.0))
+                    .py(px(4.0))
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(3.0))
                     .rounded(px(tokens::radius::MD))
@@ -3410,7 +3786,7 @@ impl TerminalView {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.set_canvas_lens(area_id, lens, cx);
                             }))
-                            .child(div().text_size(px(10.0)).child(lens.icon()))
+                            .child(crate::icons::icon(lens.icon(), hsla(t.text_muted)))
                             .child(lens.label())
                     }))
                     .child(div().px(px(3.0)).text_color(hsla(t.text_faint)).child("·"))
@@ -3422,7 +3798,7 @@ impl TerminalView {
                 // Viewport HUD toolbar (top-right)
                 div()
                     .absolute()
-                    .top(px(tokens::space::SM))
+                    .bottom(px(tokens::space::SM))
                     .right(px(tokens::space::SM))
                     .px(px(tokens::space::SM))
                     .h(px(26.0))
@@ -3539,6 +3915,9 @@ impl TerminalView {
                     .absolute()
                     .bottom(px(tokens::space::SM))
                     .left(px(tokens::space::SM))
+                    .max_w(relative(0.4))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
                     .px(px(tokens::space::SM))
                     .h(px(24.0))
                     .flex()
@@ -3548,7 +3927,7 @@ impl TerminalView {
                     .border_1()
                     .border_color(hsla(t.border))
                     .bg(hsla(t.bg_elevated))
-                    .text_size(px(10.0))
+                    .text_size(px(tokens::text::XS))
                     .text_color(hsla(t.text_faint))
                     .child(
                         div()
@@ -3556,7 +3935,7 @@ impl TerminalView {
                             .items_center()
                             .gap(px(4.0))
                             .child(div().size(px(5.0)).rounded_full().bg(hsla(t.success)))
-                            .child("Agents / Functions / PTY"),
+                            .child("Runtime"),
                     )
                     .child(
                         div()
@@ -3564,12 +3943,11 @@ impl TerminalView {
                             .items_center()
                             .gap(px(4.0))
                             .child(div().size(px(5.0)).rounded_full().bg(hsla(t.accent)))
-                            .child("Crates / Types / Git"),
+                            .child("Project structure"),
                     )
                     .child(div().child("·"))
                     .child(SharedString::from(format!(
-                        "X:{:.0} Y:{:.0} · {zoom_pct}%",
-                        state.pan_x, state.pan_y
+                        "{node_count} nodes · {edge_count} connections · {zoom_pct}%"
                     ))),
             )
     }
@@ -3594,11 +3972,32 @@ impl TerminalView {
             EditorKind::Timeline(_) => self.render_area_timeline(id, cx).into_any_element(),
             EditorKind::CodeEditor => self.workbench_files(cx).into_any_element(),
             EditorKind::GitDiff => self.workbench_changes(cx).into_any_element(),
-            EditorKind::TaskBoard => self.workbench_tasks(cx).into_any_element(),
+            EditorKind::TaskBoard => self.workbench_tasks(id, cx).into_any_element(),
             EditorKind::Services => self.render_area_services(id, cx).into_any_element(),
             EditorKind::Environment => self.render_area_environment(id, cx).into_any_element(),
             EditorKind::Terminal(_) => div().size_full().into_any_element(),
         }
+    }
+
+    pub(super) fn editor_intro(&self, title: &str, description: &str) -> gpui::Div {
+        div()
+            .pb(px(tokens::space::MD))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(tokens::space::XS))
+            .child(
+                div()
+                    .text_size(px(tokens::text::LG))
+                    .text_color(hsla(self.theme.text))
+                    .child(SharedString::from(title.to_owned())),
+            )
+            .child(
+                div()
+                    .text_size(px(tokens::text::XS))
+                    .text_color(hsla(self.theme.text_muted))
+                    .child(SharedString::from(description.to_owned())),
+            )
     }
 
     fn render_area_inspector(
@@ -3608,10 +4007,22 @@ impl TerminalView {
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let t = &self.theme;
-        let target_id = state
-            .target
-            .as_deref()
-            .or(self.inspector_state.target.as_deref());
+        let graph_visible = self
+            .workspace_layouts
+            .get(&self.workspace)
+            .is_some_and(|tree| {
+                tree.areas()
+                    .iter()
+                    .any(|area| area.editor.tag() == EditorKindTag::GraphCanvas)
+            });
+        let target_id = graph_visible
+            .then_some(
+                state
+                    .target
+                    .as_deref()
+                    .or(self.inspector_state.target.as_deref()),
+            )
+            .flatten();
         let (lens_nodes, _) = self.build_canvas_nodes_for_lens(self.canvas_state.lens);
         let selected_node = target_id.and_then(|tid| {
             lens_nodes.into_iter().find(|n| n.id == tid).or_else(|| {
@@ -3622,30 +4033,80 @@ impl TerminalView {
         let (section_title, badge_text, facts): (&str, String, Vec<(&'static str, String)>) =
             if let Some(node) = selected_node {
                 (
-                    "NODE PROPERTIES",
+                    "Graph selection",
                     node.kind.badge().to_owned(),
                     vec![
-                        ("ID", node.id),
-                        ("TYPE", node.kind.badge().to_owned()),
-                        ("TITLE", node.title),
-                        ("CONTEXT", node.subtitle),
-                        ("TELEMETRY", node.detail),
+                        ("Type", node.kind.badge().to_owned()),
+                        ("Name", node.title),
+                        ("Context", node.subtitle),
+                        ("Details", node.detail),
                         (
-                            "COORDS",
+                            "Position",
                             format!("X {:.0} · Y {:.0}", node.world_x, node.world_y),
+                        ),
+                    ],
+                )
+            } else if let Some(task) = self
+                .tasks
+                .selected
+                .and_then(|id| self.tasks.items.iter().find(|task| task.id == id))
+            {
+                (
+                    "Task",
+                    task.title.clone(),
+                    vec![
+                        ("Title", task.title.clone()),
+                        ("State", format!("{:?}", task.state)),
+                        ("Priority", format!("{:?}", task.priority)),
+                        (
+                            "Command",
+                            task.command
+                                .clone()
+                                .unwrap_or_else(|| "No command assigned".into()),
+                        ),
+                        ("Context", task.context.clone()),
+                    ],
+                )
+            } else if let Some(path) = &self.selected_project_file {
+                let buffer = self.editor_buffer.as_ref();
+                (
+                    "File",
+                    path.file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    vec![
+                        ("Path", path.display().to_string()),
+                        (
+                            "Status",
+                            if buffer.is_some_and(tf_editor::Buffer::is_dirty) {
+                                "Unsaved changes"
+                            } else {
+                                "Saved"
+                            }
+                            .into(),
+                        ),
+                        (
+                            "Language",
+                            format!("{:?}", tf_editor::Language::from_path(path)),
+                        ),
+                        (
+                            "Lines",
+                            buffer
+                                .map(|b| b.text().lines().count().to_string())
+                                .unwrap_or_else(|| "Not loaded".into()),
                         ),
                     ],
                 )
             } else {
                 let (open, active, blocked) = self.task_summary();
                 (
-                    "WORKSPACE PROPERTIES",
+                    "Project",
                     self.workspace.label().to_owned(),
                     vec![
                         ("PROJECT", self.project_name()),
                         (
                             "BRANCH",
-                            self.discover_branch().unwrap_or_else(|| "main".into()),
+                            self.discover_branch().unwrap_or_else(|| "No branch".into()),
                         ),
                         ("LAYOUT", self.workspace.label().to_owned()),
                         (
@@ -3656,7 +4117,9 @@ impl TerminalView {
                             "DAEMON",
                             crate::remote_session::daemon_status()
                                 .status_bar_label()
-                                .unwrap_or_else(|| "Connected (v10)".into()),
+                                .unwrap_or_else(|| {
+                                    format!("Connected · protocol {}", tf_proto::PROTOCOL_VERSION)
+                                }),
                         ),
                     ],
                 )
@@ -3664,12 +4127,17 @@ impl TerminalView {
         div()
             .id(("area-inspector", id))
             .size_full()
+            .max_w(px(720.0))
             .overflow_y_scroll()
-            .p(px(tokens::space::SM))
+            .p(px(tokens::space::MD))
             .bg(hsla(t.bg_panel))
             .flex()
             .flex_col()
             .gap(px(tokens::space::SM))
+            .child(self.editor_intro(
+                "Selection details",
+                "Select a file, task or graph node to inspect its context.",
+            ))
             .child(
                 div()
                     .rounded(px(tokens::radius::MD))
@@ -3687,7 +4155,7 @@ impl TerminalView {
                             .border_b_1()
                             .border_color(hsla(t.border))
                             .bg(hsla(t.bg_elevated))
-                            .text_size(px(10.0))
+                            .text_size(px(tokens::text::XS))
                             .child(
                                 div()
                                     .text_color(hsla(t.text_muted))
@@ -3718,17 +4186,17 @@ impl TerminalView {
                     .gap(px(4.0))
                     .child(self.inspector_action(
                         "area-inspector-new-terminal",
-                        "+  Spawn Terminal Session",
+                        "Open a terminal",
                         cx.listener(|this, _, _, cx| this.new_local_tab(cx)),
                     ))
                     .child(self.inspector_action(
                         "area-inspector-new-task",
-                        "○  Create Project Task",
+                        "Create a task",
                         cx.listener(|this, _, _, cx| this.open_task_form("", "", cx)),
                     ))
                     .child(self.inspector_action(
                         "area-inspector-palette",
-                        "⌘  Open Command Palette",
+                        "Search commands",
                         cx.listener(|this, _, _, cx| this.open_palette(cx)),
                     )),
             )
@@ -3740,19 +4208,48 @@ impl TerminalView {
         _state: &ProjectTreeState,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
-        let t = &self.theme;
-        let entries = &self.project_file_entries;
         div()
             .id(("area-outliner", id))
             .size_full()
-            .overflow_y_scroll()
-            .p(px(tokens::space::SM))
-            .bg(hsla(t.bg_panel))
-            .child(self.file_tree(entries, cx))
+            .min_h(px(0.0))
+            .flex()
+            .flex_col()
+            .p(px(tokens::space::XS))
+            .bg(hsla(self.theme.bg_panel))
+            .when_some(self.project_files_error.as_deref(), |d, error| {
+                d.child(self.muted_line(error))
+            })
+            .child(self.file_tree(&self.project_file_entries, cx))
     }
 
-    pub(super) fn workbench_tasks(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    pub(super) fn workbench_tasks(
+        &self,
+        id: AreaId,
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement {
+        let area_fraction = if self.maximized_area == Some(id) {
+            1.0
+        } else {
+            self.workspace_layouts
+                .get(&self.workspace)
+                .and_then(|tree| {
+                    tree.layout(PaneRect::new(0.0, 0.0, 1.0, 1.0))
+                        .into_iter()
+                        .find(|(area, _)| *area == id)
+                        .map(|(_, rect)| rect.w)
+                })
+                .unwrap_or(1.0)
+        };
+        let compact = f32::from(self.pane_area.size.width) * area_fraction < 760.0;
         let t = &self.theme;
+        let separate_inspector = self
+            .workspace_layouts
+            .get(&self.workspace)
+            .is_some_and(|tree| {
+                tree.areas()
+                    .iter()
+                    .any(|area| area.editor.tag() == EditorKindTag::Inspector)
+            });
         let visible_indices = self.filtered_task_indices();
         let task_groups: Vec<_> = [
             (tf_proto::TaskState::Active, "IN PROGRESS"),
@@ -3794,6 +4291,7 @@ impl TerminalView {
         let showing_detail = selected_task.is_some();
         div()
             .id("workbench-tasks")
+            .min_w(px(0.0))
             .flex_1()
             .min_h(px(0.0))
             .flex()
@@ -3807,8 +4305,8 @@ impl TerminalView {
                     .border_color(hsla(t.border))
                     .bg(hsla(t.bg_panel))
                     .child(self.artifact_heading(
-                        "Project tasks",
-                        "Plan durable work and turn repeated project commands into one-click tasks",
+                        "Your work",
+                        &format!("{} / Plan, run, and pick up where you left off", self.project_name()),
                         cx,
                     ))
                     .child(
@@ -3877,23 +4375,22 @@ impl TerminalView {
                     .flex_1()
                     .min_h(px(0.0))
                     .flex()
+                    .id("workbench-task-content")
+                    .when(compact, |d| d.flex_col().overflow_y_scroll())
                     .child(
                         div()
                             .id("workbench-task-board")
                             .flex_1()
                             .min_w(px(0.0))
-                            .h_full()
-                            .overflow_y_scroll()
+                            .when(!compact, |d| d.h_full().overflow_y_scroll())
+                            .when(compact, |d| d.flex_none())
                             .p(px(tokens::space::LG))
                             .child(
                                 div()
-                                    .rounded(px(tokens::radius::LG))
-                                    .border_1()
-                                    .border_color(hsla(t.border))
                                     .bg(hsla(t.bg_panel))
                                     .overflow_hidden()
                                     .child(self.workbench_card_header(
-                                        "YOUR TASKS",
+                                        "Tasks",
                                         &self.tasks.items.len().to_string(),
                                     ))
                                     .when(self.tasks.loading, |d| {
@@ -3915,12 +4412,14 @@ impl TerminalView {
                                                 .p(px(tokens::space::LG))
                                                 .flex()
                                                 .items_start()
+                                                .flex_wrap()
                                                 .justify_between()
                                                 .gap(px(tokens::space::MD))
                                                 .bg(with_alpha(hsla(t.danger), 0.07))
                                                 .child(
                                                     div()
                                                         .flex_1()
+                                                        .min_w(px(0.0))
                                                         .text_size(px(tokens::text::SM))
                                                         .text_color(hsla(t.danger))
                                                         .child(SharedString::from(error)),
@@ -3953,11 +4452,21 @@ impl TerminalView {
                                             div()
                                                 .p(px(tokens::space::LG))
                                                 .text_size(px(tokens::text::SM))
-                                                .text_color(hsla(t.text_faint))
-                                                .child("No saved tasks. Choose a suggestion or create one from scratch."),
+                                                .text_color(hsla(t.text_muted))
+                                                .child(div().text_size(px(tokens::text::LG)).text_color(hsla(t.text)).child("What are you working on?"))
+                                                .child(div().mt(px(tokens::space::SM)).child("Create a task to keep your next step with this project, or start in the terminal."))
+                                                .child(
+                                                    div().mt(px(tokens::space::LG)).flex().flex_wrap().gap(px(tokens::space::SM))
+                                                        .child(self.inspector_action("work-empty-create", "+ Create a task", cx.listener(|this, _, _, cx| this.open_task_form("", "", cx))))
+                                                        .child(self.inspector_action("work-empty-build", "Open terminal →", cx.listener(|this, _, _, cx| this.switch_workspace(Workspace::Build, cx))))
+                                                        .child(self.inspector_action("work-empty-explore", "Browse files", cx.listener(|this, _, _, cx| this.switch_workspace(Workspace::Explore, cx))))
+                                                ),
                                         )
                                     },
                                     )
+                                    .when(!self.tasks.items.is_empty() && visible_indices.is_empty() && !self.tasks.loading, |d| {
+                                        d.child(div().p(px(tokens::space::LG)).text_size(px(tokens::text::SM)).text_color(hsla(t.text_muted)).child("No tasks match this filter. Change the filter to see your other tasks."))
+                                    })
                                     .child(
                                         div()
                                             .p(px(tokens::space::XS))
@@ -3979,15 +4488,15 @@ impl TerminalView {
                                     ),
                             ),
                     )
-                    .child(
+                    .when(!separate_inspector, |d| d.child(
                         div()
-                            .w(px(340.0))
-                            .min_w(px(300.0))
-                            .h_full()
+                            .when(!compact, |d| d.w(px(300.0)).min_w(px(260.0)).h_full())
+                            .when(compact, |d| d.w_full().min_h(px(240.0)))
                             .flex_none()
                             .flex()
                             .flex_col()
-                            .border_l_1()
+                            .when(!compact, |d| d.border_l_1())
+                            .when(compact, |d| d.border_t_1())
                             .border_color(hsla(t.border))
                             .bg(hsla(t.bg_panel))
                             .child(self.workbench_card_header(
@@ -4145,7 +4654,7 @@ impl TerminalView {
                                         .children(suggestions),
                                 )
                             })
-                    ),
+                    )),
             )
     }
 
@@ -4182,8 +4691,12 @@ impl TerminalView {
             .flex()
             .items_start()
             .justify_between()
+            .gap(px(tokens::space::MD))
+            .flex_wrap()
             .child(
                 div()
+                    .flex_1()
+                    .min_w(px(180.0))
                     .child(
                         div()
                             .text_size(px(tokens::text::XL))
@@ -4205,10 +4718,12 @@ impl TerminalView {
                     .py(px(6.0))
                     .rounded(px(tokens::radius::MD))
                     .border_1()
-                    .border_color(hsla(t.border))
+                    .border_color(hsla(t.accent))
                     .text_size(px(tokens::text::SM))
-                    .text_color(hsla(t.text_muted))
-                    .hover(|style| style.bg(hsla(t.bg_hover)).text_color(hsla(t.text)))
+                    .bg(hsla(t.accent))
+                    .text_color(hsla(t.accent_text))
+                    .cursor_pointer()
+                    .hover(|style| style.opacity(0.9))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if tasks {
                             this.open_task_form("", "", cx);
@@ -4381,16 +4896,16 @@ impl TerminalView {
             .px(px(tokens::space::SM))
             .py(px(6.0))
             .flex()
-            .items_center()
-            .justify_between()
+            .flex_col()
+            .items_start()
             .gap(px(tokens::space::SM))
             .border_b_1()
             .border_color(hsla(t.border))
             .child(
                 div()
-                    .w(px(68.0))
+                    .w_full()
                     .flex_none()
-                    .text_size(px(10.0))
+                    .text_size(px(tokens::text::XS))
                     .text_color(hsla(t.text_faint))
                     .child(label),
             )
@@ -4399,14 +4914,13 @@ impl TerminalView {
                     .flex_1()
                     .min_w(px(0.0))
                     .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_size(px(tokens::text::XS))
+                    .text_size(px(tokens::text::SM))
                     .text_color(hsla(t.text))
                     .child(SharedString::from(value.to_owned())),
             )
     }
 
-    fn inspector_action(
+    pub(super) fn inspector_action(
         &self,
         id: &'static str,
         label: &'static str,

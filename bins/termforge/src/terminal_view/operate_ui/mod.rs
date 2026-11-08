@@ -93,8 +93,8 @@ impl TerminalView {
 
     pub(super) fn operate_section(&self, title: &'static str) -> gpui::Div {
         div()
-            .pt(px(tokens::space::SM))
-            .pb(px(2.0))
+            .pt(px(tokens::space::MD))
+            .pb(px(tokens::space::XS))
             .text_size(px(tokens::text::XS))
             .text_color(hsla(self.theme.text_faint))
             .child(title)
@@ -135,8 +135,8 @@ impl TerminalView {
 
     pub(super) fn operate_section_dyn(&self, title: String) -> gpui::Div {
         div()
-            .pt(px(tokens::space::SM))
-            .pb(px(2.0))
+            .pt(px(tokens::space::MD))
+            .pb(px(tokens::space::XS))
             .text_size(px(tokens::text::XS))
             .text_color(hsla(self.theme.text_faint))
             .child(SharedString::from(title))

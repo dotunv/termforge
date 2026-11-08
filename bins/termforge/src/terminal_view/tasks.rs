@@ -766,6 +766,8 @@ impl TerminalView {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_color(hsla(t.text_muted))
+                            .font_family(self.font.family.clone())
+                            .text_size(px(tokens::text::SM))
                             .child(SharedString::from(command)),
                     )
                     .child(

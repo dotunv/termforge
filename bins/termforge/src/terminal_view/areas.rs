@@ -46,6 +46,17 @@ impl TerminalView {
             {
                 continue;
             }
+            // Upgrade only the exact former stock Work layout. Custom area
+            // compositions keep their geometry and editor choices.
+            if workspace == Workspace::Work {
+                let mut ids = tree.ids();
+                ids.sort_unstable();
+                let normalized = tree
+                    .remap(|old| 1 + ids.iter().position(|id| *id == old).unwrap_or(0) as PaneId);
+                if normalized.encode() == "h0.680(1:k,2:i)" {
+                    continue;
+                }
+            }
             // Ids only mean something within one saved file; renumber them so
             // they cannot collide with the ids of this window's panes.
             let mut ids = tree.ids();
@@ -141,6 +152,7 @@ impl TerminalView {
         self.maximized_area = None;
         self.open_area_selector = None;
         self.activity_filter_focus = false;
+        self.file_browser.focus = None;
         self.show_tab_strip = workspace.hosts_sessions();
         self.refresh_ports_if_stale(cx);
         self.persist_layout();
@@ -225,18 +237,16 @@ impl TerminalView {
             let Some(editor) = tree.editor(id).cloned() else {
                 continue;
             };
-            let border = if id == focused_id {
-                hsla(theme.accent)
-            } else {
-                hsla(theme.border_strong)
-            };
+            let border = hsla(theme.border);
             let mut tile = div()
                 .relative()
                 .size_full()
+                .min_w(px(0.0))
                 .flex()
                 .flex_col()
                 .border_1()
                 .border_color(border)
+                .rounded(px(tokens::radius::MD))
                 .bg(hsla(theme.bg_app))
                 .overflow_hidden()
                 .on_mouse_down(
@@ -249,12 +259,15 @@ impl TerminalView {
                 .child(
                     div()
                         .flex_1()
+                        .w_full()
+                        .min_w(px(0.0))
                         .min_h(px(0.0))
                         .relative()
                         .overflow_hidden()
                         .child(
                             div()
                                 .size_full()
+                                .min_w(px(0.0))
                                 .flex()
                                 .flex_col()
                                 .child(self.render_non_terminal_area(id, &editor, cx)),
@@ -271,7 +284,7 @@ impl TerminalView {
                     .top(relative(rect.y))
                     .w(relative(rect.w))
                     .h(relative(rect.h))
-                    .p(px(1.0))
+                    .p(px(tokens::space::XS))
                     .flex()
                     .flex_col()
                     .child(tile)
@@ -327,6 +340,8 @@ impl TerminalView {
         }
         div()
             .id("workspace-areas")
+            .w_full()
+            .min_w(px(0.0))
             .flex_1()
             .min_h(px(0.0))
             .relative()

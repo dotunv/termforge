@@ -6,7 +6,9 @@
 //! stopped or modified, and a probe that cannot answer says so instead of
 //! returning an empty list.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
+#[cfg(any(target_os = "linux", test))]
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
 /// Whether a capability works for an environment, and why not when it does not.
@@ -141,6 +143,7 @@ impl ListeningPort {
 /// The result of asking the operating system for listening ports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PortProbe {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Scanned(Vec<ListeningPort>),
     /// The probe cannot run here; the reason is shown to the user.
     Unsupported(String),
@@ -148,6 +151,7 @@ pub enum PortProbe {
 
 /// Raw listening-socket row from `/proc/net/tcp` or `/proc/net/tcp6`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(target_os = "linux", test))]
 pub struct RawSocket {
     pub addr: IpAddr,
     pub port: u16,
@@ -156,6 +160,7 @@ pub struct RawSocket {
 
 /// Parse `/proc/net/tcp` (`v6 == false`) or `/proc/net/tcp6` text, keeping
 /// only sockets in the listening state. Malformed rows are skipped.
+#[cfg(any(target_os = "linux", test))]
 pub fn parse_proc_net_tcp(text: &str, v6: bool) -> Vec<RawSocket> {
     text.lines()
         .skip(1)
@@ -177,6 +182,7 @@ pub fn parse_proc_net_tcp(text: &str, v6: bool) -> Vec<RawSocket> {
 
 /// Addresses in `/proc/net/tcp*` are written as native-endian 32-bit words.
 /// Linux on every supported architecture is little-endian here.
+#[cfg(any(target_os = "linux", test))]
 fn parse_proc_addr(hex: &str, v6: bool) -> Option<IpAddr> {
     if !v6 {
         let word = u32::from_str_radix(hex, 16).ok()?;

@@ -667,7 +667,10 @@ impl TerminalView {
 
         // FONTS
         let font_name = |configured: &str, shown: &str| -> String {
-            if configured.is_empty() {
+            if shown == ".SystemUIFont" && (configured.is_empty() || configured == ".SystemUIFont")
+            {
+                "System default".to_owned()
+            } else if configured.is_empty() {
                 format!("Automatic ({shown})")
             } else {
                 configured.to_owned()

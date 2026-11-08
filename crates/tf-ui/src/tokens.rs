@@ -19,12 +19,12 @@ pub mod radius {
 
 /// Type scale for UI chrome (the terminal font is user-configured).
 pub mod text {
-    pub const XS: f32 = 11.0;
-    pub const SM: f32 = 12.0;
+    pub const XS: f32 = 12.0;
+    pub const SM: f32 = 13.0;
     pub const MD: f32 = 13.0;
     pub const LG: f32 = 15.0;
-    pub const XL: f32 = 18.0;
-    pub const UI_FONT: &str = "Inter";
+    pub const XL: f32 = 17.0;
+    pub const UI_FONT: &str = ".SystemUIFont";
     pub const MONO_FONT: &str = "JetBrains Mono";
 }
 

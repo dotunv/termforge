@@ -69,6 +69,10 @@ impl TerminalView {
         let key = ks.key.as_str();
         let ctrl_shift = m.control && m.shift && !m.alt;
 
+        if self.area_selector_key(ev, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.shell_menu && key == "escape" {
             self.shell_menu = false;
             cx.notify();
@@ -114,6 +118,10 @@ impl TerminalView {
             return;
         }
         if self.palette.is_some() && self.palette_key(ev, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if self.file_browser_key(ev, cx) {
             cx.stop_propagation();
             return;
         }

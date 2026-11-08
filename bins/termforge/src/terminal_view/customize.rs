@@ -216,7 +216,12 @@ impl TerminalView {
                 let mut items = vec![PickerItem {
                     value: String::new(),
                     label: "Automatic".into(),
-                    hint: "best installed face".into(),
+                    hint: if mono {
+                        "best installed monospace"
+                    } else {
+                        "native system interface font"
+                    }
+                    .into(),
                 }];
                 items.extend(families.into_iter().map(|family| PickerItem {
                     value: family.clone(),

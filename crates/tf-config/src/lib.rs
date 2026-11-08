@@ -381,14 +381,20 @@ impl ConfigHandle {
             }
         });
 
-        let path_for_watcher = path.clone();
+        // Some native watchers report a changed directory rather than the
+        // replaced file, and macOS can resolve /tmp to /private/tmp.
+        let path_for_watcher = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
         let reload_tx_for_watcher = reload_tx.clone();
 
         let mut watcher = RecommendedWatcher::new(
             move |res: notify::Result<Event>| {
                 if let Ok(event) = res {
                     if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_))
-                        && event.paths.iter().any(|p| p == &path_for_watcher)
+                        && event.paths.iter().any(|p| {
+                            let normalized = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+                            normalized == path_for_watcher
+                                || path_for_watcher.parent() == Some(normalized.as_path())
+                        })
                     {
                         let _ = reload_tx_for_watcher.send(());
                     }

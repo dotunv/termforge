@@ -135,3 +135,85 @@ providers, and stopping a process the user did not start from TermForge.
   except the inspector in Work and the timeline in Operate.
 - Not yet built: work items, and environment identity beyond what Operate
   shows.
+
+## Amendment: content-led workbench styling
+
+- Date: 2026-11-07
+- Status: Accepted
+
+Work now defaults to a single Task Board area, with task details and suggestions
+inside that surface. The former stock 68/32 Task Board–Inspector split is upgraded
+when restored; other saved compositions keep their editor choices and geometry.
+The inspector remains available from the area selector and split controls.
+
+The default dark palette uses neutral graphite and a restrained blue accent,
+while custom theme overrides remain intact. Workspace navigation uses subtle
+selection fills and an accent underline. Interface text defaults to the native
+system font, with 13px body text and 12px secondary labels; code and terminal
+content keep the configured monospace font. Context colours are small identity
+markers rather than filled badges. Shared toolbar and area controls use a
+font-independent vector stroke grid. Content areas have a small outer inset and
+subtle boundaries, following the hierarchy recommendations from the WebStorm
+assessment. Area focus is shown in the area header rather than with an accent
+frame around the whole document. Explore uses
+a compact file toolbar and narrower explorer, and Review uses a narrower change
+rail so source and diffs have more room. Navigation surfaces recede from the
+canvas in both light and dark themes; user base and accent choices still apply.
+This changes presentation only: session ownership and layout encoding are unchanged.
+
+## Amendment: purpose-specific editor areas
+
+- Date: 2026-11-07
+- Status: Accepted
+
+The area chooser groups views by Develop, Explore and Operate, filters by name
+and purpose, and owns keyboard input while open. Only mountable editor types
+are offered: Terminal in Build, session-free views elsewhere. Search, selection
+and scrolling are transient view state; editor codes and saved layouts stay valid.
+
+Graph camera and lens changes now update the session-free tree that owns the
+visible graph, rather than the Build session tree. Inspector follows visible
+graph selection, then selected task/file context, with project details as a
+fallback. Code Editor hides its built-in file rail when a separate Outliner is
+mounted. Supporting areas use readable introductions, wrapping details and
+explicit availability states. The unused Timeline pause control is removed;
+its view remains an observed event log rather than implying it pauses collection.
+
+Opening a file from an explorer, diagnostic or graph reveals an existing code
+area, or splits beside the source view so navigation remains available. At the
+area limit it reuses the focused session-free area; it never replaces a terminal.
+Smart-group file rows open files and directory rows reveal the normal tree.
+Graph cards use reduced metadata at lower zoom levels to retain readable labels
+without overlapping their neighbours.
+
+## Amendment: navigable project explorer
+
+- Date: 2026-11-07
+- Status: Accepted
+
+The conventional folder tree is the default for new workspaces. Its first scan
+collapses directories, revealing ancestors of an already open file; refresh
+preserves expansion choices. A shared browser model supplies both the embedded
+file rail and standalone Outliner, with path search, keyboard navigation,
+active-file reveal, relative-path copying and independent list scrolling.
+Ctrl+P (or Command+P) focuses file search when a file view is present; terminal
+workspaces retain their shell key handling. Search reaches collapsed folders
+and lists files with their parent paths, with at most 200 rendered results.
+The cancellable scanner indexes up to 20,000 entries and 16 directory levels,
+continues respecting ignores and does not follow directory symlinks. Reaching
+the entry limit is shown in the browser. Query and navigation focus are
+transient; no file mutations, dependencies or storage migrations are introduced.
+
+## Amendment: language-aware file marks
+
+- Date: 2026-11-08
+- Status: Accepted
+
+Explorer rows, file search, smart groups, change lists and the open-file header
+use shared filename-based language/file-type marks. Common source extensions,
+compound TypeScript extensions, dotfiles and extensionless project files are
+recognised; unknown files retain the document icon. Identification does not
+imply syntax-highlighting or language-server availability. File icon colours
+have separate semantic theme slots with contrast checks and optional theme
+file overrides, so file types do not borrow warning/error colours. The marks
+are rendered locally and add no icon-font, asset download or crate dependency.

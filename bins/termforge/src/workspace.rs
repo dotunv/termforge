@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::panes::{AreaId, Axis, EditorKind, InspectorState, LogStreamState, PaneTree};
+use crate::panes::{AreaId, Axis, EditorKind, LogStreamState, PaneTree};
 
 /// The top-level activities of the workbench.
 ///
@@ -79,20 +79,7 @@ impl Workspace {
     pub fn default_layout(self, mut next_id: impl FnMut() -> AreaId) -> Option<PaneTree> {
         let tree = match self {
             Self::Build => return None,
-            Self::Work => {
-                let board = next_id();
-                let inspector = next_id();
-                let mut tree = PaneTree::new_with_editor(board, EditorKind::TaskBoard);
-                let _ = tree.split_with_editor(
-                    board,
-                    Axis::Horizontal,
-                    0.68,
-                    inspector,
-                    EditorKind::Inspector(InspectorState::default()),
-                );
-                let _ = tree.set_focus(board);
-                tree
-            }
+            Self::Work => PaneTree::new_with_editor(next_id(), EditorKind::TaskBoard),
             Self::Explore => PaneTree::new_with_editor(next_id(), EditorKind::CodeEditor),
             Self::Review => PaneTree::new_with_editor(next_id(), EditorKind::GitDiff),
             Self::Operate => {

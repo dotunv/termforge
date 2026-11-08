@@ -188,10 +188,7 @@ impl TerminalView {
 
     pub(super) fn header(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let t = &self.theme;
-        let branch = self
-            .tabs
-            .get(self.active_tab)
-            .and_then(|tab| tab.branch.as_deref());
+        let compact = f32::from(self.pane_area.size.width) < 720.0;
         div()
             .w_full()
             .flex_none()
@@ -203,124 +200,70 @@ impl TerminalView {
             .border_color(hsla(t.border))
             .child(
                 div()
-                    .h(px(36.0))
+                    .h(px(42.0))
                     .w_full()
-                    .px(px(tokens::space::SM))
+                    .px(px(tokens::space::MD))
                     .flex()
                     .items_center()
-                    .gap(px(tokens::space::SM))
+                    .gap(px(tokens::space::MD))
                     .overflow_hidden()
+                    .when(!self.show_sidebar, |d| {
+                        d.child(self.icon_button(
+                            "header-show-sidebar",
+                            "☰",
+                            cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
+                        ))
+                        .child(
+                            div()
+                                .max_w(px(120.0))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(px(tokens::text::MD))
+                                .text_color(hsla(t.text))
+                                .child(SharedString::from(self.project_name())),
+                        )
+                    })
                     .child(
                         div()
                             .flex_none()
                             .flex()
                             .items_center()
-                            .gap(px(6.0))
-                            .when(!self.show_sidebar, |d| {
-                                d.child(self.icon_button(
-                                    "header-show-sidebar",
-                                    "☰",
-                                    cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
-                                ))
-                            })
-                            .child(
+                            .gap(px(4.0))
+                            .children(Workspace::ALL.into_iter().map(|workspace| {
+                                let active = self.workspace == workspace;
                                 div()
+                                    .id(SharedString::from(format!(
+                                        "header-workspace-{}",
+                                        workspace.label()
+                                    )))
+                                    .h(px(28.0))
+                                    .px(px(if compact {
+                                        tokens::space::SM
+                                    } else {
+                                        tokens::space::MD
+                                    }))
                                     .flex()
                                     .items_center()
-                                    .gap(px(5.0))
-                                    .px(px(6.0))
-                                    .h(px(22.0))
+                                    .gap(px(tokens::space::SM))
                                     .rounded(px(tokens::radius::SM))
-                                    .bg(hsla(t.bg_app))
-                                    .border_1()
-                                    .border_color(hsla(t.border))
-                                    .child(
-                                        div()
-                                            .text_size(px(10.0))
-                                            .text_color(hsla(t.accent))
-                                            .child("◆"),
-                                    )
-                                    .child(
-                                        div()
-                                            .max_w(px(110.0))
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
-                                            .text_size(px(tokens::text::XS))
+                                    .text_size(px(tokens::text::SM))
+                                    .when(active, |d| {
+                                        d.bg(with_alpha(hsla(t.accent), 0.12))
                                             .text_color(hsla(t.text))
-                                            .child(SharedString::from(self.project_name())),
-                                    )
-                                    .when_some(branch, |d, branch| {
-                                        d.child(
-                                            div()
-                                                .max_w(px(96.0))
-                                                .overflow_hidden()
-                                                .whitespace_nowrap()
-                                                .text_size(px(10.0))
-                                                .text_color(hsla(t.text_faint))
-                                                .child(SharedString::from(format!("⎇ {branch}"))),
-                                        )
-                                    }),
-                            )
-                            .child(self.context_badge("header-context-badge", cx)),
-                    )
-                    .child(
-                        div()
-                            .w(px(1.0))
-                            .h(px(14.0))
-                            .flex_none()
-                            .bg(with_alpha(hsla(t.border), 0.7)),
-                    )
-                    .child(
-                        // Activity navigation keeps project tools in the foreground.
-                        div()
-                            .flex_none()
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .gap(px(2.0))
-                            .children(
-                                [
-                                    Workspace::Work,
-                                    Workspace::Explore,
-                                    Workspace::Build,
-                                    Workspace::Review,
-                                    Workspace::Operate,
-                                ]
-                                .into_iter()
-                                .map(|artifact| {
-                                    let active = self.workspace == artifact;
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "header-workspace-{}",
-                                            artifact.label()
-                                        )))
-                                        .h_full()
-                                        .px(px(9.0))
-                                        .flex()
-                                        .items_center()
-                                        .text_size(px(tokens::text::XS))
-                                        .border_b_2()
-                                        .border_color(if active {
-                                            hsla(t.accent)
-                                        } else {
-                                            gpui::transparent_black()
+                                            .border_b_2()
+                                            .border_color(hsla(t.accent))
+                                    })
+                                    .when(!active, |d| {
+                                        d.text_color(hsla(t.text_muted)).hover(|style| {
+                                            style.bg(hsla(t.bg_hover)).text_color(hsla(t.text))
                                         })
-                                        .when(active, |d| {
-                                            d.bg(with_alpha(hsla(t.accent), 0.10))
-                                                .text_color(hsla(t.text))
-                                        })
-                                        .when(!active, |d| {
-                                            d.text_color(hsla(t.text_muted)).hover(|style| {
-                                                style.bg(hsla(t.bg_hover)).text_color(hsla(t.text))
-                                            })
-                                        })
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.switch_workspace(artifact, cx);
-                                        }))
-                                        .child(artifact.label())
-                                }),
-                            ),
+                                    })
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.switch_workspace(workspace, cx)
+                                    }))
+                                    .child(workspace.label())
+                            })),
                     )
                     .child(
                         self.drag_region("header-drag")
@@ -328,6 +271,7 @@ impl TerminalView {
                             .min_w(px(8.0))
                             .h_full(),
                     )
+                    .child(self.context_badge("header-context-badge", cx))
                     .child(
                         div()
                             .flex_none()
@@ -337,15 +281,12 @@ impl TerminalView {
                             .child(
                                 div()
                                     .id("header-command-palette")
-                                    .h(px(22.0))
-                                    .px(px(7.0))
+                                    .h(px(28.0))
+                                    .px(px(tokens::space::SM))
                                     .flex()
                                     .items_center()
-                                    .gap(px(4.0))
+                                    .gap(px(tokens::space::MD))
                                     .rounded(px(tokens::radius::SM))
-                                    .border_1()
-                                    .border_color(hsla(t.border))
-                                    .bg(hsla(t.bg_app))
                                     .text_size(px(tokens::text::XS))
                                     .text_color(hsla(t.text_muted))
                                     .cursor_pointer()
@@ -353,8 +294,14 @@ impl TerminalView {
                                         style.bg(hsla(t.bg_hover)).text_color(hsla(t.text))
                                     })
                                     .on_click(cx.listener(|this, _, _, cx| this.open_palette(cx)))
-                                    .child(div().text_color(hsla(t.accent)).child("⌘K"))
-                                    .child("Search"),
+                                    .when(!compact, |d| d.child("Search"))
+                                    .child(div().text_color(hsla(t.text_faint)).child(
+                                        if cfg!(target_os = "macos") {
+                                            "⌃⇧P"
+                                        } else {
+                                            "Ctrl Shift P"
+                                        },
+                                    )),
                             )
                             .child(self.icon_button(
                                 "header-toggle-utility-dock",

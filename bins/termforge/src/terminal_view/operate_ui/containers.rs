@@ -94,8 +94,8 @@ impl TerminalView {
         let t = &self.theme;
         let mut out: Vec<gpui::AnyElement> = Vec::new();
         let title = match self.container_runtime {
-            Some(runtime) => format!("CONTAINERS ({runtime})"),
-            None => "CONTAINERS".to_owned(),
+            Some(runtime) => format!("Containers · {runtime}"),
+            None => "Containers".to_owned(),
         };
         out.push(self.operate_section_dyn(title).into_any_element());
         if self.spawn.ssh_host.is_some() {

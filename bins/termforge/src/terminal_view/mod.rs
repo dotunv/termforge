@@ -39,8 +39,8 @@ use crate::appearance::Appearance;
 use crate::fonts::{ui_family, MonoFont};
 use crate::paint::{hsla, paint_grid, with_alpha, BlockMark, Metrics, Overlay, PaintArgs};
 use crate::panes::{
-    AreaId, Axis, CanvasState, Dir, EditorKind, EditorKindTag, InspectorState, LogStreamState,
-    PaneId, PaneTree, ProjectTreeState, Rect as PaneRect,
+    AreaId, Axis, CanvasState, Dir, EditorKind, EditorKindTag, InspectorState, PaneId, PaneTree,
+    ProjectTreeState, Rect as PaneRect,
 };
 use crate::remote_session::{self, Attach, SessionHandle};
 use crate::surface::{self, DockTab, GitChange, Inspector};
@@ -53,6 +53,7 @@ mod accounts;
 mod areas;
 mod chrome;
 mod customize;
+mod file_browser;
 mod ime;
 mod input;
 mod operate_ui;
@@ -610,6 +611,7 @@ pub struct TerminalView {
     workspace: Workspace,
     /// Whether project files are organized by purpose or by their real paths.
     file_explorer_mode: FileExplorerMode,
+    file_browser: file_browser::FileBrowserState,
     /// File currently open in the Files environment, relative to the project root.
     selected_project_file: Option<PathBuf>,
     /// Transactional buffer backing the Files editor.
@@ -723,6 +725,10 @@ pub struct TerminalView {
     activity_baseline: operate_ui::ActivityBaseline,
     /// Area whose top-left editor selector dropdown is currently open.
     open_area_selector: Option<AreaId>,
+    area_selector_query: String,
+    area_selector_index: usize,
+    area_selector_scroll: gpui::ScrollHandle,
+    environment_show_unavailable: bool,
     /// Area maximized inside the split tree, if any.
     maximized_area: Option<AreaId>,
     /// Central interactive 2D viewport pan/zoom/selection state.
@@ -733,8 +739,6 @@ pub struct TerminalView {
     #[allow(dead_code)] // Legacy layout state pending removal with the spatial presets.
     outliner_state: ProjectTreeState,
     /// Shared timeline waterfall state.
-    timeline_state: LogStreamState,
-
     _pump: Option<Task<()>>,
     _update_check: Option<Task<()>>,
     /// Polls the config, themes and fonts for outside edits.
@@ -858,7 +862,8 @@ impl TerminalView {
             terminal_maximized: false,
             dock_collapsed: false,
             workspace: Workspace::Explore,
-            file_explorer_mode: FileExplorerMode::Smart,
+            file_explorer_mode: FileExplorerMode::Tree,
+            file_browser: file_browser::FileBrowserState::default(),
             selected_project_file: None,
             editor_buffer: None,
             editor_buffers: HashMap::new(),
@@ -940,11 +945,14 @@ impl TerminalView {
             activity_filter_focus: false,
             activity_baseline: operate_ui::ActivityBaseline::default(),
             open_area_selector: None,
+            area_selector_query: String::new(),
+            area_selector_index: 0,
+            area_selector_scroll: gpui::ScrollHandle::new(),
+            environment_show_unavailable: false,
             maximized_area: None,
             canvas_state: CanvasState::default(),
             inspector_state: InspectorState::default(),
             outliner_state: ProjectTreeState::default(),
-            timeline_state: LogStreamState::default(),
             _pump: None,
             _update_check: None,
             _appearance_watch: None,
@@ -1634,14 +1642,23 @@ impl Render for TerminalView {
             .bg(hsla(self.theme.bg_app))
             .font_family(self.ui_font.clone())
             .text_size(px(tokens::text::MD))
+            .line_height(relative(1.4))
             .text_color(hsla(self.theme.text))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                let closed = this.open_area_selector.take().is_some();
+                let blurred = this.file_browser.focus.take().is_some();
+                if closed || blurred { cx.notify(); }
+            }))
             .when(self.show_sidebar, |d| d.child(self.workspace_sidebar(cx)))
             .child(
                 div()
                     .id("workspace-main")
-                    .flex_1()
+                    .w(px((f32::from(window.viewport_size().width)
+                        - if self.show_sidebar { self.sidebar_width } else { 0.0 })
+                        .max(0.0)))
+                    .flex_none()
                     .flex()
                     .flex_col()
                     .bg(hsla(self.theme.bg_app))
@@ -1721,6 +1738,7 @@ impl Render for TerminalView {
                     .child(
                         div()
                             .flex_1()
+                            .min_w(px(0.0))
                             .min_h(px(0.0))
                             .flex()
                             .child(

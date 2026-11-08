@@ -161,8 +161,12 @@ impl TerminalView {
             .bg(hsla(t.bg_panel))
             .flex()
             .flex_col()
-            .gap(px(1.0))
-            .child(self.operate_section("SESSIONS, SERVICES AND AGENTS"))
+            .gap(px(tokens::space::SM))
+            .child(self.editor_intro(
+                "Services & sessions",
+                "Open a shell, follow output, or manage a service started here.",
+            ))
+            .child(self.operate_section("Sessions"))
             .children(rows.into_iter().map(|(index, tab, state, ended)| {
                 let managed = tab.managed.clone();
                 let color = match state {
@@ -194,9 +198,14 @@ impl TerminalView {
                 );
                 div()
                     .id(("service-row", tab_id as usize))
-                    .h(px(24.0))
+                    .min_h(px(48.0))
                     .px(px(tokens::space::SM))
+                    .py(px(tokens::space::SM))
+                    .border_1()
+                    .border_color(hsla(t.border))
+                    .bg(hsla(t.bg_app))
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(tokens::space::SM))
                     .rounded(px(tokens::radius::SM))
@@ -270,7 +279,7 @@ impl TerminalView {
                 "State comes from each shell's command marks. Processes TermForge did not \
                  start are not tracked.",
             ))
-            .child(self.operate_section("START"))
+            .child(self.operate_section("Launch a service"))
             .when(remote, |d| {
                 d.child(self.muted_line(
                     "Services start on this machine, not the remote host, so starting is off.",
@@ -312,7 +321,7 @@ impl TerminalView {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(self.operate_section("LISTENING PORTS (TCP)"))
+                    .child(self.operate_section("Listening ports · TCP"))
                     .child(
                         div()
                             .text_size(px(tokens::text::XS))
